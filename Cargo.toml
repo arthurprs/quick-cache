@@ -1,0 +1,25 @@
+[package]
+name = "quick_cache"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight and high performance concurrent cache"
+authors = ["Arthur Silva"]
+license = "MIT"
+keywords = ["lru", "concurrent", "cache"]
+categories = ["caching", "concurrency", "data-structures"]
+readme = "README.md"
+exclude = ["fuzz"]
+
+[dependencies]
+hashbrown = { version = "0.12", default-features = false, features = ["raw", "inline-more"] }
+ahash = "0.7"
+parking_lot = "0.12"
+
+[dev-dependencies]
+criterion = "0.3"
+rand = { version = "0.8", features = ["small_rng"] }
+rand_distr = "0.4"
+
+[[bench]]
+name = "benchmarks"
+harness = false
