@@ -19,6 +19,12 @@
 //! available for cases where you want a cache keyed by a tuple like `(T, U)`. But due to limitations
 //! of the `Borrow` trait you cannot access such keys without building the tuple and thus potentially
 //! cloning `T` and/or `U`.
+//!
+//! # Hasher
+//!
+//! By default the crate uses [ahash](https://crates.io/crates/ahash), which is enabled (by default) via
+//! a crate feature with the same name. If the `ahash` feature is disabled the crate defaults to the std lib
+//! implementation instead (currently Siphash13). Note that a custom hasher can also be provided if desirable.
 
 #[cfg(not(fuzzing))]
 mod linked_slab;
@@ -29,6 +35,11 @@ mod shard;
 pub mod sync;
 /// Non-concurrent cache variants.
 pub mod unsync;
+
+#[cfg(feature = "ahash")]
+type DefaultHashBuilder = ahash::RandomState;
+#[cfg(not(feature = "ahash"))]
+type DefaultHashBuilder = std::collections::hash_map::RandomState;
 
 #[cfg(test)]
 mod tests {

@@ -31,8 +31,8 @@ pub type Entry<Key, Ver, Val> = Result<Resident<Key, Ver, Val>, u64>;
 /// A version aware cache using a modified CLOCK-PRO eviction policy.
 /// The implementation allows some parallelism as gets don't require exclusive access.
 /// Any evicted items are returned so they can be dropped by the caller, outside the locks.
-pub struct VersionedCacheShard<Key: Eq + Hash, Ver: Eq + Hash, Val> {
-    hasher: ahash::RandomState,
+pub struct VersionedCacheShard<Key, Ver, Val, B> {
+    hash_builder: B,
     /// Map to an entry in the `entries` slab.
     /// Note that the actual key/version/value/hash are not stored in the map but in the slab.
     map: RawTable<Token>,
@@ -55,8 +55,8 @@ pub struct VersionedCacheShard<Key: Eq + Hash, Ver: Eq + Hash, Val> {
     misses: AtomicU64,
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val> VersionedCacheShard<Key, Ver, Val> {
-    pub fn new(initial_capacity: usize, max_capacity: usize, hasher: ahash::RandomState) -> Self {
+impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Key, Ver, Val, B> {
+    pub fn new(initial_capacity: usize, max_capacity: usize, hash_builder: B) -> Self {
         assert!(initial_capacity <= max_capacity);
         let max_capacity = max_capacity.max(2);
         let capacity_resident = max_capacity;
@@ -67,7 +67,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val> VersionedCacheShard<Key, Ver, Val> {
         // limit hot scan to ~= 100 + 20% max hot count
         let max_hot_scan = 100 + capacity_resident / 5;
         Self {
-            hasher,
+            hash_builder,
             map: RawTable::with_capacity(preallocated),
             entries: LinkedSlab::with_capacity(preallocated),
             capacity_resident,
@@ -102,7 +102,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val> VersionedCacheShard<Key, Ver, Val> {
     }
 
     #[inline]
-    fn hash_static<Q: ?Sized, W: ?Sized>(hasher: &ahash::RandomState, key: &Q, version: &W) -> u64
+    fn hash_static<Q: ?Sized, W: ?Sized>(hasher: &B, key: &Q, version: &W) -> u64
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
@@ -123,7 +123,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val> VersionedCacheShard<Key, Ver, Val> {
         Ver: Borrow<W>,
         W: Hash + Eq,
     {
-        Self::hash_static(&self.hasher, key, version)
+        Self::hash_static(&self.hash_builder, key, version)
     }
 
     #[inline]
@@ -319,7 +319,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val> VersionedCacheShard<Key, Ver, Val> {
                 continue;
             }
 
-            let hash = Self::hash_static(&self.hasher, &resident.key, &resident.version);
+            let hash = Self::hash_static(&self.hash_builder, &resident.key, &resident.version);
             let resident = mem::replace(entry, Err(hash)).unwrap();
             self.num_cold -= 1;
 
@@ -430,7 +430,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val> VersionedCacheShard<Key, Ver, Val> {
         } else {
             debug_assert_eq!(
                 *entry.as_ref().err().unwrap(),
-                Self::hash_static(&self.hasher, &key, &version)
+                Self::hash_static(&self.hash_builder, &key, &version)
             );
             *entry = Ok(Resident {
                 key,
@@ -532,7 +532,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val> VersionedCacheShard<Key, Ver, Val> {
         self.map.insert(hash, idx, |&i| {
             let (entry, _) = self.entries.get(i).unwrap();
             match entry {
-                Ok(r) => Self::hash_static(&self.hasher, &r.key, &r.version),
+                Ok(r) => Self::hash_static(&self.hash_builder, &r.key, &r.version),
                 Err(hash) => *hash,
             }
         });

@@ -1,6 +1,8 @@
-use super::shard::VersionedCacheShard;
-
-use std::{borrow::Borrow, hash::Hash};
+use crate::{shard::VersionedCacheShard, DefaultHashBuilder};
+use std::{
+    borrow::Borrow,
+    hash::{BuildHasher, Hash},
+};
 
 /// A version aware cache.
 ///
@@ -8,16 +10,17 @@ use std::{borrow::Borrow, hash::Hash};
 /// The key version pair exists for cases where you want a cache keyed by (T, U).
 /// Other rust maps/caches are accessed via the Borrow trait,
 /// so they require the caller to build &(T, U) which might involve cloning T and/or U.
-pub struct VersionedCache<Key: Eq + Hash, Ver: Eq + Hash, Val> {
-    shard: VersionedCacheShard<Key, Ver, Val>,
+pub struct VersionedCache<Key, Ver, Val, B = DefaultHashBuilder> {
+    shard: VersionedCacheShard<Key, Ver, Val, B>,
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val> VersionedCache<Key, Ver, Val> {
+impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: Default + BuildHasher>
+    VersionedCache<Key, Ver, Val, B>
+{
     /// Creates a new cache with holds up to `capacity` items (approximately).
     pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
         assert!(initial_capacity <= max_capacity);
-        let shard =
-            VersionedCacheShard::new(initial_capacity, max_capacity, ahash::RandomState::new());
+        let shard = VersionedCacheShard::new(initial_capacity, max_capacity, B::default());
         Self { shard }
     }
 
@@ -110,15 +113,15 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val> VersionedCache<Key, Ver, Val> {
     }
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val> std::fmt::Debug for VersionedCache<Key, Ver, Val> {
+impl<Key, Ver, Val> std::fmt::Debug for VersionedCache<Key, Ver, Val> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VersionedCache").finish_non_exhaustive()
     }
 }
 
-pub struct Cache<Key: Eq + Hash, Val>(VersionedCache<Key, (), Val>);
+pub struct Cache<Key, Val, B = DefaultHashBuilder>(VersionedCache<Key, (), Val, B>);
 
-impl<Key: Eq + Hash, Val> Cache<Key, Val> {
+impl<Key: Eq + Hash, Val, B: Default + Clone + BuildHasher> Cache<Key, Val, B> {
     /// Creates a new cache with holds up to `capacity` items (approximately).
     pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
         Self(VersionedCache::new(initial_capacity, max_capacity))

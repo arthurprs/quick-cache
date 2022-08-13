@@ -1,4 +1,4 @@
-use crate::shard::VersionedCacheShard;
+use crate::{shard::VersionedCacheShard, DefaultHashBuilder};
 use parking_lot::RwLock;
 use std::{
     borrow::Borrow,
@@ -20,18 +20,20 @@ use std::{
 /// # Thread Safety and Concurrency
 /// The cache instance can wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
-pub struct VersionedCache<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> {
-    hasher: ahash::RandomState,
-    shards: Box<[RwLock<VersionedCacheShard<Key, Ver, Val>>]>,
+pub struct VersionedCache<Key, Ver, Val, B = DefaultHashBuilder> {
+    hash_builder: B,
+    shards: Box<[RwLock<VersionedCacheShard<Key, Ver, Val, B>>]>,
     shards_mask: usize,
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> VersionedCache<Key, Ver, Val> {
+impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: Default + BuildHasher + Clone>
+    VersionedCache<Key, Ver, Val, B>
+{
     /// Creates a new cache with holds up to `max_capacity` items (approximately)
     /// and have `initial_capacity` pre-allocated.
     pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
         assert!(initial_capacity <= max_capacity);
-        let hasher = ahash::RandomState::new();
+        let hasher = B::default();
         let mut num_shards = std::thread::available_parallelism()
             .map_or(2, |n| n.get() * 2)
             .min(max_capacity)
@@ -54,7 +56,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> VersionedCache<Key, Ver, Val> {
             .collect::<Vec<_>>();
         Self {
             shards: shards.into_boxed_slice(),
-            hasher,
+            hash_builder: hasher,
             shards_mask: num_shards - 1,
         }
     }
@@ -83,14 +85,14 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> VersionedCache<Key, Ver, Val> {
         &self,
         key: &Q,
         version: &W,
-    ) -> Option<(&RwLock<VersionedCacheShard<Key, Ver, Val>>, u64)>
+    ) -> Option<(&RwLock<VersionedCacheShard<Key, Ver, Val, B>>, u64)>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
         Ver: Borrow<W>,
         W: Hash + Eq,
     {
-        let mut hasher = self.hasher.build_hasher();
+        let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
         version.hash(&mut hasher);
         let hash = hasher.finish();
@@ -167,9 +169,9 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> std::fmt::Debug for VersionedCa
 /// # Thread Safety and Concurrency
 /// The cache instance can wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
-pub struct Cache<Key: Eq + Hash, Val: Clone>(VersionedCache<Key, (), Val>);
+pub struct Cache<Key, Val, B = DefaultHashBuilder>(VersionedCache<Key, (), Val, B>);
 
-impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val> {
+impl<Key: Eq + Hash, Val: Clone, B: Default + Clone + BuildHasher> Cache<Key, Val, B> {
     /// Creates a new cache with holds up to `capacity` items (approximately).
     pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
         Self(VersionedCache::new(initial_capacity, max_capacity))

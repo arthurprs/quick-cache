@@ -10,9 +10,12 @@ categories = ["caching", "concurrency", "data-structures"]
 readme = "README.md"
 exclude = ["fuzz"]
 
+[features]
+default = ["dep:ahash"]
+
 [dependencies]
+ahash = { optional = true, version = "0.7" }
 hashbrown = { version = "0.12", default-features = false, features = ["raw", "inline-more"] }
-ahash = "0.7"
 parking_lot = "0.12"
 
 [dev-dependencies]
