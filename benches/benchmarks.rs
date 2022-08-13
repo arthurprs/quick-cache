@@ -19,7 +19,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
                         || {
                             let mut rng = SmallRng::seed_from_u64(1);
                             let dist = Zipf::new(population, s).unwrap();
-                            let cache = Cache::<usize, usize>::new(capacity, capacity);
+                            let cache = Cache::new(capacity, capacity);
                             for i in 0..population * 3 {
                                 let sample = dist.sample(&mut rng) as usize;
                                 cache.insert(sample, sample);

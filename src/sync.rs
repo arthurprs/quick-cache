@@ -27,14 +27,25 @@ pub struct VersionedCache<Key, Ver, Val, B = DefaultHashBuilder> {
     shards_mask: usize,
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: Default + BuildHasher + Clone>
+impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> VersionedCache<Key, Ver, Val, DefaultHashBuilder> {
+    /// Creates a new cache with holds up to `max_capacity` items (approximately)
+    /// and have `initial_capacity` pre-allocated.
+    pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
+        Self::with_hasher(
+            initial_capacity,
+            max_capacity,
+            DefaultHashBuilder::default(),
+        )
+    }
+}
+
+impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: BuildHasher + Clone>
     VersionedCache<Key, Ver, Val, B>
 {
     /// Creates a new cache with holds up to `max_capacity` items (approximately)
     /// and have `initial_capacity` pre-allocated.
-    pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
+    pub fn with_hasher(initial_capacity: usize, max_capacity: usize, hasher: B) -> Self {
         assert!(initial_capacity <= max_capacity);
-        let hasher = B::default();
         let mut num_shards = std::thread::available_parallelism()
             .map_or(2, |n| n.get() * 2)
             .min(max_capacity)
@@ -179,10 +190,21 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> std::fmt::Debug for VersionedCa
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
 pub struct Cache<Key, Val, B = DefaultHashBuilder>(VersionedCache<Key, (), Val, B>);
 
-impl<Key: Eq + Hash, Val: Clone, B: Default + Clone + BuildHasher> Cache<Key, Val, B> {
+impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, DefaultHashBuilder> {
     /// Creates a new cache with holds up to `capacity` items (approximately).
     pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
         Self(VersionedCache::new(initial_capacity, max_capacity))
+    }
+}
+
+impl<Key: Eq + Hash, Val: Clone, B: Clone + BuildHasher> Cache<Key, Val, B> {
+    /// Creates a new cache with holds up to `capacity` items (approximately).
+    pub fn with_hasher(initial_capacity: usize, max_capacity: usize, hash_builder: B) -> Self {
+        Self(VersionedCache::with_hasher(
+            initial_capacity,
+            max_capacity,
+            hash_builder,
+        ))
     }
 
     /// Returns whether the cache is empty
@@ -266,10 +288,7 @@ mod tests {
         const ITEMS_PER_THREAD: usize = 1_000;
         let mut threads = Vec::new();
         let barrier = Arc::new(Barrier::new(N_THREAD_PAIRS * 2));
-        let cache = Arc::new(Cache::<usize, usize>::new(
-            0,
-            N_THREAD_PAIRS * ITEMS_PER_THREAD / 10,
-        ));
+        let cache = Arc::new(Cache::new(0, N_THREAD_PAIRS * ITEMS_PER_THREAD / 10));
         for t in 0..N_THREAD_PAIRS {
             let barrier = barrier.clone();
             let cache = cache.clone();

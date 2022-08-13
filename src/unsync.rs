@@ -14,13 +14,26 @@ pub struct VersionedCache<Key, Ver, Val, B = DefaultHashBuilder> {
     shard: VersionedCacheShard<Key, Ver, Val, B>,
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: Default + BuildHasher>
+impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> VersionedCache<Key, Ver, Val, DefaultHashBuilder> {
+    /// Creates a new cache with holds up to `max_capacity` items (approximately)
+    /// and have `initial_capacity` pre-allocated.
+    pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
+        Self::with_hasher(
+            initial_capacity,
+            max_capacity,
+            DefaultHashBuilder::default(),
+        )
+    }
+}
+
+impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: BuildHasher + Clone>
     VersionedCache<Key, Ver, Val, B>
 {
-    /// Creates a new cache with holds up to `capacity` items (approximately).
-    pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
+    /// Creates a new cache with holds up to `max_capacity` items (approximately)
+    /// and have `initial_capacity` pre-allocated.
+    pub fn with_hasher(initial_capacity: usize, max_capacity: usize, hasher: B) -> Self {
         assert!(initial_capacity <= max_capacity);
-        let shard = VersionedCacheShard::new(initial_capacity, max_capacity, B::default());
+        let shard = VersionedCacheShard::new(initial_capacity, max_capacity, hasher);
         Self { shard }
     }
 
@@ -126,10 +139,21 @@ impl<Key, Ver, Val> std::fmt::Debug for VersionedCache<Key, Ver, Val> {
 
 pub struct Cache<Key, Val, B = DefaultHashBuilder>(VersionedCache<Key, (), Val, B>);
 
-impl<Key: Eq + Hash, Val, B: Default + Clone + BuildHasher> Cache<Key, Val, B> {
+impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, DefaultHashBuilder> {
     /// Creates a new cache with holds up to `capacity` items (approximately).
     pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
         Self(VersionedCache::new(initial_capacity, max_capacity))
+    }
+}
+
+impl<Key: Eq + Hash, Val: Clone, B: Clone + BuildHasher> Cache<Key, Val, B> {
+    /// Creates a new cache with holds up to `capacity` items (approximately).
+    pub fn with_hasher(initial_capacity: usize, max_capacity: usize, hasher: B) -> Self {
+        Self(VersionedCache::with_hasher(
+            initial_capacity,
+            max_capacity,
+            hasher,
+        ))
     }
 
     /// Returns whether the cache is empty
