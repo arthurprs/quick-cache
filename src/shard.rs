@@ -253,11 +253,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
         Ver: Borrow<W>,
         W: Hash + Eq,
     {
-        let idx = if let Some(idx) = self.search(hash, key, version) {
-            idx
-        } else {
-            return None;
-        };
+        let idx = self.search(hash, key, version)?;
         self.remove_from_map(hash, idx);
         let (entry, next) = self.entries.remove(idx).unwrap();
         let list_head = match &entry {
