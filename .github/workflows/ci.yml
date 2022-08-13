@@ -1,41 +1,49 @@
-on: [push, pull_request]
-
 name: Continuous integration
 
-jobs:
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
+on:
+  push:
+    branches: [master]
+  pull_request:
 
+jobs:
   test:
-    name: Test Suite
+    name: Tests
     runs-on: ubuntu-latest
     steps:
+      - uses: styfle/cancel-workflow-action@0.10.0
+        with:
+          access_token: ${{ github.token }}
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
           override: true
-      - uses: actions-rs/cargo@v1
+      - run: cargo test
+
+  fuzz-tests:
+    name: Fuzz tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: styfle/cancel-workflow-action@0.10.0
         with:
-          command: test
+          access_token: ${{ github.token }}
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+      - run: cargo install cargo-fuzz
       - run: for fuzz_test in `cargo fuzz list`; do cargo fuzz run $fuzz_test -- -max_total_time=30 || exit 1; done
 
-  fmt:
-    name: Rustfmt
+  lint:
+    name: Rustfmt & Clippy
     runs-on: ubuntu-latest
     steps:
+      - uses: styfle/cancel-workflow-action@0.10.0
+        with:
+          access_token: ${{ github.token }}
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
         with:
@@ -47,17 +55,6 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
       - run: rustup component add clippy
       - uses: actions-rs/cargo@v1
         with:

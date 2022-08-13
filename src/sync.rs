@@ -22,6 +22,7 @@ use std::{
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
 pub struct VersionedCache<Key, Ver, Val, B = DefaultHashBuilder> {
     hash_builder: B,
+    #[allow(clippy::type_complexity)]
     shards: Box<[RwLock<VersionedCacheShard<Key, Ver, Val, B>>]>,
     shards_mask: usize,
 }
@@ -61,6 +62,11 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: Default + BuildHasher + Clon
         }
     }
 
+    /// Returns whether the cache is empty
+    pub fn is_empty(&self) -> bool {
+        self.shards.iter().any(|s| s.read().len() == 0)
+    }
+
     /// Returns the number of cached items
     pub fn len(&self) -> usize {
         self.shards.iter().map(|s| s.read().len()).sum()
@@ -81,6 +87,8 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: Default + BuildHasher + Clon
         self.shards.iter().map(|s| s.read().hits()).sum()
     }
 
+    #[allow(clippy::type_complexity)]
+    #[inline]
     fn shard_for<Q: ?Sized, W: ?Sized>(
         &self,
         key: &Q,
@@ -135,7 +143,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: Default + BuildHasher + Clon
         Ver: Borrow<W>,
         W: Hash + Eq,
     {
-        if let Some((shard, hash)) = self.shard_for(&key, &version) {
+        if let Some((shard, hash)) = self.shard_for(key, version) {
             // Any evictions will be dropped outside of the lock
             let evicted = shard.write().remove(hash, key, version);
             matches!(evicted, Some(Ok(_)))
@@ -175,6 +183,11 @@ impl<Key: Eq + Hash, Val: Clone, B: Default + Clone + BuildHasher> Cache<Key, Va
     /// Creates a new cache with holds up to `capacity` items (approximately).
     pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
         Self(VersionedCache::new(initial_capacity, max_capacity))
+    }
+
+    /// Returns whether the cache is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// Returns the number of cached items
@@ -249,11 +262,14 @@ mod tests {
     #[test]
     fn test_multiple_threads() {
         const N_THREAD_PAIRS: usize = 8;
-        const N_ROUNDS: usize = 5_000;
+        const N_ROUNDS: usize = 1_000;
         const ITEMS_PER_THREAD: usize = 1_000;
         let mut threads = Vec::new();
         let barrier = Arc::new(Barrier::new(N_THREAD_PAIRS * 2));
-        let cache = Arc::new(Cache::new(0, N_THREAD_PAIRS * ITEMS_PER_THREAD / 10));
+        let cache = Arc::new(Cache::<usize, usize>::new(
+            0,
+            N_THREAD_PAIRS * ITEMS_PER_THREAD / 10,
+        ));
         for t in 0..N_THREAD_PAIRS {
             let barrier = barrier.clone();
             let cache = cache.clone();

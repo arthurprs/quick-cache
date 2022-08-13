@@ -24,6 +24,11 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: Default + BuildHasher>
         Self { shard }
     }
 
+    /// Returns whether the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.shard.len() == 0
+    }
+
     /// Returns the number of cached items
     pub fn len(&self) -> usize {
         self.shard.len()
@@ -101,7 +106,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: Default + BuildHasher>
     {
         matches!(
             self.shard
-                .remove(self.shard.hash(&key, &version), key, version),
+                .remove(self.shard.hash(key, version), key, version),
             Some(Ok(_))
         )
     }
@@ -125,6 +130,11 @@ impl<Key: Eq + Hash, Val, B: Default + Clone + BuildHasher> Cache<Key, Val, B> {
     /// Creates a new cache with holds up to `capacity` items (approximately).
     pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
         Self(VersionedCache::new(initial_capacity, max_capacity))
+    }
+
+    /// Returns whether the cache is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// Returns the number of cached items
