@@ -37,9 +37,22 @@ pub mod sync;
 pub mod unsync;
 
 #[cfg(feature = "ahash")]
-type DefaultHashBuilder = ahash::RandomState;
+pub type DefaultHashBuilder = ahash::RandomState;
 #[cfg(not(feature = "ahash"))]
-type DefaultHashBuilder = std::collections::hash_map::RandomState;
+pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
+
+pub trait Weighter<Key, Ver, Val> {
+    fn weight(&self, key: &Key, version: &Ver, val: &Val) -> u32;
+}
+
+#[derive(Debug, Clone)]
+pub struct UnitWeighter;
+
+impl<Key, Ver, Val> Weighter<Key, Ver, Val> for UnitWeighter {
+    fn weight(&self, _key: &Key, _ver: &Ver, _val: &Val) -> u32 {
+        1
+    }
+}
 
 #[cfg(test)]
 mod tests {

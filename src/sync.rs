@@ -1,4 +1,4 @@
-use crate::{shard::VersionedCacheShard, DefaultHashBuilder};
+use crate::{shard::VersionedCacheShard, DefaultHashBuilder, UnitWeighter, Weighter};
 use parking_lot::RwLock;
 use std::{
     borrow::Borrow,
@@ -20,48 +20,64 @@ use std::{
 /// # Thread Safety and Concurrency
 /// The cache instance can wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
-pub struct VersionedCache<Key, Ver, Val, B = DefaultHashBuilder> {
+pub struct VersionedCache<Key, Ver, Val, We = UnitWeighter, B = DefaultHashBuilder> {
     hash_builder: B,
     #[allow(clippy::type_complexity)]
-    shards: Box<[RwLock<VersionedCacheShard<Key, Ver, Val, B>>]>,
-    shards_mask: usize,
+    shards: Box<[RwLock<VersionedCacheShard<Key, Ver, Val, We, B>>]>,
+    shards_mask: u64,
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> VersionedCache<Key, Ver, Val, DefaultHashBuilder> {
+impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone>
+    VersionedCache<Key, Ver, Val, UnitWeighter, DefaultHashBuilder>
+{
     /// Creates a new cache with holds up to `max_capacity` items (approximately)
     /// and have `initial_capacity` pre-allocated.
-    pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
-        Self::with_hasher(
-            initial_capacity,
-            max_capacity,
+    pub fn new(estimated_items_capacity: usize, weight_capacity: u64) -> Self {
+        Self::with(
+            estimated_items_capacity,
+            weight_capacity,
+            UnitWeighter,
             DefaultHashBuilder::default(),
         )
     }
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: BuildHasher + Clone>
-    VersionedCache<Key, Ver, Val, B>
+impl<
+        Key: Eq + Hash,
+        Ver: Eq + Hash,
+        Val: Clone,
+        We: Weighter<Key, Ver, Val> + Clone,
+        B: BuildHasher + Clone,
+    > VersionedCache<Key, Ver, Val, We, B>
 {
     /// Creates a new cache with holds up to `max_capacity` items (approximately)
     /// and have `initial_capacity` pre-allocated.
-    pub fn with_hasher(initial_capacity: usize, max_capacity: usize, hasher: B) -> Self {
-        assert!(initial_capacity <= max_capacity);
+    pub fn with(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+        hasher: B,
+    ) -> Self {
         let mut num_shards = std::thread::available_parallelism()
             .map_or(2, |n| n.get() * 2)
-            .min(max_capacity)
-            .next_power_of_two();
-        let mut shard_max_capacity = max_capacity.saturating_add(num_shards - 1) / num_shards;
+            .min(estimated_items_capacity)
+            .next_power_of_two() as u64;
+        let estimated_items_capacity = estimated_items_capacity as u64;
+        let mut shard_max_capacity =
+            estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
+        let mut shard_max_weight = weight_capacity.saturating_add(num_shards - 1) / num_shards;
         // try to make each shard hold at least 32 items
         while shard_max_capacity < 32 && num_shards > 1 {
             num_shards /= 2;
-            shard_max_capacity = max_capacity.saturating_add(num_shards - 1) / num_shards;
+            shard_max_capacity =
+                estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
+            shard_max_weight = weight_capacity.saturating_add(num_shards - 1) / num_shards;
         }
-        let shard_initial_capacity = initial_capacity.saturating_add(num_shards - 1) / num_shards;
         let shards = (0..num_shards)
             .map(|_| {
                 RwLock::new(VersionedCacheShard::new(
-                    shard_initial_capacity,
-                    shard_max_capacity,
+                    shard_max_weight,
+                    weighter.clone(),
                     hasher.clone(),
                 ))
             })
@@ -83,8 +99,8 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: BuildHasher + Clone>
         self.shards.iter().map(|s| s.read().len()).sum()
     }
 
-    /// Returns the maximum number of cached items
-    pub fn capacity(&self) -> usize {
+    /// Returns the maximum weight of cached items
+    pub fn capacity(&self) -> u64 {
         self.shards.iter().map(|s| s.read().capacity()).sum()
     }
 
@@ -104,7 +120,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: BuildHasher + Clone>
         &self,
         key: &Q,
         version: &W,
-    ) -> Option<(&RwLock<VersionedCacheShard<Key, Ver, Val, B>>, u64)>
+    ) -> Option<(&RwLock<VersionedCacheShard<Key, Ver, Val, We, B>>, u64)>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
@@ -116,7 +132,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: BuildHasher + Clone>
         version.hash(&mut hasher);
         let hash = hasher.finish();
         self.shards
-            .get(hash as usize & self.shards_mask)
+            .get((hash & self.shards_mask) as usize)
             .map(|s| (s, hash))
     }
 
@@ -188,21 +204,34 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> std::fmt::Debug for VersionedCa
 /// # Thread Safety and Concurrency
 /// The cache instance can wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
-pub struct Cache<Key, Val, B = DefaultHashBuilder>(VersionedCache<Key, (), Val, B>);
+pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder>(
+    VersionedCache<Key, (), Val, We, B>,
+);
 
-impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, DefaultHashBuilder> {
+impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, UnitWeighter, DefaultHashBuilder> {
     /// Creates a new cache with holds up to `capacity` items (approximately).
-    pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
-        Self(VersionedCache::new(initial_capacity, max_capacity))
+    pub fn new(estimated_items_capacity: usize, weight_capacity: u64) -> Self {
+        Self(VersionedCache::new(
+            estimated_items_capacity,
+            weight_capacity,
+        ))
     }
 }
 
-impl<Key: Eq + Hash, Val: Clone, B: Clone + BuildHasher> Cache<Key, Val, B> {
+impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHasher + Clone>
+    Cache<Key, Val, We, B>
+{
     /// Creates a new cache with holds up to `capacity` items (approximately).
-    pub fn with_hasher(initial_capacity: usize, max_capacity: usize, hash_builder: B) -> Self {
-        Self(VersionedCache::with_hasher(
-            initial_capacity,
-            max_capacity,
+    pub fn with(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+        hash_builder: B,
+    ) -> Self {
+        Self(VersionedCache::with(
+            estimated_items_capacity,
+            weight_capacity,
+            weighter,
             hash_builder,
         ))
     }
@@ -217,8 +246,8 @@ impl<Key: Eq + Hash, Val: Clone, B: Clone + BuildHasher> Cache<Key, Val, B> {
         self.0.len()
     }
 
-    /// Returns the maximum number of cached items
-    pub fn capacity(&self) -> usize {
+    /// Returns the maximum weight of cached items
+    pub fn capacity(&self) -> u64 {
         self.0.capacity()
     }
 
