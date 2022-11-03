@@ -20,6 +20,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val>
     /// Creates a new cache with holds up to `items_capacity` items (approximately).
     pub fn new(items_capacity: usize) -> Self {
         Self::with(
+            items_capacity,
             items_capacity as u64,
             UnitWeighter,
             DefaultHashBuilder::default(),
@@ -30,10 +31,17 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val>
 impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildHasher>
     VersionedCache<Key, Ver, Val, We, B>
 {
-    /// Creates a new cache with holds up to `weight_capacity` weight.
-    /// The desired `Weighter` and `Hasher` can be passed as arguments.
-    pub fn with(weight_capacity: u64, weighter: We, hasher: B) -> Self {
-        let shard = VersionedCacheShard::new(weight_capacity, weighter, hasher);
+    /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
+    /// roughly equivalent to `weight_capacity / average item weight`.
+    pub fn with(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+        hasher: B,
+    ) -> Self {
+        let shard =
+            VersionedCacheShard::new(estimated_items_capacity, weight_capacity, weighter, hasher);
         Self { shard }
     }
 
@@ -149,9 +157,17 @@ impl<Key: Eq + Hash, Val> Cache<Key, Val, UnitWeighter, DefaultHashBuilder> {
 }
 
 impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key, Val, We, B> {
-    /// Creates a new cache with holds up to `capacity` items (approximately).
-    pub fn with(weight_capacity: u64, weighter: We, hasher: B) -> Self {
+    /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
+    /// roughly equivalent to `weight_capacity / average item weight`.
+    pub fn with(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+        hasher: B,
+    ) -> Self {
         Self(VersionedCache::with(
+            estimated_items_capacity,
             weight_capacity,
             weighter,
             hasher,

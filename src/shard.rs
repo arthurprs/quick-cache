@@ -63,22 +63,29 @@ pub struct VersionedCacheShard<Key, Ver, Val, We, B> {
 impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildHasher>
     VersionedCacheShard<Key, Ver, Val, We, B>
 {
-    pub fn new(max_capacity: u64, weighter: We, hash_builder: B) -> Self {
-        let max_capacity = max_capacity.max(2);
-        let capacity_resident = max_capacity as u64;
+    pub fn new(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+        hash_builder: B,
+    ) -> Self {
+        let weight_capacity = weight_capacity.max(2);
         // assign 1% of the capacity to cold items
-        let target_hot = capacity_resident - (capacity_resident / 100).max(1);
+        let target_hot = weight_capacity - (weight_capacity / 100).max(1);
+        assert!(weight_capacity >= 2);
+        assert!(target_hot >= 1);
+        assert!(weight_capacity - target_hot >= 1);
         Self {
             hash_builder,
             map: RawTable::with_capacity(0),
             entries: LinkedSlab::with_capacity(0),
-            weight_capacity: capacity_resident,
+            weight_capacity,
             hits: Default::default(),
             misses: Default::default(),
             cold_head: None,
             hot_head: None,
             ghost_head: None,
-            capacity_non_resident: 0,
+            capacity_non_resident: estimated_items_capacity / 2,
             weight_target_hot: target_hot,
             num_hot: 0,
             num_cold: 0,
@@ -92,8 +99,8 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
     /// Reserver additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&mut self, additional: usize) {
-        // extra 56% for non-resident entries
-        let additional = additional.saturating_add(additional / 2 + additional / 16);
+        // extra 50% for non-resident entries
+        let additional = additional.saturating_add(additional / 2);
         self.map.reserve(additional, |&idx| {
             let (entry, _) = self.entries.get(idx).unwrap();
             match entry {
@@ -556,9 +563,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         }
 
         let mut evicted;
-        let enter_hot;
-
-        if self.weight_hot + self.weight_cold + weight > self.weight_capacity {
+        let enter_hot = if self.weight_hot + self.weight_cold + weight > self.weight_capacity {
             // evict from cold to make space for this entry
             loop {
                 evicted = Some(self.evict());
@@ -566,17 +571,11 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
                     break;
                 }
             }
-            enter_hot = false;
+            false
         } else {
             // cache is filling up
             evicted = None;
-            enter_hot = self.weight_hot + weight <= self.weight_target_hot;
-            if !enter_hot {
-                // estimate non resident capacity to be ~56% of hot unit capacity (based on avg size estimation)
-                self.capacity_non_resident = ((self.weight_hot.saturating_add(self.weight_hot / 8)
-                    / self.num_hot as u64)
-                    / 2u64) as usize;
-            }
+            self.weight_hot + weight <= self.weight_target_hot
         };
 
         let (state, list_head) = if enter_hot {

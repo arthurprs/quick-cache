@@ -13,13 +13,12 @@ impl Weighter<u16, u16, ()> for MyWeighter {
 }
 
 fuzz_target!(|ops: Vec<u16>| {
-    if ops.len() < 2 {
+    if ops.len() < 3 {
         return;
     }
-    let initial_capacity = ops[0] as usize * 1000;
-    let max_capacity = (ops[1] as usize).max(initial_capacity).max(2) * 1000;
+    let max_capacity = ops[0] as u64 * ops[1] as u64 * ops[2].min(1000) as u64;
     let cache = VersionedCache::with(
-        initial_capacity,
+        ops[0] as usize,
         max_capacity,
         MyWeighter,
         DefaultHashBuilder::default(),

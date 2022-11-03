@@ -60,23 +60,23 @@ mod tests {
 
     #[test]
     fn test_new() {
-        sync::VersionedCache::<u64, u64, u64>::new(0, 0);
-        sync::VersionedCache::<u64, u64, u64>::new(0, 1);
-        sync::VersionedCache::<u64, u64, u64>::new(0, 2);
-        sync::VersionedCache::<u64, u64, u64>::new(0, 3);
-        sync::VersionedCache::<u64, u64, u64>::new(0, usize::MAX);
-        sync::Cache::<u64, u64>::new(0, 0);
-        sync::Cache::<u64, u64>::new(0, 1);
-        sync::Cache::<u64, u64>::new(0, 2);
-        sync::Cache::<u64, u64>::new(0, 3);
-        sync::Cache::<u64, u64>::new(0, usize::MAX);
+        sync::VersionedCache::<u64, u64, u64>::new(0);
+        sync::VersionedCache::<u64, u64, u64>::new(1);
+        sync::VersionedCache::<u64, u64, u64>::new(2);
+        sync::VersionedCache::<u64, u64, u64>::new(3);
+        sync::VersionedCache::<u64, u64, u64>::new(usize::MAX);
+        sync::Cache::<u64, u64>::new(0);
+        sync::Cache::<u64, u64>::new(1);
+        sync::Cache::<u64, u64>::new(2);
+        sync::Cache::<u64, u64>::new(3);
+        sync::Cache::<u64, u64>::new(usize::MAX);
     }
 
     #[test]
     fn test_borrow_keys() {
-        let cache = sync::VersionedCache::<Vec<u8>, Vec<u8>, u64>::new(0, 0);
+        let cache = sync::VersionedCache::<Vec<u8>, Vec<u8>, u64>::new(0);
         cache.get(&b""[..], &b""[..]);
-        let cache = sync::VersionedCache::<String, String, u64>::new(0, 0);
+        let cache = sync::VersionedCache::<String, String, u64>::new(0);
         cache.get("", "");
     }
 }

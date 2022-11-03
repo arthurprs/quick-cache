@@ -30,12 +30,11 @@ pub struct VersionedCache<Key, Ver, Val, We = UnitWeighter, B = DefaultHashBuild
 impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone>
     VersionedCache<Key, Ver, Val, UnitWeighter, DefaultHashBuilder>
 {
-    /// Creates a new cache with holds up to `max_capacity` items (approximately)
-    /// and have `initial_capacity` pre-allocated.
-    pub fn new(estimated_items_capacity: usize, weight_capacity: u64) -> Self {
+    /// Creates a new cache with holds up to `items_capacity` items (approximately).
+    pub fn new(items_capacity: usize) -> Self {
         Self::with(
-            estimated_items_capacity,
-            weight_capacity,
+            items_capacity,
+            items_capacity as u64,
             UnitWeighter,
             DefaultHashBuilder::default(),
         )
@@ -50,8 +49,9 @@ impl<
         B: BuildHasher + Clone,
     > VersionedCache<Key, Ver, Val, We, B>
 {
-    /// Creates a new cache with holds up to `max_capacity` items (approximately)
-    /// and have `initial_capacity` pre-allocated.
+    /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
+    /// roughly equivalent to `weight_capacity / average item weight`.
     pub fn with(
         estimated_items_capacity: usize,
         weight_capacity: u64,
@@ -59,23 +59,24 @@ impl<
         hasher: B,
     ) -> Self {
         let mut num_shards = std::thread::available_parallelism()
-            .map_or(2, |n| n.get() * 2)
+            .map_or(4, |n| n.get() * 4)
             .min(estimated_items_capacity)
             .next_power_of_two() as u64;
         let estimated_items_capacity = estimated_items_capacity as u64;
-        let mut shard_max_capacity =
+        let mut shard_items_capacity =
             estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
         let mut shard_max_weight = weight_capacity.saturating_add(num_shards - 1) / num_shards;
         // try to make each shard hold at least 32 items
-        while shard_max_capacity < 32 && num_shards > 1 {
+        while shard_items_capacity < 32 && num_shards > 1 {
             num_shards /= 2;
-            shard_max_capacity =
+            shard_items_capacity =
                 estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
             shard_max_weight = weight_capacity.saturating_add(num_shards - 1) / num_shards;
         }
         let shards = (0..num_shards)
             .map(|_| {
                 RwLock::new(VersionedCacheShard::new(
+                    shard_items_capacity as usize,
                     shard_max_weight,
                     weighter.clone(),
                     hasher.clone(),
@@ -209,19 +210,18 @@ pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder>(
 );
 
 impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, UnitWeighter, DefaultHashBuilder> {
-    /// Creates a new cache with holds up to `capacity` items (approximately).
-    pub fn new(estimated_items_capacity: usize, weight_capacity: u64) -> Self {
-        Self(VersionedCache::new(
-            estimated_items_capacity,
-            weight_capacity,
-        ))
+    /// Creates a new cache with holds up to `items_capacity` items (approximately).
+    pub fn new(items_capacity: usize) -> Self {
+        Self(VersionedCache::new(items_capacity))
     }
 }
 
 impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHasher + Clone>
     Cache<Key, Val, We, B>
 {
-    /// Creates a new cache with holds up to `capacity` items (approximately).
+    /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
+    /// roughly equivalent to `weight_capacity / average item weight`.
     pub fn with(
         estimated_items_capacity: usize,
         weight_capacity: u64,
@@ -317,7 +317,7 @@ mod tests {
         const ITEMS_PER_THREAD: usize = 1_000;
         let mut threads = Vec::new();
         let barrier = Arc::new(Barrier::new(N_THREAD_PAIRS * 2));
-        let cache = Arc::new(Cache::new(0, N_THREAD_PAIRS * ITEMS_PER_THREAD / 10));
+        let cache = Arc::new(Cache::new(N_THREAD_PAIRS * ITEMS_PER_THREAD / 10));
         for t in 0..N_THREAD_PAIRS {
             let barrier = barrier.clone();
             let cache = cache.clone();
