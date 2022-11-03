@@ -27,5 +27,7 @@ fuzz_target!(|ops: Vec<u16>| {
         if cache.get(op, op).is_none() {
             cache.insert(*op, *op, ());
         }
+        cache.validate();
     }
+    cache.validate();
 });

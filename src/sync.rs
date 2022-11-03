@@ -90,6 +90,13 @@ impl<
         }
     }
 
+    #[cfg(fuzzing)]
+    pub fn validate(&self) {
+        for s in &*self.shards {
+            s.read().validate()
+        }
+    }
+
     /// Returns whether the cache is empty
     pub fn is_empty(&self) -> bool {
         self.shards.iter().any(|s| s.read().len() == 0)

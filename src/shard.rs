@@ -96,6 +96,53 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         }
     }
 
+    #[cfg(fuzzing)]
+    pub fn validate(&self) {
+        let mut num_hot = 0;
+        let mut num_cold = 0;
+        let mut num_non_resident = 0;
+        let mut weight_hot = 0;
+        let mut weight_cold = 0;
+        for a in self.entries.iter_entries() {
+            match a {
+                Ok(r)
+                    if matches!(
+                        r.state,
+                        ResidentState::ColdDemoted | ResidentState::ColdInTest
+                    ) =>
+                {
+                    num_cold += 1;
+                    weight_cold += self.weighter.weight(&r.key, &r.version, &r.value) as u64;
+                }
+                Ok(r) => {
+                    num_hot += 1;
+                    weight_hot += self.weighter.weight(&r.key, &r.version, &r.value) as u64;
+                }
+                Err(_) => {
+                    num_non_resident += 1;
+                }
+            }
+        }
+        // eprintln!("-------------");
+        // dbg!(num_hot, num_cold, num_non_resident, weight_hot, weight_cold);
+        // dbg!(
+        //     self.num_hot,
+        //     self.num_cold,
+        //     self.num_non_resident,
+        //     self.weight_hot,
+        //     self.weight_cold,
+        //     self.weight_target_hot,
+        //     self.capacity_non_resident
+        // );
+        assert_eq!(num_hot, self.num_hot);
+        assert_eq!(num_cold, self.num_cold);
+        assert_eq!(num_non_resident, self.num_non_resident);
+        assert_eq!(weight_hot, self.weight_hot);
+        assert_eq!(weight_cold, self.weight_cold);
+        assert!(weight_hot <= self.weight_target_hot);
+        assert!(num_non_resident <= self.capacity_non_resident);
+    }
+
     /// Reserver additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&mut self, additional: usize) {
