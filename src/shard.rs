@@ -390,7 +390,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
                     );
                     // demote hot entries as we go, by advancing both lists together
                     // we keep a similar recency in both lists.
-                    if self.weight_hot > self.weight_target_hot {
+                    while self.weight_hot > self.weight_target_hot {
                         self.advance_hot();
                     }
                 } else {
@@ -477,7 +477,8 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         let hash = *entry.as_ref().err().unwrap();
         self.num_non_resident -= 1;
         self.remove_from_map(hash, idx);
-        Self::unlink(&mut self.entries, idx, &mut self.ghost_head);
+        let (_, next) = self.entries.remove(idx).unwrap();
+        self.ghost_head = next;
     }
 
     fn evict(&mut self) -> Resident<Key, Ver, Val> {
@@ -552,6 +553,9 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
             evicted = None;
         }
 
+        while self.weight_hot > self.weight_target_hot {
+            self.advance_hot();
+        }
         // the addition above might have made the cache too big
         while self.weight_hot + self.weight_cold > self.weight_capacity {
             evicted = Some(self.evict());
