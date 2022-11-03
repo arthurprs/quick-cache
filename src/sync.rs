@@ -100,6 +100,11 @@ impl<
         self.shards.iter().map(|s| s.read().len()).sum()
     }
 
+    /// Returns the total weight of cached items
+    pub fn weight(&self) -> u64 {
+        self.shards.iter().map(|s| s.read().weight()).sum()
+    }
+
     /// Returns the maximum weight of cached items
     pub fn capacity(&self) -> u64 {
         self.shards.iter().map(|s| s.read().capacity()).sum()
@@ -135,6 +140,16 @@ impl<
         self.shards
             .get((hash & self.shards_mask) as usize)
             .map(|s| (s, hash))
+    }
+
+    /// Reserver additional space for `additional` entries.
+    /// Note that this is counted in entries, and is not weighted.
+    pub fn reserve(&mut self, additional: usize) {
+        let additional_per_shard =
+            additional.saturating_add(self.shards.len() - 1) / self.shards.len();
+        for s in &*self.shards {
+            s.write().reserve(additional_per_shard);
+        }
     }
 
     /// Fetches an item from the cache whose key is `key` and version is <= `highest_version`.
@@ -246,6 +261,11 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
         self.0.len()
     }
 
+    /// Returns the total weight of cached items
+    pub fn weight(&self) -> u64 {
+        self.0.weight()
+    }
+
     /// Returns the maximum weight of cached items
     pub fn capacity(&self) -> u64 {
         self.0.capacity()
@@ -259,6 +279,12 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     /// Returns the number of hits
     pub fn hits(&self) -> u64 {
         self.0.hits()
+    }
+
+    /// Reserver additional space for `additional` entries.
+    /// Note that this is counted in entries, and is not weighted.
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional)
     }
 
     /// Fetches an item from the cache.

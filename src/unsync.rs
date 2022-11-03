@@ -55,6 +55,11 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         self.shard.len()
     }
 
+    /// Returns the total weight of cached items
+    pub fn weight(&self) -> u64 {
+        self.shard.weight()
+    }
+
     /// Returns the maximum weight of cached items
     pub fn capacity(&self) -> u64 {
         self.shard.capacity()
@@ -68,6 +73,12 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
     /// Returns the number of hits
     pub fn hits(&self) -> u64 {
         self.shard.hits()
+    }
+
+    /// Reserver additional space for `additional` entries.
+    /// Note that this is counted in entries, and is not weighted.
+    pub fn reserve(&mut self, additional: usize) {
+        self.shard.reserve(additional);
     }
 
     /// Fetches an item from the cache. Callers should prefer `get_mut` whenever possible as it's more efficient.
@@ -184,6 +195,11 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
         self.0.len()
     }
 
+    /// Returns the total weight of cached items
+    pub fn weight(&self) -> u64 {
+        self.0.weight()
+    }
+
     /// Returns the maximum weight of cached items
     pub fn capacity(&self) -> u64 {
         self.0.capacity()
@@ -197,6 +213,12 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
     /// Returns the number of hits
     pub fn hits(&self) -> u64 {
         self.0.hits()
+    }
+
+    /// Reserver additional space for `additional` entries.
+    /// Note that this is counted in entries, and is not weighted.
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
     }
 
     /// Fetches an item from the cache.
