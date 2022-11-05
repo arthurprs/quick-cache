@@ -73,6 +73,32 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_cost() {
+        #[derive(Clone)]
+        struct StringWeighter;
+
+        impl Weighter<u64, (), String> for StringWeighter {
+            fn weight(&self, _key: &u64, _version: &(), val: &String) -> u32 {
+                val.len() as u32
+            }
+        }
+
+        let cache = sync::Cache::with_weighter(100, 100_000, StringWeighter);
+        cache.insert(1, "1".to_string());
+        cache.insert(54, "54".to_string());
+        cache.insert(1000, "1000".to_string());
+        assert_eq!(cache.get(&1000).unwrap(), "1000");
+    }
+
+    #[test]
+    fn test_versioned() {
+        let mut cache = unsync::VersionedCache::new(5);
+        cache.insert("square".to_string(), 2022, "blue".to_string());
+        cache.insert("square".to_string(), 2023, "black".to_string());
+        assert_eq!(cache.get("square", &2022).unwrap(), "blue");
+    }
+
+    #[test]
     fn test_borrow_keys() {
         let cache = sync::VersionedCache::<Vec<u8>, Vec<u8>, u64>::new(0);
         cache.get(&b""[..], &b""[..]);

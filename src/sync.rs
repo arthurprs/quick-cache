@@ -41,6 +41,23 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone>
     }
 }
 
+impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, We: Weighter<Key, Ver, Val> + Clone>
+    VersionedCache<Key, Ver, Val, We, DefaultHashBuilder>
+{
+    pub fn with_weighter(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+    ) -> VersionedCache<Key, Ver, Val, We, DefaultHashBuilder> {
+        Self::with(
+            estimated_items_capacity,
+            weight_capacity,
+            weighter,
+            DefaultHashBuilder::default(),
+        )
+    }
+}
+
 impl<
         Key: Eq + Hash,
         Ver: Eq + Hash,
@@ -235,6 +252,23 @@ impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, UnitWeighter, DefaultHashBuilde
     /// Creates a new cache with holds up to `items_capacity` items (approximately).
     pub fn new(items_capacity: usize) -> Self {
         Self(VersionedCache::new(items_capacity))
+    }
+}
+
+impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone>
+    Cache<Key, Val, We, DefaultHashBuilder>
+{
+    pub fn with_weighter(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+    ) -> Cache<Key, Val, We, DefaultHashBuilder> {
+        Self::with(
+            estimated_items_capacity,
+            weight_capacity,
+            weighter,
+            DefaultHashBuilder::default(),
+        )
     }
 }
 
