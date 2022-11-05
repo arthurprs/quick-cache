@@ -360,10 +360,16 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         Some(entry)
     }
 
+    /// Advance cold ring, promoting to hot and demoting as needed.
+    /// Returns the evicted entry.
+    /// Panics if the cache is empty.
     fn advance_cold(&mut self) -> Resident<Key, Ver, Val> {
-        debug_assert_ne!(self.num_cold, 0);
         loop {
-            let idx = self.cold_head.unwrap();
+            let idx = if let Some(idx) = self.cold_head {
+                idx
+            } else {
+                self.advance_hot()
+            };
             let (entry, next) = self.entries.get_mut(idx).unwrap();
             let resident = entry.as_mut().unwrap();
             debug_assert!(matches!(
@@ -436,8 +442,11 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         }
     }
 
+    /// Advance hot ring demoting entries to cold.
+    /// Returns the Token of the new cold entry.
+    /// Panics if there are no hot entries.
     #[inline]
-    fn advance_hot(&mut self) -> bool {
+    fn advance_hot(&mut self) -> Token {
         debug_assert_ne!(self.num_hot, 0);
         loop {
             let idx = self.hot_head.unwrap();
@@ -465,7 +474,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
                 &mut self.hot_head,
                 &mut self.cold_head,
             );
-            return true;
+            return idx;
         }
     }
 
@@ -479,24 +488,6 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         self.remove_from_map(hash, idx);
         let (_, next) = self.entries.remove(idx).unwrap();
         self.ghost_head = next;
-    }
-
-    fn evict(&mut self) -> Resident<Key, Ver, Val> {
-        // debug_assert!(self.num_hot <= self.target_hot + 1);
-        // debug_assert!(self.num_cold <= self.weight_capacity - self.target_hot + 1);
-        debug_assert!(self.num_non_resident <= self.capacity_non_resident);
-        // Demote a hot entry if there are too many or there are no cold entries
-        while self.weight_hot > self.weight_target_hot || self.cold_head.is_none() {
-            self.advance_hot();
-        }
-        debug_assert!(self.weight_hot <= self.weight_target_hot);
-        debug_assert!(self.num_cold != 0);
-        // debug_assert!(self.num_cold <= self.weight_capacity - self.target_hot + 1);
-        let resident = self.advance_cold();
-        // debug_assert!(self.num_hot <= self.target_hot);
-        // debug_assert!(self.num_cold <= self.weight_capacity - self.target_hot);
-        debug_assert!(self.num_non_resident <= self.capacity_non_resident);
-        resident
     }
 
     fn insert_existing(
@@ -558,36 +549,26 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         }
         // the addition above might have made the cache too big
         while self.weight_hot + self.weight_cold > self.weight_capacity {
-            evicted = Some(self.evict());
+            evicted = Some(self.advance_cold());
         }
         evicted
     }
 
     #[inline]
-    fn link<T>(ring: &mut LinkedSlab<T>, idx: Token, list_head: &mut Option<Token>) {
-        ring.link(idx, *list_head);
-        if list_head.is_none() {
-            *list_head = Some(idx);
-        }
-    }
-
-    #[inline]
-    fn unlink<T>(ring: &mut LinkedSlab<T>, idx: Token, source_head: &mut Option<Token>) {
-        let next = ring.unlink(idx);
-        if *source_head == Some(idx) {
-            *source_head = next;
-        }
-    }
-
-    #[inline]
     fn relink<T>(
-        clock: &mut LinkedSlab<T>,
+        ring: &mut LinkedSlab<T>,
         idx: Token,
         source_head: &mut Option<Token>,
         target_head: &mut Option<Token>,
     ) {
-        Self::unlink(clock, idx, source_head);
-        Self::link(clock, idx, target_head);
+        let next = ring.unlink(idx);
+        if *source_head == Some(idx) {
+            *source_head = next;
+        }
+        ring.link(idx, *target_head);
+        if target_head.is_none() {
+            *target_head = Some(idx);
+        }
     }
 
     #[inline]
@@ -604,8 +585,8 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         value: Val,
     ) -> Option<Resident<Key, Ver, Val>> {
         let weight = self.weighter.weight(&key, &version, &value) as u64;
-        if weight > self.weight_capacity - self.weight_target_hot {
-            // don't admit if it won't fit within cold budget
+        if weight > self.weight_target_hot {
+            // don't admit if it won't fit within hot budget
             return None;
         }
 
@@ -615,9 +596,9 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
 
         let mut evicted;
         let enter_hot = if self.weight_hot + self.weight_cold + weight > self.weight_capacity {
-            // evict from cold to make space for this entry
+            // evict until we have enough space for this entry
             loop {
-                evicted = Some(self.evict());
+                evicted = Some(self.advance_cold());
                 if self.weight_hot + self.weight_cold + weight <= self.weight_capacity {
                     break;
                 }
