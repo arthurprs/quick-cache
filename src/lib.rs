@@ -26,6 +26,8 @@
 //! a crate feature with the same name. If the `ahash` feature is disabled the crate defaults to the std lib
 //! implementation instead (currently Siphash13). Note that a custom hasher can also be provided if desirable.
 
+use std::num::NonZeroU32;
+
 #[cfg(not(fuzzing))]
 mod linked_slab;
 #[cfg(fuzzing)]
@@ -42,15 +44,16 @@ pub type DefaultHashBuilder = ahash::RandomState;
 pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 
 pub trait Weighter<Key, Qey, Val> {
-    fn weight(&self, key: &Key, _qey: &Qey, val: &Val) -> u32;
+    fn weight(&self, key: &Key, _qey: &Qey, val: &Val) -> NonZeroU32;
 }
 
 #[derive(Debug, Clone)]
 pub struct UnitWeighter;
 
 impl<Key, Qey, Val> Weighter<Key, Qey, Val> for UnitWeighter {
-    fn weight(&self, _key: &Key, _qey: &Qey, _val: &Val) -> u32 {
-        1
+    #[inline]
+    fn weight(&self, _key: &Key, _qey: &Qey, _val: &Val) -> NonZeroU32 {
+        NonZeroU32::new(1).unwrap()
     }
 }
 

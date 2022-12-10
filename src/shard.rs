@@ -7,10 +7,23 @@ use std::{
 
 use hashbrown::raw::RawTable;
 
-use crate::{
-    linked_slab::{LinkedSlab, Token},
-    Weighter,
-};
+use crate::linked_slab::{LinkedSlab, Token};
+
+/// Superset of Weighter (weights 1u32..=u32::MAX) that returns the same weight as u64.
+/// Since each shard can only hold up to u32::MAX - 1 items its internal weight cannot overflow.
+pub trait InternalWeighter<Key, Qey, Val> {
+    fn weight(&self, key: &Key, qey: &Qey, val: &Val) -> u64;
+}
+
+impl<Key, Qey, Val, T> InternalWeighter<Key, Qey, Val> for T
+where
+    T: crate::Weighter<Key, Qey, Val>,
+{
+    #[inline]
+    fn weight(&self, key: &Key, qey: &Qey, val: &Val) -> u64 {
+        crate::Weighter::weight(self, key, qey, val).get() as u64
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ResidentState {
@@ -60,7 +73,7 @@ pub struct KQCacheShard<Key, Qey, Val, We, B> {
     weighter: We,
 }
 
-impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildHasher>
+impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B: BuildHasher>
     KQCacheShard<Key, Qey, Val, We, B>
 {
     pub fn new(
@@ -112,11 +125,11 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
                     ) =>
                 {
                     num_cold += 1;
-                    weight_cold += self.weighter.weight(&r.key, &r.qey, &r.value) as u64;
+                    weight_cold += self.weighter.weight(&r.key, &r.qey, &r.value);
                 }
                 Ok(r) => {
                     num_hot += 1;
-                    weight_hot += self.weighter.weight(&r.key, &r.qey, &r.value) as u64;
+                    weight_hot += self.weighter.weight(&r.key, &r.qey, &r.value);
                 }
                 Err(_) => {
                     num_non_resident += 1;
@@ -329,7 +342,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
         let (entry, next) = self.entries.remove(idx).unwrap();
         let list_head = match &entry {
             Ok(r) => {
-                let weight = self.weighter.weight(&r.key, &r.qey, &r.value) as u64;
+                let weight = self.weighter.weight(&r.key, &r.qey, &r.value);
                 if r.state == ResidentState::Hot {
                     self.num_hot -= 1;
                     self.weight_hot -= weight;
@@ -377,10 +390,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
                     resident.state = ResidentState::Hot;
                     self.num_hot += 1;
                     self.num_cold -= 1;
-                    let weight = self
-                        .weighter
-                        .weight(&resident.key, &resident.qey, &resident.value)
-                        as u64;
+                    let weight =
+                        self.weighter
+                            .weight(&resident.key, &resident.qey, &resident.value);
                     self.weight_hot += weight;
                     self.weight_cold -= weight;
                     Self::relink(
@@ -403,9 +415,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
                 continue;
             }
 
-            let weight =
-                self.weighter
-                    .weight(&resident.key, &resident.qey, &resident.value) as u64;
+            let weight = self
+                .weighter
+                .weight(&resident.key, &resident.qey, &resident.value);
             let hash = Self::hash_static(&self.hash_builder, &resident.key, &resident.qey);
             let resident = mem::replace(entry, Err(hash)).unwrap();
             self.num_cold -= 1;
@@ -456,9 +468,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
             }
             self.num_hot -= 1;
             self.num_cold += 1;
-            let weight =
-                self.weighter
-                    .weight(&resident.key, &resident.qey, &resident.value) as u64;
+            let weight = self
+                .weighter
+                .weight(&resident.key, &resident.qey, &resident.value);
             self.weight_hot -= weight;
             self.weight_cold += weight;
             Self::relink(
@@ -496,7 +508,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
         if let Ok(resident) = entry {
             let evicted_weight =
                 self.weighter
-                    .weight(&resident.key, &resident.qey, &resident.value) as u64;
+                    .weight(&resident.key, &resident.qey, &resident.value);
             if resident.state == ResidentState::Hot {
                 self.weight_hot -= evicted_weight;
                 self.weight_hot += weight;
@@ -576,7 +588,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
         qey: Qey,
         value: Val,
     ) -> Option<Resident<Key, Qey, Val>> {
-        let weight = self.weighter.weight(&key, &qey, &value) as u64;
+        let weight = self.weighter.weight(&key, &qey, &value);
         if weight > self.weight_target_hot {
             // don't admit if it won't fit within hot budget
             return None;
