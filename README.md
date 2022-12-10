@@ -39,7 +39,7 @@ use quick_cache::{Weighter, sync::Cache};
 struct StringWeighter;
 
 impl Weighter<u64, (), String> for StringWeighter {
-    fn weight(&self, _key: &u64, _version: &(), val: &String) -> u32 {
+    fn weight(&self, _key: &u64, _qey: &(), val: &String) -> u32 {
         val.len() as u32
     }
 }
@@ -53,13 +53,13 @@ fn main() {
 }
 ```
 
-Versioned cache variant, which allows the caller to avoid making expensive keys on gets.
+Two keys variant (KQCache), which allows the caller to avoid making expensive keys on gets.
 
 ```rust
-use quick_cache::sync::VersionedCache;
+use quick_cache::sync::KQCache;
 
 fn main() {
-    let cache = VersionedCache::new(5);
+    let cache = KQCache::new(5);
     cache.insert("square".to_string(), 2022, "blue");
     cache.insert("square".to_string(), 2023, "black");
     // In a "non-versioned" cache would use a tuple (String, u32) as keys, which could force

@@ -1,16 +1,16 @@
-use crate::{shard::VersionedCacheShard, DefaultHashBuilder, UnitWeighter, Weighter};
+use crate::{shard::KQCacheShard, DefaultHashBuilder, UnitWeighter, Weighter};
 use parking_lot::RwLock;
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash, Hasher},
 };
 
-/// A concurrent version aware cache.
+/// A concurrent two keys cache.
 ///
-/// # Key and Version
-/// The key version pair exists for cases where you want a cache keyed by (T, U).
+/// # Key and Qey
+/// The key qey pair exists for cases where you want a cache keyed by (K, Q).
 /// Other rust maps/caches are accessed via the Borrow trait,
-/// so they require the caller to build &(T, U) which might involve cloning T and/or U.
+/// so they require the caller to build &(K, Q) which might involve cloning K and/or Q.
 ///
 /// # Value
 /// Cache values are cloned when fetched. Users should wrap their values with `Arc<_>`
@@ -20,15 +20,15 @@ use std::{
 /// # Thread Safety and Concurrency
 /// The cache instance can wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
-pub struct VersionedCache<Key, Ver, Val, We = UnitWeighter, B = DefaultHashBuilder> {
+pub struct KQCache<Key, Qey, Val, We = UnitWeighter, B = DefaultHashBuilder> {
     hash_builder: B,
     #[allow(clippy::type_complexity)]
-    shards: Box<[RwLock<VersionedCacheShard<Key, Ver, Val, We, B>>]>,
+    shards: Box<[RwLock<KQCacheShard<Key, Qey, Val, We, B>>]>,
     shards_mask: u64,
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone>
-    VersionedCache<Key, Ver, Val, UnitWeighter, DefaultHashBuilder>
+impl<Key: Eq + Hash, Qey: Eq + Hash, Val: Clone>
+    KQCache<Key, Qey, Val, UnitWeighter, DefaultHashBuilder>
 {
     /// Creates a new cache with holds up to `items_capacity` items (approximately).
     pub fn new(items_capacity: usize) -> Self {
@@ -41,14 +41,14 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone>
     }
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, We: Weighter<Key, Ver, Val> + Clone>
-    VersionedCache<Key, Ver, Val, We, DefaultHashBuilder>
+impl<Key: Eq + Hash, Qey: Eq + Hash, Val: Clone, We: Weighter<Key, Qey, Val> + Clone>
+    KQCache<Key, Qey, Val, We, DefaultHashBuilder>
 {
     pub fn with_weighter(
         estimated_items_capacity: usize,
         weight_capacity: u64,
         weighter: We,
-    ) -> VersionedCache<Key, Ver, Val, We, DefaultHashBuilder> {
+    ) -> KQCache<Key, Qey, Val, We, DefaultHashBuilder> {
         Self::with(
             estimated_items_capacity,
             weight_capacity,
@@ -60,11 +60,11 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, We: Weighter<Key, Ver, Val> + C
 
 impl<
         Key: Eq + Hash,
-        Ver: Eq + Hash,
+        Qey: Eq + Hash,
         Val: Clone,
-        We: Weighter<Key, Ver, Val> + Clone,
+        We: Weighter<Key, Qey, Val> + Clone,
         B: BuildHasher + Clone,
-    > VersionedCache<Key, Ver, Val, We, B>
+    > KQCache<Key, Qey, Val, We, B>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
     /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
@@ -92,7 +92,7 @@ impl<
         }
         let shards = (0..num_shards)
             .map(|_| {
-                RwLock::new(VersionedCacheShard::new(
+                RwLock::new(KQCacheShard::new(
                     shard_items_capacity as usize,
                     shard_max_weight,
                     weighter.clone(),
@@ -149,17 +149,17 @@ impl<
     fn shard_for<Q: ?Sized, W: ?Sized>(
         &self,
         key: &Q,
-        version: &W,
-    ) -> Option<(&RwLock<VersionedCacheShard<Key, Ver, Val, We, B>>, u64)>
+        qey: &W,
+    ) -> Option<(&RwLock<KQCacheShard<Key, Qey, Val, We, B>>, u64)>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
         let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
-        version.hash(&mut hasher);
+        qey.hash(&mut hasher);
         let hash = hasher.finish();
         self.shards
             .get((hash & self.shards_mask) as usize)
@@ -176,61 +176,61 @@ impl<
         }
     }
 
-    /// Fetches an item from the cache whose key is `key` and version is <= `highest_version`.
-    pub fn get<Q: ?Sized, W: ?Sized>(&self, key: &Q, version: &W) -> Option<Val>
+    /// Fetches an item from the cache whose keys are `key` + `qey`.
+    pub fn get<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> Option<Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        let (shard, hash) = self.shard_for(key, version)?;
-        shard.read().get(hash, key, version).cloned()
+        let (shard, hash) = self.shard_for(key, qey)?;
+        shard.read().get(hash, key, qey).cloned()
     }
 
-    /// Peeks an item from the cache whose key is `key` and version is <= `highest_version`.
+    /// Peeks an item from the cache whose keys are `key` + `qey`.
     /// Contrary to gets, peeks don't alter the key "hotness".
-    pub fn peek<Q: ?Sized, W: ?Sized>(&self, key: &Q, version: &W) -> Option<Val>
+    pub fn peek<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> Option<Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        let (shard, hash) = self.shard_for(key, version)?;
-        shard.read().peek(hash, key, version).cloned()
+        let (shard, hash) = self.shard_for(key, qey)?;
+        shard.read().peek(hash, key, qey).cloned()
     }
 
-    /// Peeks an item from the cache whose key is `key` and version is <= `highest_version`.
+    /// Peeks an item from the cache whose key is `key` and qey is <= `highest_version`.
     /// Contrary to gets, peeks don't alter the key "hotness".
-    pub fn remove<Q: ?Sized, W: ?Sized>(&self, key: &Q, version: &W) -> bool
+    pub fn remove<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> bool
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        if let Some((shard, hash)) = self.shard_for(key, version) {
+        if let Some((shard, hash)) = self.shard_for(key, qey) {
             // Any evictions will be dropped outside of the lock
-            let evicted = shard.write().remove(hash, key, version);
+            let evicted = shard.write().remove(hash, key, qey);
             matches!(evicted, Some(Ok(_)))
         } else {
             false
         }
     }
 
-    /// Inserts an item in the cache with key `key` and version `version`.
-    pub fn insert(&self, key: Key, version: Ver, value: Val) {
-        if let Some((shard, hash)) = self.shard_for(&key, &version) {
+    /// Inserts an item in the cache with key `key` and qey `qey`.
+    pub fn insert(&self, key: Key, qey: Qey, value: Val) {
+        if let Some((shard, hash)) = self.shard_for(&key, &qey) {
             // Any evictions will be dropped outside of the lock
-            let _evicted = shard.write().insert(hash, key, version, value);
+            let _evicted = shard.write().insert(hash, key, qey, value);
         }
     }
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> std::fmt::Debug for VersionedCache<Key, Ver, Val> {
+impl<Key: Eq + Hash, Qey: Eq + Hash, Val: Clone> std::fmt::Debug for KQCache<Key, Qey, Val> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VersionedCache").finish_non_exhaustive()
+        f.debug_struct("KQCache").finish_non_exhaustive()
     }
 }
 
@@ -244,14 +244,12 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> std::fmt::Debug for VersionedCa
 /// # Thread Safety and Concurrency
 /// The cache instance can wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
-pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder>(
-    VersionedCache<Key, (), Val, We, B>,
-);
+pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder>(KQCache<Key, (), Val, We, B>);
 
 impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, UnitWeighter, DefaultHashBuilder> {
     /// Creates a new cache with holds up to `items_capacity` items (approximately).
     pub fn new(items_capacity: usize) -> Self {
-        Self(VersionedCache::new(items_capacity))
+        Self(KQCache::new(items_capacity))
     }
 }
 
@@ -284,7 +282,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
         weighter: We,
         hash_builder: B,
     ) -> Self {
-        Self(VersionedCache::with(
+        Self(KQCache::with(
             estimated_items_capacity,
             weight_capacity,
             weighter,
@@ -347,7 +345,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
         self.0.peek(key, &())
     }
 
-    /// Peeks an item from the cache whose key is `key` and version is <= `highest_version`.
+    /// Peeks an item from the cache whose key is `key` and qey is <= `highest_version`.
     /// Contrary to gets, peeks don't alter the key "hotness".
     pub fn remove<Q: ?Sized>(&self, key: &Q) -> bool
     where
@@ -357,7 +355,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
         self.0.remove(key, &())
     }
 
-    /// Inserts an item in the cache with key `key` and version `version`.
+    /// Inserts an item in the cache with key `key` and qey `qey`.
     pub fn insert(&self, key: Key, value: Val) {
         self.0.insert(key, (), value);
     }

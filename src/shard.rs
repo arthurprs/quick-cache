@@ -20,27 +20,27 @@ enum ResidentState {
 }
 
 #[derive(Debug)]
-pub struct Resident<Key, Ver, Val> {
+pub struct Resident<Key, Qey, Val> {
     key: Key,
-    version: Ver,
+    qey: Qey,
     value: Val,
     state: ResidentState,
     referenced: AtomicBool,
 }
 
 /// Entries can be either Resident `Ok(Resident)` or Ghost `Err(hash)`.
-pub type Entry<Key, Ver, Val> = Result<Resident<Key, Ver, Val>, u64>;
+pub type Entry<Key, Qey, Val> = Result<Resident<Key, Qey, Val>, u64>;
 
-/// A version aware cache using a modified CLOCK-PRO eviction policy.
+/// A qey aware cache using a modified CLOCK-PRO eviction policy.
 /// The implementation allows some parallelism as gets don't require exclusive access.
 /// Any evicted items are returned so they can be dropped by the caller, outside the locks.
-pub struct VersionedCacheShard<Key, Ver, Val, We, B> {
+pub struct KQCacheShard<Key, Qey, Val, We, B> {
     hash_builder: B,
     /// Map to an entry in the `entries` slab.
-    /// Note that the actual key/version/value/hash are not stored in the map but in the slab.
+    /// Note that the actual key/qey/value/hash are not stored in the map but in the slab.
     map: RawTable<Token>,
     /// Slab holding entries
-    entries: LinkedSlab<Entry<Key, Ver, Val>>,
+    entries: LinkedSlab<Entry<Key, Qey, Val>>,
     /// Head of cold list, containing ColdInTest and ColdDemoted entries.
     cold_head: Option<Token>,
     /// Head of hot list, containing Hot entries.
@@ -60,8 +60,8 @@ pub struct VersionedCacheShard<Key, Ver, Val, We, B> {
     weighter: We,
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildHasher>
-    VersionedCacheShard<Key, Ver, Val, We, B>
+impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildHasher>
+    KQCacheShard<Key, Qey, Val, We, B>
 {
     pub fn new(
         estimated_items_capacity: usize,
@@ -112,11 +112,11 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
                     ) =>
                 {
                     num_cold += 1;
-                    weight_cold += self.weighter.weight(&r.key, &r.version, &r.value) as u64;
+                    weight_cold += self.weighter.weight(&r.key, &r.qey, &r.value) as u64;
                 }
                 Ok(r) => {
                     num_hot += 1;
-                    weight_hot += self.weighter.weight(&r.key, &r.version, &r.value) as u64;
+                    weight_hot += self.weighter.weight(&r.key, &r.qey, &r.value) as u64;
                 }
                 Err(_) => {
                     num_non_resident += 1;
@@ -151,7 +151,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         self.map.reserve(additional, |&idx| {
             let (entry, _) = self.entries.get(idx).unwrap();
             match entry {
-                Ok(r) => Self::hash_static(&self.hash_builder, &r.key, &r.version),
+                Ok(r) => Self::hash_static(&self.hash_builder, &r.key, &r.qey),
                 Err(non_resident_hash) => *non_resident_hash,
             }
         })
@@ -178,43 +178,43 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
     }
 
     #[inline]
-    fn hash_static<Q: ?Sized, W: ?Sized>(hasher: &B, key: &Q, version: &W) -> u64
+    fn hash_static<Q: ?Sized, W: ?Sized>(hasher: &B, key: &Q, qey: &W) -> u64
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
         let mut hasher = hasher.build_hasher();
         key.hash(&mut hasher);
-        version.hash(&mut hasher);
+        qey.hash(&mut hasher);
         hasher.finish()
     }
 
     #[inline]
-    pub fn hash<Q: ?Sized, W: ?Sized>(&self, key: &Q, version: &W) -> u64
+    pub fn hash<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> u64
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        Self::hash_static(&self.hash_builder, key, version)
+        Self::hash_static(&self.hash_builder, key, qey)
     }
 
     #[inline]
-    fn search<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, version: &W) -> Option<Token>
+    fn search<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<Token>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
         self.map
             .get(hash, |&idx| {
                 let (entry, _) = self.entries.get(idx).unwrap();
                 match entry {
-                    Ok(r) => r.key.borrow() == key && r.version.borrow() == version,
+                    Ok(r) => r.key.borrow() == key && r.qey.borrow() == qey,
                     Err(non_resident_hash) => *non_resident_hash == hash,
                 }
             })
@@ -230,21 +230,21 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
                 }
                 let (entry, _) = self.entries.get(idx).unwrap();
                 match entry {
-                    Ok(r) => self.hash(&r.key, &r.version) == hash,
+                    Ok(r) => self.hash(&r.key, &r.qey) == hash,
                     Err(non_resident_hash) => *non_resident_hash == hash,
                 }
             })
             .copied()
     }
 
-    pub fn get<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, version: &W) -> Option<&Val>
+    pub fn get<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<&Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        if let Some(idx) = self.search(hash, key, version) {
+        if let Some(idx) = self.search(hash, key, qey) {
             let (entry, _) = self.entries.get(idx).unwrap();
             if let Ok(resident) = entry {
                 resident.referenced.store(true, atomic::Ordering::Relaxed);
@@ -256,19 +256,14 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         None
     }
 
-    pub fn get_mut<Q: ?Sized, W: ?Sized>(
-        &mut self,
-        hash: u64,
-        key: &Q,
-        version: &W,
-    ) -> Option<&mut Val>
+    pub fn get_mut<Q: ?Sized, W: ?Sized>(&mut self, hash: u64, key: &Q, qey: &W) -> Option<&mut Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        if let Some(idx) = self.search(hash, key, version) {
+        if let Some(idx) = self.search(hash, key, qey) {
             let (entry, _) = self.entries.get_mut(idx).unwrap();
             if let Ok(resident) = entry {
                 *resident.referenced.get_mut() = true;
@@ -280,14 +275,14 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         None
     }
 
-    pub fn peek<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, version: &W) -> Option<&Val>
+    pub fn peek<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<&Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        let idx = self.search(hash, key, version)?;
+        let idx = self.search(hash, key, qey)?;
         let (entry, _) = self.entries.get(idx).unwrap();
         if let Ok(resident) = entry {
             Some(&resident.value)
@@ -300,15 +295,15 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         &mut self,
         hash: u64,
         key: &Q,
-        version: &W,
+        qey: &W,
     ) -> Option<&mut Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        let idx = self.search(hash, key, version)?;
+        let idx = self.search(hash, key, qey)?;
         let (entry, _) = self.entries.get_mut(idx).unwrap();
         if let Ok(resident) = entry {
             Some(&mut resident.value)
@@ -321,20 +316,20 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         &mut self,
         hash: u64,
         key: &Q,
-        version: &W,
-    ) -> Option<Entry<Key, Ver, Val>>
+        qey: &W,
+    ) -> Option<Entry<Key, Qey, Val>>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        let idx = self.search(hash, key, version)?;
+        let idx = self.search(hash, key, qey)?;
         self.remove_from_map(hash, idx);
         let (entry, next) = self.entries.remove(idx).unwrap();
         let list_head = match &entry {
             Ok(r) => {
-                let weight = self.weighter.weight(&r.key, &r.version, &r.value) as u64;
+                let weight = self.weighter.weight(&r.key, &r.qey, &r.value) as u64;
                 if r.state == ResidentState::Hot {
                     self.num_hot -= 1;
                     self.weight_hot -= weight;
@@ -363,7 +358,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
     /// Advance cold ring, promoting to hot and demoting as needed.
     /// Returns the evicted entry.
     /// Panics if the cache is empty.
-    fn advance_cold(&mut self) -> Resident<Key, Ver, Val> {
+    fn advance_cold(&mut self) -> Resident<Key, Qey, Val> {
         loop {
             let idx = if let Some(idx) = self.cold_head {
                 idx
@@ -382,10 +377,10 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
                     resident.state = ResidentState::Hot;
                     self.num_hot += 1;
                     self.num_cold -= 1;
-                    let weight =
-                        self.weighter
-                            .weight(&resident.key, &resident.version, &resident.value)
-                            as u64;
+                    let weight = self
+                        .weighter
+                        .weight(&resident.key, &resident.qey, &resident.value)
+                        as u64;
                     self.weight_hot += weight;
                     self.weight_cold -= weight;
                     Self::relink(
@@ -408,11 +403,10 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
                 continue;
             }
 
-            let weight = self
-                .weighter
-                .weight(&resident.key, &resident.version, &resident.value)
-                as u64;
-            let hash = Self::hash_static(&self.hash_builder, &resident.key, &resident.version);
+            let weight =
+                self.weighter
+                    .weight(&resident.key, &resident.qey, &resident.value) as u64;
+            let hash = Self::hash_static(&self.hash_builder, &resident.key, &resident.qey);
             let resident = mem::replace(entry, Err(hash)).unwrap();
             self.num_cold -= 1;
             self.weight_cold -= weight;
@@ -462,10 +456,9 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
             }
             self.num_hot -= 1;
             self.num_cold += 1;
-            let weight = self
-                .weighter
-                .weight(&resident.key, &resident.version, &resident.value)
-                as u64;
+            let weight =
+                self.weighter
+                    .weight(&resident.key, &resident.qey, &resident.value) as u64;
             self.weight_hot -= weight;
             self.weight_cold += weight;
             Self::relink(
@@ -494,17 +487,16 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         &mut self,
         idx: Token,
         key: Key,
-        version: Ver,
+        qey: Qey,
         value: Val,
         weight: u64,
-    ) -> Option<Resident<Key, Ver, Val>> {
+    ) -> Option<Resident<Key, Qey, Val>> {
         let (entry, _) = self.entries.get_mut(idx).unwrap();
         let mut evicted;
         if let Ok(resident) = entry {
             let evicted_weight =
                 self.weighter
-                    .weight(&resident.key, &resident.version, &resident.value)
-                    as u64;
+                    .weight(&resident.key, &resident.qey, &resident.value) as u64;
             if resident.state == ResidentState::Hot {
                 self.weight_hot -= evicted_weight;
                 self.weight_hot += weight;
@@ -514,7 +506,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
             }
             let new_resident = Resident {
                 key,
-                version,
+                qey,
                 value,
                 state: resident.state,
                 referenced: AtomicBool::new(true), // re-insert counts as a hit
@@ -523,11 +515,11 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         } else {
             debug_assert_eq!(
                 *entry.as_ref().err().unwrap(),
-                Self::hash_static(&self.hash_builder, &key, &version)
+                Self::hash_static(&self.hash_builder, &key, &qey)
             );
             *entry = Ok(Resident {
                 key,
-                version,
+                qey,
                 value,
                 state: ResidentState::Hot,
                 referenced: Default::default(),
@@ -581,17 +573,17 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         &mut self,
         hash: u64,
         key: Key,
-        version: Ver,
+        qey: Qey,
         value: Val,
-    ) -> Option<Resident<Key, Ver, Val>> {
-        let weight = self.weighter.weight(&key, &version, &value) as u64;
+    ) -> Option<Resident<Key, Qey, Val>> {
+        let weight = self.weighter.weight(&key, &qey, &value) as u64;
         if weight > self.weight_target_hot {
             // don't admit if it won't fit within hot budget
             return None;
         }
 
-        if let Some(idx) = self.search(hash, &key, &version) {
-            return self.insert_existing(idx, key, version, value, weight);
+        if let Some(idx) = self.search(hash, &key, &qey) {
+            return self.insert_existing(idx, key, qey, value, weight);
         }
 
         let mut evicted;
@@ -622,7 +614,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         let idx = self.entries.insert(
             Ok(Resident {
                 key,
-                version,
+                qey,
                 value,
                 state,
                 referenced: Default::default(),
@@ -636,7 +628,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, We: Weighter<Key, Ver, Val>, B: BuildH
         self.map.insert(hash, idx, |&i| {
             let (entry, _) = self.entries.get(i).unwrap();
             match entry {
-                Ok(r) => Self::hash_static(&self.hash_builder, &r.key, &r.version),
+                Ok(r) => Self::hash_static(&self.hash_builder, &r.key, &r.qey),
                 Err(hash) => *hash,
             }
         });

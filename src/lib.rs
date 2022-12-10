@@ -13,12 +13,12 @@
 //! Both `sync` (thread-safe) and `unsync` (non thread-safe) implementations are provided. The latter
 //! offers slightly better performance when thread safety is not required.
 //!
-//! # Double keys or Versioned keys
+//! # Two keys or QK keys
 //!
-//! In addition to the standard `key->value` cache, a "versioned" cache `(key, version)->value` is also
-//! available for cases where you want a cache keyed by a tuple like `(T, U)`. But due to limitations
+//! In addition to the standard `key->value` cache, a "two keys" cache `(key, qey)->value` is also
+//! available for cases where you want a cache keyed by a tuple like `(K, Q)`. But due to limitations
 //! of the `Borrow` trait you cannot access such keys without building the tuple and thus potentially
-//! cloning `T` and/or `U`.
+//! cloning `K` and/or `Q`.
 //!
 //! # Hasher
 //!
@@ -41,15 +41,15 @@ pub type DefaultHashBuilder = ahash::RandomState;
 #[cfg(not(feature = "ahash"))]
 pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 
-pub trait Weighter<Key, Ver, Val> {
-    fn weight(&self, key: &Key, version: &Ver, val: &Val) -> u32;
+pub trait Weighter<Key, Qey, Val> {
+    fn weight(&self, key: &Key, _qey: &Qey, val: &Val) -> u32;
 }
 
 #[derive(Debug, Clone)]
 pub struct UnitWeighter;
 
-impl<Key, Ver, Val> Weighter<Key, Ver, Val> for UnitWeighter {
-    fn weight(&self, _key: &Key, _ver: &Ver, _val: &Val) -> u32 {
+impl<Key, Qey, Val> Weighter<Key, Qey, Val> for UnitWeighter {
+    fn weight(&self, _key: &Key, _qey: &Qey, _val: &Val) -> u32 {
         1
     }
 }
@@ -60,11 +60,11 @@ mod tests {
 
     #[test]
     fn test_new() {
-        sync::VersionedCache::<u64, u64, u64>::new(0);
-        sync::VersionedCache::<u64, u64, u64>::new(1);
-        sync::VersionedCache::<u64, u64, u64>::new(2);
-        sync::VersionedCache::<u64, u64, u64>::new(3);
-        sync::VersionedCache::<u64, u64, u64>::new(usize::MAX);
+        sync::KQCache::<u64, u64, u64>::new(0);
+        sync::KQCache::<u64, u64, u64>::new(1);
+        sync::KQCache::<u64, u64, u64>::new(2);
+        sync::KQCache::<u64, u64, u64>::new(3);
+        sync::KQCache::<u64, u64, u64>::new(usize::MAX);
         sync::Cache::<u64, u64>::new(0);
         sync::Cache::<u64, u64>::new(1);
         sync::Cache::<u64, u64>::new(2);
@@ -78,7 +78,7 @@ mod tests {
         struct StringWeighter;
 
         impl Weighter<u64, (), String> for StringWeighter {
-            fn weight(&self, _key: &u64, _version: &(), val: &String) -> u32 {
+            fn weight(&self, _key: &u64, _qey: &(), val: &String) -> u32 {
                 val.len() as u32
             }
         }
@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn test_versioned() {
-        let mut cache = unsync::VersionedCache::new(5);
+        let mut cache = unsync::KQCache::new(5);
         cache.insert("square".to_string(), 2022, "blue".to_string());
         cache.insert("square".to_string(), 2023, "black".to_string());
         assert_eq!(cache.get("square", &2022).unwrap(), "blue");
@@ -100,9 +100,9 @@ mod tests {
 
     #[test]
     fn test_borrow_keys() {
-        let cache = sync::VersionedCache::<Vec<u8>, Vec<u8>, u64>::new(0);
+        let cache = sync::KQCache::<Vec<u8>, Vec<u8>, u64>::new(0);
         cache.get(&b""[..], &b""[..]);
-        let cache = sync::VersionedCache::<String, String, u64>::new(0);
+        let cache = sync::KQCache::<String, String, u64>::new(0);
         cache.get("", "");
     }
 }
