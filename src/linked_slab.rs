@@ -31,6 +31,11 @@ impl<T> LinkedSlab<T> {
         self.entries.iter().filter(|e| e.item.is_some()).count()
     }
 
+    #[cfg(fuzzing)]
+    pub fn iter_entries(&self) -> impl Iterator<Item = &T> + '_ {
+        self.entries.iter().filter_map(|e| e.item.as_ref())
+    }
+
     /// Inserts a new entry in the list, link it before `head`.
     /// If `head` is not set the item will belong to a list only containing itself.
     ///

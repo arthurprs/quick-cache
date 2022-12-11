@@ -9,6 +9,22 @@ use hashbrown::raw::RawTable;
 
 use crate::linked_slab::{LinkedSlab, Token};
 
+/// Superset of Weighter (weights 1u32..=u32::MAX) that returns the same weight as u64.
+/// Since each shard can only hold up to u32::MAX - 1 items its internal weight cannot overflow.
+pub trait InternalWeighter<Key, Qey, Val> {
+    fn weight(&self, key: &Key, qey: &Qey, val: &Val) -> u64;
+}
+
+impl<Key, Qey, Val, T> InternalWeighter<Key, Qey, Val> for T
+where
+    T: crate::Weighter<Key, Qey, Val>,
+{
+    #[inline]
+    fn weight(&self, key: &Key, qey: &Qey, val: &Val) -> u64 {
+        crate::Weighter::weight(self, key, qey, val).get() as u64
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ResidentState {
     Hot,
@@ -17,80 +33,153 @@ enum ResidentState {
 }
 
 #[derive(Debug)]
-pub struct Resident<Key, Ver, Val> {
+pub struct Resident<Key, Qey, Val> {
     key: Key,
-    version: Ver,
+    qey: Qey,
     value: Val,
     state: ResidentState,
     referenced: AtomicBool,
 }
 
 /// Entries can be either Resident `Ok(Resident)` or Ghost `Err(hash)`.
-pub type Entry<Key, Ver, Val> = Result<Resident<Key, Ver, Val>, u64>;
+pub type Entry<Key, Qey, Val> = Result<Resident<Key, Qey, Val>, u64>;
 
-/// A version aware cache using a modified CLOCK-PRO eviction policy.
+/// A qey aware cache using a modified CLOCK-PRO eviction policy.
 /// The implementation allows some parallelism as gets don't require exclusive access.
 /// Any evicted items are returned so they can be dropped by the caller, outside the locks.
-pub struct VersionedCacheShard<Key, Ver, Val, B> {
+pub struct KQCacheShard<Key, Qey, Val, We, B> {
     hash_builder: B,
     /// Map to an entry in the `entries` slab.
-    /// Note that the actual key/version/value/hash are not stored in the map but in the slab.
+    /// Note that the actual key/qey/value/hash are not stored in the map but in the slab.
     map: RawTable<Token>,
     /// Slab holding entries
-    entries: LinkedSlab<Entry<Key, Ver, Val>>,
+    entries: LinkedSlab<Entry<Key, Qey, Val>>,
     /// Head of cold list, containing ColdInTest and ColdDemoted entries.
     cold_head: Option<Token>,
     /// Head of hot list, containing Hot entries.
     hot_head: Option<Token>,
     /// Head of ghost list, containing non-resident/Hash entries.
     ghost_head: Option<Token>,
-    target_hot: usize,
-    max_hot_scan: usize,
-    capacity_resident: usize,
-    capacity_non_resident: usize,
+    weight_target_hot: u64,
+    weight_capacity: u64,
+    weight_hot: u64,
+    weight_cold: u64,
     num_hot: usize,
     num_cold: usize,
     num_non_resident: usize,
+    capacity_non_resident: usize,
     hits: AtomicU64,
     misses: AtomicU64,
+    weighter: We,
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Key, Ver, Val, B> {
-    pub fn new(initial_capacity: usize, max_capacity: usize, hash_builder: B) -> Self {
-        assert!(initial_capacity <= max_capacity);
-        let max_capacity = max_capacity.max(2);
-        let capacity_resident = max_capacity;
-        let capacity_non_resident = max_capacity / 2;
-        let preallocated = initial_capacity + initial_capacity / 2;
+impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B: BuildHasher>
+    KQCacheShard<Key, Qey, Val, We, B>
+{
+    pub fn new(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+        hash_builder: B,
+    ) -> Self {
+        let weight_capacity = weight_capacity.max(2);
         // assign 1% of the capacity to cold items
-        let target_hot = capacity_resident - (capacity_resident / 100).max(1) as usize;
-        // limit hot scan to ~= 100 + 20% max hot count
-        let max_hot_scan = 100 + capacity_resident / 5;
+        let target_hot = weight_capacity - (weight_capacity / 100).max(1);
+        assert!(weight_capacity >= 2);
+        assert!(target_hot >= 1);
+        assert!(weight_capacity - target_hot >= 1);
         Self {
             hash_builder,
-            map: RawTable::with_capacity(preallocated),
-            entries: LinkedSlab::with_capacity(preallocated),
-            capacity_resident,
+            map: RawTable::with_capacity(0),
+            entries: LinkedSlab::with_capacity(0),
+            weight_capacity,
             hits: Default::default(),
             misses: Default::default(),
-            max_hot_scan,
             cold_head: None,
             hot_head: None,
             ghost_head: None,
-            capacity_non_resident,
-            target_hot,
+            capacity_non_resident: estimated_items_capacity / 2,
+            weight_target_hot: target_hot,
             num_hot: 0,
             num_cold: 0,
             num_non_resident: 0,
+            weight_hot: 0,
+            weight_cold: 0,
+            weighter,
         }
+    }
+
+    #[cfg(fuzzing)]
+    pub fn validate(&self) {
+        let mut num_hot = 0;
+        let mut num_cold = 0;
+        let mut num_non_resident = 0;
+        let mut weight_hot = 0;
+        let mut weight_cold = 0;
+        for a in self.entries.iter_entries() {
+            match a {
+                Ok(r)
+                    if matches!(
+                        r.state,
+                        ResidentState::ColdDemoted | ResidentState::ColdInTest
+                    ) =>
+                {
+                    num_cold += 1;
+                    weight_cold += self.weighter.weight(&r.key, &r.qey, &r.value);
+                }
+                Ok(r) => {
+                    num_hot += 1;
+                    weight_hot += self.weighter.weight(&r.key, &r.qey, &r.value);
+                }
+                Err(_) => {
+                    num_non_resident += 1;
+                }
+            }
+        }
+        // eprintln!("-------------");
+        // dbg!(num_hot, num_cold, num_non_resident, weight_hot, weight_cold);
+        // dbg!(
+        //     self.num_hot,
+        //     self.num_cold,
+        //     self.num_non_resident,
+        //     self.weight_hot,
+        //     self.weight_cold,
+        //     self.weight_target_hot,
+        //     self.capacity_non_resident
+        // );
+        assert_eq!(num_hot, self.num_hot);
+        assert_eq!(num_cold, self.num_cold);
+        assert_eq!(num_non_resident, self.num_non_resident);
+        assert_eq!(weight_hot, self.weight_hot);
+        assert_eq!(weight_cold, self.weight_cold);
+        assert!(weight_hot <= self.weight_target_hot);
+        assert!(num_non_resident <= self.capacity_non_resident);
+    }
+
+    /// Reserver additional space for `additional` entries.
+    /// Note that this is counted in entries, and is not weighted.
+    pub fn reserve(&mut self, additional: usize) {
+        // extra 50% for non-resident entries
+        let additional = additional.saturating_add(additional / 2);
+        self.map.reserve(additional, |&idx| {
+            let (entry, _) = self.entries.get(idx).unwrap();
+            match entry {
+                Ok(r) => Self::hash_static(&self.hash_builder, &r.key, &r.qey),
+                Err(non_resident_hash) => *non_resident_hash,
+            }
+        })
+    }
+
+    pub fn weight(&self) -> u64 {
+        self.weight_hot + self.weight_cold
     }
 
     pub fn len(&self) -> usize {
         self.num_hot + self.num_cold
     }
 
-    pub fn capacity(&self) -> usize {
-        self.capacity_resident
+    pub fn capacity(&self) -> u64 {
+        self.weight_capacity
     }
 
     pub fn hits(&self) -> u64 {
@@ -102,43 +191,43 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
     }
 
     #[inline]
-    fn hash_static<Q: ?Sized, W: ?Sized>(hasher: &B, key: &Q, version: &W) -> u64
+    fn hash_static<Q: ?Sized, W: ?Sized>(hasher: &B, key: &Q, qey: &W) -> u64
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
         let mut hasher = hasher.build_hasher();
         key.hash(&mut hasher);
-        version.hash(&mut hasher);
+        qey.hash(&mut hasher);
         hasher.finish()
     }
 
     #[inline]
-    pub fn hash<Q: ?Sized, W: ?Sized>(&self, key: &Q, version: &W) -> u64
+    pub fn hash<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> u64
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        Self::hash_static(&self.hash_builder, key, version)
+        Self::hash_static(&self.hash_builder, key, qey)
     }
 
     #[inline]
-    fn search<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, version: &W) -> Option<Token>
+    fn search<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<Token>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
         self.map
             .get(hash, |&idx| {
                 let (entry, _) = self.entries.get(idx).unwrap();
                 match entry {
-                    Ok(r) => r.key.borrow() == key && r.version.borrow() == version,
+                    Ok(r) => r.key.borrow() == key && r.qey.borrow() == qey,
                     Err(non_resident_hash) => *non_resident_hash == hash,
                 }
             })
@@ -154,21 +243,21 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
                 }
                 let (entry, _) = self.entries.get(idx).unwrap();
                 match entry {
-                    Ok(r) => self.hash(&r.key, &r.version) == hash,
+                    Ok(r) => self.hash(&r.key, &r.qey) == hash,
                     Err(non_resident_hash) => *non_resident_hash == hash,
                 }
             })
             .copied()
     }
 
-    pub fn get<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, version: &W) -> Option<&Val>
+    pub fn get<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<&Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        if let Some(idx) = self.search(hash, key, version) {
+        if let Some(idx) = self.search(hash, key, qey) {
             let (entry, _) = self.entries.get(idx).unwrap();
             if let Ok(resident) = entry {
                 resident.referenced.store(true, atomic::Ordering::Relaxed);
@@ -180,19 +269,14 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
         None
     }
 
-    pub fn get_mut<Q: ?Sized, W: ?Sized>(
-        &mut self,
-        hash: u64,
-        key: &Q,
-        version: &W,
-    ) -> Option<&mut Val>
+    pub fn get_mut<Q: ?Sized, W: ?Sized>(&mut self, hash: u64, key: &Q, qey: &W) -> Option<&mut Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        if let Some(idx) = self.search(hash, key, version) {
+        if let Some(idx) = self.search(hash, key, qey) {
             let (entry, _) = self.entries.get_mut(idx).unwrap();
             if let Ok(resident) = entry {
                 *resident.referenced.get_mut() = true;
@@ -204,14 +288,14 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
         None
     }
 
-    pub fn peek<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, version: &W) -> Option<&Val>
+    pub fn peek<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<&Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        let idx = self.search(hash, key, version)?;
+        let idx = self.search(hash, key, qey)?;
         let (entry, _) = self.entries.get(idx).unwrap();
         if let Ok(resident) = entry {
             Some(&resident.value)
@@ -224,15 +308,15 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
         &mut self,
         hash: u64,
         key: &Q,
-        version: &W,
+        qey: &W,
     ) -> Option<&mut Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        let idx = self.search(hash, key, version)?;
+        let idx = self.search(hash, key, qey)?;
         let (entry, _) = self.entries.get_mut(idx).unwrap();
         if let Ok(resident) = entry {
             Some(&mut resident.value)
@@ -245,29 +329,33 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
         &mut self,
         hash: u64,
         key: &Q,
-        version: &W,
-    ) -> Option<Entry<Key, Ver, Val>>
+        qey: &W,
+    ) -> Option<Entry<Key, Qey, Val>>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        let idx = self.search(hash, key, version)?;
+        let idx = self.search(hash, key, qey)?;
         self.remove_from_map(hash, idx);
         let (entry, next) = self.entries.remove(idx).unwrap();
         let list_head = match &entry {
-            Ok(r) if r.state == ResidentState::Hot => {
-                self.num_hot -= 1;
-                &mut self.hot_head
-            }
             Ok(r) => {
-                debug_assert!(matches!(
-                    r.state,
-                    ResidentState::ColdDemoted | ResidentState::ColdInTest
-                ));
-                self.num_cold -= 1;
-                &mut self.cold_head
+                let weight = self.weighter.weight(&r.key, &r.qey, &r.value);
+                if r.state == ResidentState::Hot {
+                    self.num_hot -= 1;
+                    self.weight_hot -= weight;
+                    &mut self.hot_head
+                } else {
+                    debug_assert!(matches!(
+                        r.state,
+                        ResidentState::ColdDemoted | ResidentState::ColdInTest
+                    ));
+                    self.num_cold -= 1;
+                    self.weight_cold -= weight;
+                    &mut self.cold_head
+                }
             }
             Err(_) => {
                 self.num_non_resident -= 1;
@@ -280,10 +368,16 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
         Some(entry)
     }
 
-    fn advance_cold(&mut self) -> Resident<Key, Ver, Val> {
-        debug_assert_ne!(self.num_cold, 0);
+    /// Advance cold ring, promoting to hot and demoting as needed.
+    /// Returns the evicted entry.
+    /// Panics if the cache is empty.
+    fn advance_cold(&mut self) -> Resident<Key, Qey, Val> {
         loop {
-            let idx = self.cold_head.unwrap();
+            let idx = if let Some(idx) = self.cold_head {
+                idx
+            } else {
+                self.advance_hot()
+            };
             let (entry, next) = self.entries.get_mut(idx).unwrap();
             let resident = entry.as_mut().unwrap();
             debug_assert!(matches!(
@@ -296,6 +390,11 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
                     resident.state = ResidentState::Hot;
                     self.num_hot += 1;
                     self.num_cold -= 1;
+                    let weight =
+                        self.weighter
+                            .weight(&resident.key, &resident.qey, &resident.value);
+                    self.weight_hot += weight;
+                    self.weight_cold -= weight;
                     Self::relink(
                         &mut self.entries,
                         idx,
@@ -304,20 +403,25 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
                     );
                     // demote hot entries as we go, by advancing both lists together
                     // we keep a similar recency in both lists.
-                    if self.num_hot > self.target_hot {
+                    while self.weight_hot > self.weight_target_hot {
                         self.advance_hot();
                     }
                 } else {
                     // ColdDemoted
+                    debug_assert_eq!(resident.state, ResidentState::ColdDemoted);
                     resident.state = ResidentState::ColdInTest;
                     self.cold_head = Some(next);
                 }
                 continue;
             }
 
-            let hash = Self::hash_static(&self.hash_builder, &resident.key, &resident.version);
+            let weight = self
+                .weighter
+                .weight(&resident.key, &resident.qey, &resident.value);
+            let hash = Self::hash_static(&self.hash_builder, &resident.key, &resident.qey);
             let resident = mem::replace(entry, Err(hash)).unwrap();
             self.num_cold -= 1;
+            self.weight_cold -= weight;
 
             // Register a non-resident entry if ColdInTest, the most common case.
             // In the very unlikely event of a hash collision we'll evict a ColdInTest
@@ -344,10 +448,12 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
         }
     }
 
+    /// Advance hot ring demoting entries to cold.
+    /// Returns the Token of the new cold entry.
+    /// Panics if there are no hot entries.
     #[inline]
-    fn advance_hot(&mut self) -> bool {
+    fn advance_hot(&mut self) -> Token {
         debug_assert_ne!(self.num_hot, 0);
-        let mut scan_left = self.max_hot_scan;
         loop {
             let idx = self.hot_head.unwrap();
             let (entry, next) = self.entries.get_mut(idx).unwrap();
@@ -355,25 +461,25 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
             debug_assert_eq!(resident.state, ResidentState::Hot);
             if *resident.referenced.get_mut() {
                 *resident.referenced.get_mut() = false;
-                if scan_left != 0 {
-                    scan_left -= 1;
-                    self.hot_head = Some(next);
-                    continue;
-                }
-                // scan count exhausted, demote to ColdInTest as a compromise
-                resident.state = ResidentState::ColdInTest;
+                self.hot_head = Some(next);
+                continue;
             } else {
                 resident.state = ResidentState::ColdDemoted;
             }
             self.num_hot -= 1;
             self.num_cold += 1;
+            let weight = self
+                .weighter
+                .weight(&resident.key, &resident.qey, &resident.value);
+            self.weight_hot -= weight;
+            self.weight_cold += weight;
             Self::relink(
                 &mut self.entries,
                 idx,
                 &mut self.hot_head,
                 &mut self.cold_head,
             );
-            return true;
+            return idx;
         }
     }
 
@@ -385,97 +491,88 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
         let hash = *entry.as_ref().err().unwrap();
         self.num_non_resident -= 1;
         self.remove_from_map(hash, idx);
-        Self::unlink(&mut self.entries, idx, &mut self.ghost_head);
-    }
-
-    fn evict(&mut self) -> Resident<Key, Ver, Val> {
-        debug_assert!(self.num_hot <= self.target_hot + 1);
-        debug_assert!(self.num_cold <= self.capacity_resident - self.target_hot + 1);
-        debug_assert!(self.num_non_resident <= self.capacity_non_resident);
-        // Demote a hot entry if there are too many or there are no cold entries
-        if self.num_hot > self.target_hot || self.cold_head.is_none() {
-            self.advance_hot();
-        }
-        debug_assert!(self.num_hot <= self.target_hot);
-        debug_assert!(self.num_cold != 0);
-        debug_assert!(self.num_cold <= self.capacity_resident - self.target_hot + 1);
-        let resident = self.advance_cold();
-        debug_assert!(self.num_hot <= self.target_hot);
-        debug_assert!(self.num_cold <= self.capacity_resident - self.target_hot);
-        debug_assert!(self.num_non_resident <= self.capacity_non_resident);
-        resident
+        let (_, next) = self.entries.remove(idx).unwrap();
+        self.ghost_head = next;
     }
 
     fn insert_existing(
         &mut self,
         idx: Token,
         key: Key,
-        version: Ver,
+        qey: Qey,
         value: Val,
-    ) -> Option<Resident<Key, Ver, Val>> {
+        weight: u64,
+    ) -> Option<Resident<Key, Qey, Val>> {
         let (entry, _) = self.entries.get_mut(idx).unwrap();
+        let mut evicted;
         if let Ok(resident) = entry {
+            let evicted_weight =
+                self.weighter
+                    .weight(&resident.key, &resident.qey, &resident.value);
+            if resident.state == ResidentState::Hot {
+                self.weight_hot -= evicted_weight;
+                self.weight_hot += weight;
+            } else {
+                self.weight_cold -= evicted_weight;
+                self.weight_cold += weight;
+            }
             let new_resident = Resident {
                 key,
-                version,
+                qey,
                 value,
                 state: resident.state,
                 referenced: AtomicBool::new(true), // re-insert counts as a hit
             };
-            Some(mem::replace(resident, new_resident))
+            evicted = Some(mem::replace(resident, new_resident));
         } else {
             debug_assert_eq!(
                 *entry.as_ref().err().unwrap(),
-                Self::hash_static(&self.hash_builder, &key, &version)
+                Self::hash_static(&self.hash_builder, &key, &qey)
             );
             *entry = Ok(Resident {
                 key,
-                version,
+                qey,
                 value,
                 state: ResidentState::Hot,
                 referenced: Default::default(),
             });
             self.num_non_resident -= 1;
             self.num_hot += 1;
+            self.weight_hot += weight;
             Self::relink(
                 &mut self.entries,
                 idx,
                 &mut self.ghost_head,
                 &mut self.hot_head,
             );
-            if self.num_hot + self.num_cold > self.capacity_resident {
-                Some(self.evict())
-            } else {
-                None
-            }
+            evicted = None;
         }
-    }
 
-    #[inline]
-    fn link<T>(ring: &mut LinkedSlab<T>, idx: Token, list_head: &mut Option<Token>) {
-        ring.link(idx, *list_head);
-        if list_head.is_none() {
-            *list_head = Some(idx);
+        while self.weight_hot > self.weight_target_hot {
+            self.advance_hot();
         }
-    }
-
-    #[inline]
-    fn unlink<T>(ring: &mut LinkedSlab<T>, idx: Token, source_head: &mut Option<Token>) {
-        let next = ring.unlink(idx);
-        if *source_head == Some(idx) {
-            *source_head = next;
+        // the addition above might have made the cache too big
+        while self.weight_hot + self.weight_cold > self.weight_capacity {
+            evicted = Some(self.advance_cold());
         }
+        evicted
     }
 
     #[inline]
     fn relink<T>(
-        clock: &mut LinkedSlab<T>,
+        ring: &mut LinkedSlab<T>,
         idx: Token,
         source_head: &mut Option<Token>,
         target_head: &mut Option<Token>,
     ) {
-        Self::unlink(clock, idx, source_head);
-        Self::link(clock, idx, target_head);
+        let next = ring.unlink(idx);
+        if *source_head == Some(idx) {
+            *source_head = next;
+        }
+        ring.link(idx, *target_head);
+        if target_head.is_none() {
+            *target_head = Some(idx);
+        }
     }
 
     #[inline]
@@ -488,33 +585,48 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
         &mut self,
         hash: u64,
         key: Key,
-        version: Ver,
+        qey: Qey,
         value: Val,
-    ) -> Option<Resident<Key, Ver, Val>> {
-        if let Some(idx) = self.search(hash, &key, &version) {
-            return self.insert_existing(idx, key, version, value);
+    ) -> Option<Resident<Key, Qey, Val>> {
+        let weight = self.weighter.weight(&key, &qey, &value);
+        if weight > self.weight_target_hot {
+            // don't admit if it won't fit within hot budget
+            return None;
         }
 
-        let evicted;
-        let enter_hot = if self.num_hot + self.num_cold >= self.capacity_resident {
-            evicted = Some(self.evict());
+        if let Some(idx) = self.search(hash, &key, &qey) {
+            return self.insert_existing(idx, key, qey, value, weight);
+        }
+
+        let mut evicted;
+        let enter_hot = if self.weight_hot + self.weight_cold + weight > self.weight_capacity {
+            // evict until we have enough space for this entry
+            loop {
+                evicted = Some(self.advance_cold());
+                if self.weight_hot + self.weight_cold + weight <= self.weight_capacity {
+                    break;
+                }
+            }
             false
         } else {
+            // cache is filling up
             evicted = None;
-            self.num_hot < self.target_hot
+            self.weight_hot + weight <= self.weight_target_hot
         };
 
         let (state, list_head) = if enter_hot {
             self.num_hot += 1;
+            self.weight_hot += weight;
             (ResidentState::Hot, &mut self.hot_head)
         } else {
             self.num_cold += 1;
+            self.weight_cold += weight;
             (ResidentState::ColdInTest, &mut self.cold_head)
         };
         let idx = self.entries.insert(
             Ok(Resident {
                 key,
-                version,
+                qey,
                 value,
                 state,
                 referenced: Default::default(),
@@ -528,7 +640,7 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val, B: BuildHasher> VersionedCacheShard<Ke
         self.map.insert(hash, idx, |&i| {
             let (entry, _) = self.entries.get(i).unwrap();
             match entry {
-                Ok(r) => Self::hash_static(&self.hash_builder, &r.key, &r.version),
+                Ok(r) => Self::hash_static(&self.hash_builder, &r.key, &r.qey),
                 Err(hash) => *hash,
             }
         });

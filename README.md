@@ -4,26 +4,68 @@ Lightweight and high performance concurrent cache optimized for low cache overhe
 
 * Small overhead compared to a concurrent hash table
 * Scan resistent and high hit rate caching policy
+* User defined weight per item
 * Scales well with the number of threads
 * Doesn't use background threads
 * 100% safe code in the crate
 * Small dependency tree
 
 The implementation is optimized for use cases where the cache access times and overhead can add up to be a significant cost.
-Features like: time to live, cost weighting, or event listeners; are not current implemented in Quick Cache.
+Features like: time to live, event listeners and others; are not current implemented in Quick Cache.
 If you need these features you may want to take a look at the [Moka](https://crates.io/crates/moka) crate.
 
-## Example
+## Examples
+
+Basic usage
 
 ```rust
-use quick_cache::sync::Cache;
+use quick_cache::unsync::Cache;
 
 fn main() {
-    let cache = Cache::new(0, 5);
+    let cache = Cache::new(5);
     cache.insert("square", "blue");
     cache.insert("circle", "black");
     assert_eq!(*cache.get(&"square").unwrap(), "blue");
     assert_eq!(*cache.get(&"circle").unwrap(), "black");
+}
+```
+
+A cache with custom item weights. In this case according to the string length of the value.
+
+```rust
+use quick_cache::{Weighter, sync::Cache};
+
+#[derive(Clone)]
+struct StringWeighter;
+
+impl Weighter<u64, (), String> for StringWeighter {
+    fn weight(&self, _key: &u64, _qey: &(), val: &String) -> NonZeroU32 {
+        NonZeroU32::new(val.len().clamp(1, u32::MAX as usize) as u32).unwrap()
+    }
+}
+
+fn main() {
+    let cache = Cache::with_weighter(100, 100_000, StringWeighter);
+    cache.insert(1, "1".to_string());
+    cache.insert(54, "54".to_string());
+    cache.insert(1000, "1000".to_string());
+    assert_eq!(*cache.get(&"1000").unwrap(), "1000");
+}
+```
+
+Two keys variant (KQCache), which allows the caller to avoid making expensive keys on gets.
+
+```rust
+use quick_cache::sync::KQCache;
+
+fn main() {
+    let cache = KQCache::new(5);
+    cache.insert("square".to_string(), 2022, "blue");
+    cache.insert("square".to_string(), 2023, "black");
+    // In a "non-versioned" cache would use a tuple (String, u32) as keys, which could force
+    // the caller to clone/allocate the string in order to form the tuple key.
+    // That is not the case with a versioned cache.
+    assert_eq!(cache.get("square", &2022).unwrap(), "blue");
 }
 ```
 

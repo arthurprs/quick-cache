@@ -1,39 +1,61 @@
-use crate::{shard::VersionedCacheShard, DefaultHashBuilder};
+use crate::{shard::KQCacheShard, DefaultHashBuilder, UnitWeighter, Weighter};
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash},
 };
 
-/// A version aware cache.
+/// A two key cache.
 ///
 /// # Key and Version
-/// The key version pair exists for cases where you want a cache keyed by (T, U).
+/// The key qey pair exists for cases where you want a cache keyed by (K, Q).
 /// Other rust maps/caches are accessed via the Borrow trait,
-/// so they require the caller to build &(T, U) which might involve cloning T and/or U.
-pub struct VersionedCache<Key, Ver, Val, B = DefaultHashBuilder> {
-    shard: VersionedCacheShard<Key, Ver, Val, B>,
+/// so they require the caller to build &(K, Q) which might involve cloning K and/or Q.
+pub struct KQCache<Key, Qey, Val, We = UnitWeighter, B = DefaultHashBuilder> {
+    shard: KQCacheShard<Key, Qey, Val, We, B>,
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone> VersionedCache<Key, Ver, Val, DefaultHashBuilder> {
-    /// Creates a new cache with holds up to `max_capacity` items (approximately)
-    /// and have `initial_capacity` pre-allocated.
-    pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
-        Self::with_hasher(
-            initial_capacity,
-            max_capacity,
+impl<Key: Eq + Hash, Qey: Eq + Hash, Val> KQCache<Key, Qey, Val, UnitWeighter, DefaultHashBuilder> {
+    /// Creates a new cache with holds up to `items_capacity` items (approximately).
+    pub fn new(items_capacity: usize) -> Self {
+        Self::with(
+            items_capacity,
+            items_capacity as u64,
+            UnitWeighter,
             DefaultHashBuilder::default(),
         )
     }
 }
 
-impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: BuildHasher + Clone>
-    VersionedCache<Key, Ver, Val, B>
+impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>>
+    KQCache<Key, Qey, Val, We, DefaultHashBuilder>
 {
-    /// Creates a new cache with holds up to `max_capacity` items (approximately)
-    /// and have `initial_capacity` pre-allocated.
-    pub fn with_hasher(initial_capacity: usize, max_capacity: usize, hasher: B) -> Self {
-        assert!(initial_capacity <= max_capacity);
-        let shard = VersionedCacheShard::new(initial_capacity, max_capacity, hasher);
+    pub fn with_weighter(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+    ) -> KQCache<Key, Qey, Val, We, DefaultHashBuilder> {
+        Self::with(
+            estimated_items_capacity,
+            weight_capacity,
+            weighter,
+            DefaultHashBuilder::default(),
+        )
+    }
+}
+
+impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildHasher>
+    KQCache<Key, Qey, Val, We, B>
+{
+    /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
+    /// roughly equivalent to `weight_capacity / average item weight`.
+    pub fn with(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+        hasher: B,
+    ) -> Self {
+        let shard = KQCacheShard::new(estimated_items_capacity, weight_capacity, weighter, hasher);
         Self { shard }
     }
 
@@ -47,8 +69,13 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: BuildHasher + Clone>
         self.shard.len()
     }
 
-    /// Returns the maximum number of cached items
-    pub fn capacity(&self) -> usize {
+    /// Returns the total weight of cached items
+    pub fn weight(&self) -> u64 {
+        self.shard.weight()
+    }
+
+    /// Returns the maximum weight of cached items
+    pub fn capacity(&self) -> u64 {
         self.shard.capacity()
     }
 
@@ -62,96 +89,125 @@ impl<Key: Eq + Hash, Ver: Eq + Hash, Val: Clone, B: BuildHasher + Clone>
         self.shard.hits()
     }
 
+    /// Reserver additional space for `additional` entries.
+    /// Note that this is counted in entries, and is not weighted.
+    pub fn reserve(&mut self, additional: usize) {
+        self.shard.reserve(additional);
+    }
+
     /// Fetches an item from the cache. Callers should prefer `get_mut` whenever possible as it's more efficient.
-    pub fn get<Q: ?Sized, W: ?Sized>(&self, key: &Q, version: &W) -> Option<&Val>
+    pub fn get<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> Option<&Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        self.shard.get(self.shard.hash(key, version), key, version)
+        self.shard.get(self.shard.hash(key, qey), key, qey)
     }
 
     /// Fetches an item from the cache.
-    pub fn get_mut<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, version: &W) -> Option<&mut Val>
+    pub fn get_mut<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, qey: &W) -> Option<&mut Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        self.shard
-            .get_mut(self.shard.hash(key, version), key, version)
+        self.shard.get_mut(self.shard.hash(key, qey), key, qey)
     }
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
-    pub fn peek<Q: ?Sized, W: ?Sized>(&self, key: &Q, version: &W) -> Option<&Val>
+    pub fn peek<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> Option<&Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        self.shard.peek(self.shard.hash(key, version), key, version)
+        self.shard.peek(self.shard.hash(key, qey), key, qey)
     }
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
-    pub fn peek_mut<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, version: &W) -> Option<&mut Val>
+    pub fn peek_mut<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, qey: &W) -> Option<&mut Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        self.shard
-            .peek_mut(self.shard.hash(key, version), key, version)
+        self.shard.peek_mut(self.shard.hash(key, qey), key, qey)
     }
 
-    /// Peeks an item from the cache whose key is `key` and version is <= `highest_version`.
+    /// Peeks an item from the cache whose key is `key` and qey is <= `highest_version`.
     /// Contrary to gets, peeks don't alter the key "hotness".
-    pub fn remove<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, version: &W) -> bool
+    pub fn remove<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, qey: &W) -> bool
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Ver: Borrow<W>,
+        Qey: Borrow<W>,
         W: Hash + Eq,
     {
         matches!(
-            self.shard
-                .remove(self.shard.hash(key, version), key, version),
+            self.shard.remove(self.shard.hash(key, qey), key, qey),
             Some(Ok(_))
         )
     }
 
-    /// Inserts an item in the cache with key `key` and version `version`.
-    pub fn insert(&mut self, key: Key, version: Ver, value: Val) {
+    /// Inserts an item in the cache with key `key` and qey `qey`.
+    pub fn insert(&mut self, key: Key, qey: Qey, value: Val) {
         self.shard
-            .insert(self.shard.hash(&key, &version), key, version, value);
+            .insert(self.shard.hash(&key, &qey), key, qey, value);
     }
 }
 
-impl<Key, Ver, Val> std::fmt::Debug for VersionedCache<Key, Ver, Val> {
+impl<Key, Qey, Val> std::fmt::Debug for KQCache<Key, Qey, Val> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VersionedCache").finish_non_exhaustive()
+        f.debug_struct("KQCache").finish_non_exhaustive()
     }
 }
 
-pub struct Cache<Key, Val, B = DefaultHashBuilder>(VersionedCache<Key, (), Val, B>);
+pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder>(KQCache<Key, (), Val, We, B>);
 
-impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, DefaultHashBuilder> {
-    /// Creates a new cache with holds up to `capacity` items (approximately).
-    pub fn new(initial_capacity: usize, max_capacity: usize) -> Self {
-        Self(VersionedCache::new(initial_capacity, max_capacity))
+impl<Key: Eq + Hash, Val> Cache<Key, Val, UnitWeighter, DefaultHashBuilder> {
+    /// Creates a new cache with holds up to `items_capacity` items (approximately).
+    pub fn new(items_capacity: usize) -> Self {
+        Self(KQCache::new(items_capacity))
     }
 }
 
-impl<Key: Eq + Hash, Val: Clone, B: Clone + BuildHasher> Cache<Key, Val, B> {
-    /// Creates a new cache with holds up to `capacity` items (approximately).
-    pub fn with_hasher(initial_capacity: usize, max_capacity: usize, hasher: B) -> Self {
-        Self(VersionedCache::with_hasher(
-            initial_capacity,
-            max_capacity,
+impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>> Cache<Key, Val, We, DefaultHashBuilder> {
+    /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
+    /// roughly equivalent to `weight_capacity / average item weight`.
+    pub fn with_weighter(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+    ) -> Cache<Key, Val, We, DefaultHashBuilder> {
+        Self::with(
+            estimated_items_capacity,
+            weight_capacity,
+            weighter,
+            DefaultHashBuilder::default(),
+        )
+    }
+}
+
+impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key, Val, We, B> {
+    /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
+    /// roughly equivalent to `weight_capacity / average item weight`.
+    pub fn with(
+        estimated_items_capacity: usize,
+        weight_capacity: u64,
+        weighter: We,
+        hasher: B,
+    ) -> Self {
+        Self(KQCache::with(
+            estimated_items_capacity,
+            weight_capacity,
+            weighter,
             hasher,
         ))
     }
@@ -166,8 +222,13 @@ impl<Key: Eq + Hash, Val: Clone, B: Clone + BuildHasher> Cache<Key, Val, B> {
         self.0.len()
     }
 
-    /// Returns the maximum number of cached items
-    pub fn capacity(&self) -> usize {
+    /// Returns the total weight of cached items
+    pub fn weight(&self) -> u64 {
+        self.0.weight()
+    }
+
+    /// Returns the maximum weight of cached items
+    pub fn capacity(&self) -> u64 {
         self.0.capacity()
     }
 
@@ -179,6 +240,12 @@ impl<Key: Eq + Hash, Val: Clone, B: Clone + BuildHasher> Cache<Key, Val, B> {
     /// Returns the number of hits
     pub fn hits(&self) -> u64 {
         self.0.hits()
+    }
+
+    /// Reserver additional space for `additional` entries.
+    /// Note that this is counted in entries, and is not weighted.
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
     }
 
     /// Fetches an item from the cache.
@@ -218,7 +285,7 @@ impl<Key: Eq + Hash, Val: Clone, B: Clone + BuildHasher> Cache<Key, Val, B> {
         self.0.peek_mut(key, &())
     }
 
-    /// Peeks an item from the cache whose key is `key` and version is <= `highest_version`.
+    /// Peeks an item from the cache whose key is `key` and qey is <= `highest_version`.
     /// Contrary to gets, peeks don't alter the key "hotness".
     pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> bool
     where
@@ -228,7 +295,7 @@ impl<Key: Eq + Hash, Val: Clone, B: Clone + BuildHasher> Cache<Key, Val, B> {
         self.0.remove(key, &())
     }
 
-    /// Inserts an item in the cache with key `key` and version `version`.
+    /// Inserts an item in the cache with key `key` and qey `qey`.
     pub fn insert(&mut self, key: Key, value: Val) {
         self.0.insert(key, (), value);
     }
