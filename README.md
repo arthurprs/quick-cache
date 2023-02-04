@@ -60,11 +60,11 @@ use quick_cache::sync::KQCache;
 
 fn main() {
     let cache = KQCache::new(5);
+    // Normally the cache key would be the tuple (String, u32), which could force
+    // the caller to clone/allocate the string in order to form the tuple key.
+    // That is not the case with the KQCache.
     cache.insert("square".to_string(), 2022, "blue");
     cache.insert("square".to_string(), 2023, "black");
-    // In a "non-versioned" cache would use a tuple (String, u32) as keys, which could force
-    // the caller to clone/allocate the string in order to form the tuple key.
-    // That is not the case with a versioned cache.
     assert_eq!(cache.get("square", &2022).unwrap(), "blue");
 }
 ```

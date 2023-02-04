@@ -100,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn test_versioned() {
+    fn test_kq() {
         let mut cache = unsync::KQCache::new(5);
         cache.insert("square".to_string(), 2022, "blue".to_string());
         cache.insert("square".to_string(), 2023, "black".to_string());

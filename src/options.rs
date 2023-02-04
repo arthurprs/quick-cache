@@ -92,7 +92,7 @@ impl OptionsBuilder {
     }
 
     /// Builds an `Option` struct which can be used in `Cache::with_options` and `KQCache::with_options` constructors.
-    /// 
+    ///
     /// # Panics
     /// Panics if `weight_capacity` or `estimated_items_capacity` were not set.
     pub fn build(&self) -> Result<Options, Error> {
