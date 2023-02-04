@@ -1,4 +1,4 @@
-use crate::{shard::KQCacheShard, DefaultHashBuilder, UnitWeighter, Weighter};
+use crate::{options::*, shard::KQCacheShard, DefaultHashBuilder, UnitWeighter, Weighter};
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash},
@@ -33,7 +33,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>>
         estimated_items_capacity: usize,
         weight_capacity: u64,
         weighter: We,
-    ) -> KQCache<Key, Qey, Val, We, DefaultHashBuilder> {
+    ) -> Self {
         Self::with(
             estimated_items_capacity,
             weight_capacity,
@@ -53,9 +53,28 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
         estimated_items_capacity: usize,
         weight_capacity: u64,
         weighter: We,
-        hasher: B,
+        hash_builder: B,
     ) -> Self {
-        let shard = KQCacheShard::new(estimated_items_capacity, weight_capacity, weighter, hasher);
+        Self::with_options(
+            OptionsBuilder::new()
+                .estimated_items_capacity(estimated_items_capacity)
+                .weight_capacity(weight_capacity)
+                .build()
+                .unwrap(),
+            weighter,
+            hash_builder,
+        )
+    }
+
+    pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
+        let shard = KQCacheShard::new(
+            options.hot_allocation,
+            options.ghost_allocation,
+            options.estimated_items_capacity,
+            options.weight_capacity,
+            weighter,
+            hash_builder,
+        );
         Self { shard }
     }
 
@@ -184,7 +203,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>> Cache<Key, Val, We, Defaul
         estimated_items_capacity: usize,
         weight_capacity: u64,
         weighter: We,
-    ) -> Cache<Key, Val, We, DefaultHashBuilder> {
+    ) -> Self {
         Self::with(
             estimated_items_capacity,
             weight_capacity,
@@ -202,14 +221,18 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
         estimated_items_capacity: usize,
         weight_capacity: u64,
         weighter: We,
-        hasher: B,
+        hash_builder: B,
     ) -> Self {
         Self(KQCache::with(
             estimated_items_capacity,
             weight_capacity,
             weighter,
-            hasher,
+            hash_builder,
         ))
+    }
+
+    pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
+        Self(KQCache::with_options(options, weighter, hash_builder))
     }
 
     /// Returns whether the cache is empty

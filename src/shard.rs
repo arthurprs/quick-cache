@@ -77,17 +77,15 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
     KQCacheShard<Key, Qey, Val, We, B>
 {
     pub fn new(
+        hot_allocation: f64,
+        ghost_allocation: f64,
         estimated_items_capacity: usize,
         weight_capacity: u64,
         weighter: We,
         hash_builder: B,
     ) -> Self {
-        let weight_capacity = weight_capacity.max(2);
-        // assign 1% of the capacity to cold items
-        let target_hot = weight_capacity - (weight_capacity / 100).max(1);
-        assert!(weight_capacity >= 2);
-        assert!(target_hot >= 1);
-        assert!(weight_capacity - target_hot >= 1);
+        let weight_target_hot = (weight_capacity as f64 * hot_allocation) as u64;
+        let capacity_non_resident = (estimated_items_capacity as f64 * ghost_allocation) as usize;
         Self {
             hash_builder,
             map: RawTable::with_capacity(0),
@@ -98,8 +96,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             cold_head: None,
             hot_head: None,
             ghost_head: None,
-            capacity_non_resident: estimated_items_capacity / 2,
-            weight_target_hot: target_hot,
+            capacity_non_resident,
+            weight_target_hot,
             num_hot: 0,
             num_cold: 0,
             num_non_resident: 0,
@@ -589,8 +587,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         value: Val,
     ) -> Option<Resident<Key, Qey, Val>> {
         let weight = self.weighter.weight(&key, &qey, &value);
-        if weight > self.weight_target_hot {
-            // don't admit if it won't fit within hot budget
+        if weight > self.weight_capacity {
+            // don't admit if it won't fit within the budget
             return None;
         }
 
