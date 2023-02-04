@@ -7,7 +7,7 @@ Lightweight and high performance concurrent cache optimized for low cache overhe
 * User defined weight per item
 * Scales well with the number of threads
 * Doesn't use background threads
-* 100% safe code in the crate
+* One usage of unsafe, trivially verifiable
 * Small dependency tree
 
 The implementation is optimized for use cases where the cache access times and overhead can add up to be a significant cost.
