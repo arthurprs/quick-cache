@@ -177,9 +177,12 @@ impl<
         key.hash(&mut hasher);
         qey.hash(&mut hasher);
         let hash = hasher.finish();
-        self.shards
-            .get((hash & self.shards_mask) as usize)
-            .map(|s| (s, hash))
+        // When choosing the shard, rotate the hash bits usize::BITS / 2 so that we
+        // give preference to the bits in the middle of the hash.
+        // Internally hashbrown uses the lower bits for start of probing + the 7 highest,
+        // so by picking something else we improve the real entropy available to each hashbrown shard.
+        let shard_idx = (hash.rotate_right(usize::BITS / 2) & self.shards_mask) as usize;
+        self.shards.get(shard_idx).map(|s| (s, hash))
     }
 
     /// Reserver additional space for `additional` entries.
