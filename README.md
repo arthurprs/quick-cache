@@ -7,7 +7,7 @@ Lightweight and high performance concurrent cache optimized for low cache overhe
 * User defined weight per item
 * Scales well with the number of threads
 * Doesn't use background threads
-* 100% safe code in the crate
+* One usage of unsafe, trivially verifiable
 * Small dependency tree
 
 The implementation is optimized for use cases where the cache access times and overhead can add up to be a significant cost.
@@ -60,11 +60,11 @@ use quick_cache::sync::KQCache;
 
 fn main() {
     let cache = KQCache::new(5);
+    // Normally the cache key would be the tuple (String, u32), which could force
+    // the caller to clone/allocate the string in order to form the tuple key.
+    // That is not the case with the KQCache.
     cache.insert("square".to_string(), 2022, "blue");
     cache.insert("square".to_string(), 2023, "black");
-    // In a "non-versioned" cache would use a tuple (String, u32) as keys, which could force
-    // the caller to clone/allocate the string in order to form the tuple key.
-    // That is not the case with a versioned cache.
     assert_eq!(cache.get("square", &2022).unwrap(), "blue");
 }
 ```

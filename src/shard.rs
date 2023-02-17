@@ -77,17 +77,15 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
     KQCacheShard<Key, Qey, Val, We, B>
 {
     pub fn new(
+        hot_allocation: f64,
+        ghost_allocation: f64,
         estimated_items_capacity: usize,
         weight_capacity: u64,
         weighter: We,
         hash_builder: B,
     ) -> Self {
-        let weight_capacity = weight_capacity.max(2);
-        // assign 1% of the capacity to cold items
-        let target_hot = weight_capacity - (weight_capacity / 100).max(1);
-        assert!(weight_capacity >= 2);
-        assert!(target_hot >= 1);
-        assert!(weight_capacity - target_hot >= 1);
+        let weight_target_hot = (weight_capacity as f64 * hot_allocation) as u64;
+        let capacity_non_resident = (estimated_items_capacity as f64 * ghost_allocation) as usize;
         Self {
             hash_builder,
             map: RawTable::with_capacity(0),
@@ -98,8 +96,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             cold_head: None,
             hot_head: None,
             ghost_head: None,
-            capacity_non_resident: estimated_items_capacity / 2,
-            weight_target_hot: target_hot,
+            capacity_non_resident,
+            weight_target_hot,
             num_hot: 0,
             num_cold: 0,
             num_non_resident: 0,
@@ -223,31 +221,29 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        self.map
-            .get(hash, |&idx| {
+        // Safety for `RawTable::iter_hash` and `Bucket::as_ref`:
+        // * Their outputs do not outlive their HashBrown:
+        // The HashBrown instance is alive for the entirety of the function and
+        // the content references never leave the function.
+        // * HashBrown can't be mutated while being iterated with iter_hash:
+        // The HashBrown instance isn't mutated in this method.
+        unsafe {
+            let mut hash_match = None;
+            for bucket in self.map.iter_hash(hash) {
+                let idx = *bucket.as_ref();
                 let (entry, _) = self.entries.get(idx).unwrap();
                 match entry {
-                    Ok(r) => r.key.borrow() == key && r.qey.borrow() == qey,
-                    Err(non_resident_hash) => *non_resident_hash == hash,
+                    Ok(r) if r.key.borrow() == key && r.qey.borrow() == qey => {
+                        return Some(idx);
+                    }
+                    Err(non_resident_hash) if *non_resident_hash == hash => {
+                        hash_match = Some(idx);
+                    }
+                    _ => (),
                 }
-            })
-            .copied()
-    }
-
-    #[inline]
-    fn search_collision(&self, hash: u64, original_idx: Token) -> Option<Token> {
-        self.map
-            .get(hash, |&idx| {
-                if idx == original_idx {
-                    return false;
-                }
-                let (entry, _) = self.entries.get(idx).unwrap();
-                match entry {
-                    Ok(r) => self.hash(&r.key, &r.qey) == hash,
-                    Err(non_resident_hash) => *non_resident_hash == hash,
-                }
-            })
-            .copied()
+            }
+            hash_match
+        }
     }
 
     pub fn get<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<&Val>
@@ -423,12 +419,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             self.num_cold -= 1;
             self.weight_cold -= weight;
 
-            // Register a non-resident entry if ColdInTest, the most common case.
-            // In the very unlikely event of a hash collision we'll evict a ColdInTest
-            // like a ColdDemoted, without registering a non-resident entry.
-            if resident.state == ResidentState::ColdInTest
-                && self.search_collision(hash, idx).is_none()
-            {
+            // Register a non-resident entry if ColdInTest
+            if resident.state == ResidentState::ColdInTest {
                 self.num_non_resident += 1;
                 Self::relink(
                     &mut self.entries,
@@ -589,8 +581,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         value: Val,
     ) -> Option<Resident<Key, Qey, Val>> {
         let weight = self.weighter.weight(&key, &qey, &value);
-        if weight > self.weight_target_hot {
-            // don't admit if it won't fit within hot budget
+        if weight > self.weight_capacity {
+            // don't admit if it won't fit within the budget
             return None;
         }
 

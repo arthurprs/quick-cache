@@ -32,11 +32,17 @@ use std::num::NonZeroU32;
 mod linked_slab;
 #[cfg(fuzzing)]
 pub mod linked_slab;
+#[cfg(not(fuzzing))]
+mod options;
+#[cfg(fuzzing)]
+pub mod options;
 mod shard;
 /// Concurrent cache variants that can be used from multiple threads.
 pub mod sync;
 /// Non-concurrent cache variants.
 pub mod unsync;
+
+pub use options::{Options, OptionsBuilder};
 
 #[cfg(feature = "ahash")]
 pub type DefaultHashBuilder = ahash::RandomState;
@@ -94,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn test_versioned() {
+    fn test_kq() {
         let mut cache = unsync::KQCache::new(5);
         cache.insert("square".to_string(), 2022, "blue".to_string());
         cache.insert("square".to_string(), 2023, "black".to_string());

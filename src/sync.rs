@@ -1,4 +1,8 @@
-use crate::{shard::KQCacheShard, DefaultHashBuilder, UnitWeighter, Weighter};
+use crate::{
+    options::{Options, OptionsBuilder},
+    shard::KQCacheShard,
+    DefaultHashBuilder, UnitWeighter, Weighter,
+};
 use parking_lot::RwLock;
 use std::{
     borrow::Borrow,
@@ -48,7 +52,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val: Clone, We: Weighter<Key, Qey, Val> + C
         estimated_items_capacity: usize,
         weight_capacity: u64,
         weighter: We,
-    ) -> KQCache<Key, Qey, Val, We, DefaultHashBuilder> {
+    ) -> Self {
         Self::with(
             estimated_items_capacity,
             weight_capacity,
@@ -73,36 +77,48 @@ impl<
         estimated_items_capacity: usize,
         weight_capacity: u64,
         weighter: We,
-        hasher: B,
+        hash_builder: B,
     ) -> Self {
-        let mut num_shards = std::thread::available_parallelism()
-            .map_or(4, |n| n.get() * 4)
-            .min(estimated_items_capacity)
-            .next_power_of_two() as u64;
-        let estimated_items_capacity = estimated_items_capacity as u64;
-        let mut shard_items_capacity =
+        Self::with_options(
+            OptionsBuilder::new()
+                .estimated_items_capacity(estimated_items_capacity)
+                .weight_capacity(weight_capacity)
+                .build()
+                .unwrap(),
+            weighter,
+            hash_builder,
+        )
+    }
+
+    pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
+        let mut num_shards = options.shards.next_power_of_two() as u64;
+        let estimated_items_capacity = options.estimated_items_capacity as u64;
+        let weight_capacity = options.weight_capacity;
+        let mut shard_items_cap =
             estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
-        let mut shard_max_weight = weight_capacity.saturating_add(num_shards - 1) / num_shards;
+        let mut shard_weight_cap =
+            options.weight_capacity.saturating_add(num_shards - 1) / num_shards;
         // try to make each shard hold at least 32 items
-        while shard_items_capacity < 32 && num_shards > 1 {
+        while shard_items_cap < 32 && num_shards > 1 {
             num_shards /= 2;
-            shard_items_capacity =
-                estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
-            shard_max_weight = weight_capacity.saturating_add(num_shards - 1) / num_shards;
+            shard_items_cap = estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
+            shard_weight_cap = weight_capacity.saturating_add(num_shards - 1) / num_shards;
         }
         let shards = (0..num_shards)
             .map(|_| {
                 RwLock::new(KQCacheShard::new(
-                    shard_items_capacity as usize,
-                    shard_max_weight,
+                    options.hot_allocation,
+                    options.ghost_allocation,
+                    shard_items_cap as usize,
+                    shard_weight_cap,
                     weighter.clone(),
-                    hasher.clone(),
+                    hash_builder.clone(),
                 ))
             })
             .collect::<Vec<_>>();
         Self {
             shards: shards.into_boxed_slice(),
-            hash_builder: hasher,
+            hash_builder,
             shards_mask: num_shards - 1,
         }
     }
@@ -161,9 +177,12 @@ impl<
         key.hash(&mut hasher);
         qey.hash(&mut hasher);
         let hash = hasher.finish();
-        self.shards
-            .get((hash & self.shards_mask) as usize)
-            .map(|s| (s, hash))
+        // When choosing the shard, rotate the hash bits usize::BITS / 2 so that we
+        // give preference to the bits in the middle of the hash.
+        // Internally hashbrown uses the lower bits for start of probing + the 7 highest,
+        // so by picking something else we improve the real entropy available to each hashbrown shard.
+        let shard_idx = (hash.rotate_right(usize::BITS / 2) & self.shards_mask) as usize;
+        self.shards.get(shard_idx).map(|s| (s, hash))
     }
 
     /// Reserver additional space for `additional` entries.
@@ -260,7 +279,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone>
         estimated_items_capacity: usize,
         weight_capacity: u64,
         weighter: We,
-    ) -> Cache<Key, Val, We, DefaultHashBuilder> {
+    ) -> Self {
         Self::with(
             estimated_items_capacity,
             weight_capacity,
@@ -288,6 +307,10 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
             weighter,
             hash_builder,
         ))
+    }
+
+    pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
+        Self(KQCache::with_options(options, weighter, hash_builder))
     }
 
     /// Returns whether the cache is empty
