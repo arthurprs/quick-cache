@@ -74,99 +74,71 @@ fn main() {
 Since this crate is performance oriented it needs some comparisons.
 That said, benchmarks can be misleading so take everything with a pinch of salt.
 
-Benchmarks performed with a modified version of [mokabench](https://github.com/arthurprs/mokabench/tree/reduce-overhead-add-quick-cache) in a x64 Linux OS + AMD 4900HS CPU system.
+Benchmarks performed with [mokabench](https://github.com/moka-rs/mokabench) in a x64 Linux OS + Intel i9-12900H CPU.
 
 ### Trace 1 (S3 from the Arc paper)
 
-| Cache | Max Capacity | Clients | Hit Ratio | Duration Secs |
-|---|---|---|---|---|
-| QuickCache | 100000 | 1 | 12.763 | 7.959 |
-| QuickCache | 100000 | 4 | 12.765 | 3.333 |
-| QuickCache | 100000 | 8 | 12.764 | 2.785 |
-| Moka Sync Cache | 100000 | 1 | 10.653 | 43.169 |
-| Moka Sync Cache | 100000 | 4 | 10.504 | 44.138 |
-| Moka Sync Cache | 100000 | 8 | 10.547 | 42.064 |
-| Moka Dash Cache | 100000 | 1 | 10.594 | 29.46 |
-| Moka Dash Cache | 100000 | 4 | 10.558 | 22.415 |
-| Moka Dash Cache | 100000 | 8 | 10.573 | 21.411 |
-| Moka SegmentedCache(8) | 100000 | 1 | 10.099 | 36.963 |
-| Moka SegmentedCache(8) | 100000 | 4 | 10.158 | 19.809 |
-| Moka SegmentedCache(8) | 100000 | 8 | 10.181 | 15.021 |
-| QuickCache | 400000 | 1 | 42.066 | 10.25 |
-| QuickCache | 400000 | 4 | 42.066 | 3.644 |
-| QuickCache | 400000 | 8 | 42.066 | 3.171 |
-| Moka Sync Cache | 400000 | 1 | 42.361 | 34.572 |
-| Moka Sync Cache | 400000 | 4 | 41.137 | 32.692 |
-| Moka Sync Cache | 400000 | 8 | 40.972 | 34.646 |
-| Moka Dash Cache | 400000 | 1 | 41.487 | 24.216 |
-| Moka Dash Cache | 400000 | 4 | 41.054 | 17.642 |
-| Moka Dash Cache | 400000 | 8 | 41.106 | 17.443 |
-| Moka SegmentedCache(8) | 400000 | 1 | 42.391 | 32.021 |
-| Moka SegmentedCache(8) | 400000 | 4 | 42.369 | 19.14 |
-| Moka SegmentedCache(8) | 400000 | 8 | 42.382 | 16.229 |
-| QuickCache | 800000 | 1 | 66.804 | 11.022 |
-| QuickCache | 800000 | 4 | 66.804 | 3.223 |
-| QuickCache | 800000 | 8 | 66.804 | 2.753 |
-| Moka Sync Cache | 800000 | 1 | 69.997 | 21.171 |
-| Moka Sync Cache | 800000 | 4 | 65.976 | 18.575 |
-| Moka Sync Cache | 800000 | 8 | 65.329 | 18.081 |
-| Moka Dash Cache | 800000 | 1 | 70.119 | 15.257 |
-| Moka Dash Cache | 800000 | 4 | 65.624 | 10.837 |
-| Moka Dash Cache | 800000 | 8 | 65.843 | 10.172 |
-| Moka SegmentedCache(8) | 800000 | 1 | 70.325 | 23.146 |
-| Moka SegmentedCache(8) | 800000 | 4 | 70.318 | 12.466 |
-| Moka SegmentedCache(8) | 800000 | 8 | 69.981 | 10.56 |
+| Cache                   | Max Capacity | Clients | Hit Ratio(%) | Elapsed time(s) |
+|-------------------------|--------------|---------|--------------|-----------------|
+| HashLink (LRU w/ Mutex) |  100000      |  1      |  2.327       |  2.479          |
+| HashLink (LRU w/ Mutex) |  100000      |  3      |  2.327       |  6.171          |
+| HashLink (LRU w/ Mutex) |  100000      |  6      |  2.328       |  12.467         |
+| **QuickCache Sync Cache**   |  100000      |  1      |  12.764      |  2.465          |
+| **QuickCache Sync Cache**   |  100000      |  3      |  12.765      |  1.387          |
+| **QuickCache Sync Cache**   |  100000      |  6      |  12.764      |  0.835          |
+| Mini Moka Sync Cache    |  100000      |  1      |  10.436      |  10.473         |
+| Mini Moka Sync Cache    |  100000      |  3      |  10.541      |  8.439          |
+| Mini Moka Sync Cache    |  100000      |  6      |  10.366      |  8.008          |
+| HashLink (LRU w/ Mutex) |  400000      |  1      |  12.039      |  2.956          |
+| HashLink (LRU w/ Mutex) |  400000      |  3      |  12.041      |  6.939          |
+| HashLink (LRU w/ Mutex) |  400000      |  6      |  12.043      |  13.503         |
+| **QuickCache Sync Cache**   |  400000      |  1      |  42.044      |  3.250          |
+| **QuickCache Sync Cache**   |  400000      |  3      |  42.044      |  1.299          |
+| **QuickCache Sync Cache**   |  400000      |  6      |  42.044      |  0.777          |
+| Mini Moka Sync Cache    |  400000      |  1      |  42.544      |  9.671          |
+| Mini Moka Sync Cache    |  400000      |  3      |  41.525      |  7.052          |
+| Mini Moka Sync Cache    |  400000      |  6      |  41.007      |  6.618          |
+| HashLink (LRU w/ Mutex) |  800000      |  1      |  56.600      |  3.221          |
+| HashLink (LRU w/ Mutex) |  800000      |  3      |  56.603      |  5.921          |
+| HashLink (LRU w/ Mutex) |  800000      |  6      |  56.605      |  12.768         |
+| **QuickCache Sync Cache**   |  800000      |  1      |  66.801      |  3.980          |
+| **QuickCache Sync Cache**   |  800000      |  3      |  66.802      |  1.418          |
+| **QuickCache Sync Cache**   |  800000      |  6      |  66.803      |  0.798          |
+| Mini Moka Sync Cache    |  800000      |  1      |  70.304      |  10.613         |
+| Mini Moka Sync Cache    |  800000      |  3      |  68.054      |  4.754          |
+| Mini Moka Sync Cache    |  800000      |  6      |  66.288      |  4.137          |
 
 ### Trace 2 (DS1 from the Arc paper)
 
-| Cache | Max Capacity | Clients | Hit Ratio | Duration Secs |
-|---|---|---|---|---|
-| QuickCache | 1000000 | 1 | 15.042 | 26.685 |
-| QuickCache | 1000000 | 4 | 15.068 | 9.55 |
-| QuickCache | 1000000 | 8 | 15.061 | 6.435 |
-| Moka Dash Cache | 1000000 | 1 | 14.264 | 77.287 |
-| Moka Dash Cache | 1000000 | 4 | 12.909 | 79.323 |
-| Moka Dash Cache | 1000000 | 8 | 12.654 | 74.825 |
-| Moka Sync Cache | 1000000 | 1 | 15.793 | 158.375 |
-| Moka Sync Cache | 1000000 | 4 | 13.11 | 152.436 |
-| Moka Sync Cache | 1000000 | 8 | 12.984 | 152.025 |
-| Moka SegmentedCache(8) | 1000000 | 1 | 14.968 | 139.847 |
-| Moka SegmentedCache(8) | 1000000 | 4 | 14.945 | 90.105 |
-| Moka SegmentedCache(8) | 1000000 | 8 | 15.34 | 80.393 |
-| QuickCache | 4000000 | 1 | 44.57 | 24.924 |
-| QuickCache | 4000000 | 4 | 44.587 | 9.245 |
-| QuickCache | 4000000 | 8 | 44.544 | 5.611 |
-| Moka Dash Cache | 4000000 | 1 | 44.484 | 50.966 |
-| Moka Dash Cache | 4000000 | 4 | 39.112 | 44.108 |
-| Moka Dash Cache | 4000000 | 8 | 36.784 | 44.211 |
-| Moka Sync Cache | 4000000 | 1 | 44.158 | 104.393 |
-| Moka Sync Cache | 4000000 | 4 | 37.699 | 106.608 |
-| Moka Sync Cache | 4000000 | 8 | 39.013 | 103.128 |
-| Moka SegmentedCache(8) | 4000000 | 1 | 45.322 | 91.684 |
-| Moka SegmentedCache(8) | 4000000 | 4 | 45.32 | 62.892 |
-| Moka SegmentedCache(8) | 4000000 | 8 | 44.975 | 56.42 |
-| QuickCache | 8000000 | 1 | 71.127 | 16.265 |
-| QuickCache | 8000000 | 4 | 71.139 | 5.35 |
-| QuickCache | 8000000 | 8 | 71.147 | 3.488 |
-| Moka Dash Cache | 8000000 | 1 | 68.285 | 32.656 |
-| Moka Dash Cache | 8000000 | 4 | 64.365 | 25.279 |
-| Moka Dash Cache | 8000000 | 8 | 63.948 | 24.945 |
-| Moka Sync Cache | 8000000 | 1 | 67.654 | 43.469 |
-
-### Trace 3 (OLTP from the Arc paper)
-
-This is a much smaller dataset and since Moka Dash Cache and Sync Cache over-allocate several thousants of entries (internal write buffer) they are not comparable in this test.
-
-| Cache | Max Capacity | Clients | Hit Ratio | Duration Secs |
-|---|---|---|---|---|
-| Moka Unsync Cache | 256 | 1 | 21.244 | 0.313 |
-| QuickCache | 256 | 1 | 18.349 | 0.29 |
-| Moka Unsync Cache | 512 | 1 | 28.207 | 0.317 |
-| QuickCache | 512 | 1 | 27.099 | 0.268 |
-| Moka Unsync Cache | 1000 | 1 | 34.2 | 0.326 |
-| QuickCache | 1000 | 1 | 35.932 | 0.276 |
-| Moka Unsync Cache | 2000 | 1 | 39.868 | 0.322 |
-| QuickCache | 2000 | 1 | 42.405 | 0.276 |
+| Cache                   | Max Capacity | Clients |  Hit Ratio(%) |  Elapsed time(s) |
+|-------------------------|--------------|---------|---------------|------------------|
+| HashLink (LRU w/ Mutex) |  1000000     |  1      |  3.086        |  10.097          |
+| HashLink (LRU w/ Mutex) |  1000000     |  3      |  3.085        |  22.443          |
+| HashLink (LRU w/ Mutex) |  1000000     |  6      |  3.082        |  41.351          |
+| **QuickCache Sync Cache**   |  1000000     |  1      |  15.052       |  9.426           |
+| **QuickCache Sync Cache**   |  1000000     |  3      |  15.059       |  4.139           |
+| **QuickCache Sync Cache**   |  1000000     |  6      |  15.078       |  2.467           |
+| Mini Moka Sync Cache    |  1000000     |  1      |  14.910       |  28.974          |
+| Mini Moka Sync Cache    |  1000000     |  3      |  13.257       |  24.681          |
+| Mini Moka Sync Cache    |  1000000     |  6      |  13.518       |  22.759          |
+| HashLink (LRU w/ Mutex) |  4000000     |  1      |  20.245       |  9.863           |
+| HashLink (LRU w/ Mutex) |  4000000     |  3      |  20.250       |  19.418          |
+| HashLink (LRU w/ Mutex) |  4000000     |  6      |  20.259       |  36.932          |
+| **QuickCache Sync Cache**   |  4000000     |  1      |  44.565       |  9.083           |
+| **QuickCache Sync Cache**   |  4000000     |  3      |  44.574       |  4.272           |
+| **QuickCache Sync Cache**   |  4000000     |  6      |  44.569       |  2.449           |
+| Mini Moka Sync Cache    |  4000000     |  1      |  45.398       |  31.108          |
+| Mini Moka Sync Cache    |  4000000     |  3      |  44.236       |  21.381          |
+| Mini Moka Sync Cache    |  4000000     |  6      |  41.723       |  18.719          |
+| HashLink (LRU w/ Mutex) |  8000000     |  1      |  43.035       |  9.751           |
+| HashLink (LRU w/ Mutex) |  8000000     |  3      |  43.034       |  16.554          |
+| HashLink (LRU w/ Mutex) |  8000000     |  6      |  43.031       |  34.978          |
+| **QuickCache Sync Cache**   |  8000000     |  1      |  71.124       |  7.675           |
+| **QuickCache Sync Cache**   |  8000000     |  3      |  71.139       |  3.198           |
+| **QuickCache Sync Cache**   |  8000000     |  6      |  71.143       |  2.348           |
+| Mini Moka Sync Cache    |  8000000     |  1      |  67.447       |  28.462          |
+| Mini Moka Sync Cache    |  8000000     |  3      |  67.995       |  17.054          |
+| Mini Moka Sync Cache    |  8000000     |  6      |  64.738       |  12.929          |
 
 ## References
 
