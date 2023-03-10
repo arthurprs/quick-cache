@@ -247,7 +247,7 @@ impl<
     }
 }
 
-impl<Key: Eq + Hash, Qey: Eq + Hash, Val: Clone> std::fmt::Debug for KQCache<Key, Qey, Val> {
+impl<Key, Qey, Val, We, B> std::fmt::Debug for KQCache<Key, Qey, Val, We, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KQCache").finish_non_exhaustive()
     }
@@ -384,7 +384,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 }
 
-impl<Key: Eq + Hash, Val: Clone> std::fmt::Debug for Cache<Key, Val> {
+impl<Key, Val, We, B> std::fmt::Debug for Cache<Key, Val, We, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cache").finish_non_exhaustive()
     }
