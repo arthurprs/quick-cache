@@ -1,9 +1,9 @@
 use crate::{
     options::{Options, OptionsBuilder},
+    rw_lock::RwLock,
     shard::KQCacheShard,
     DefaultHashBuilder, UnitWeighter, Weighter,
 };
-use parking_lot::RwLock;
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash, Hasher},
