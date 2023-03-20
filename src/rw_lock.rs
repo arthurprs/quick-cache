@@ -52,89 +52,89 @@ pub struct RwLockReadGuard<'rwlock, T: ?Sized>(InnerRwLockReadGuard<'rwlock, T>)
 pub struct RwLockWriteGuard<'rwlock, T: ?Sized>(InnerRwLockWriteGuard<'rwlock, T>);
 
 impl<T> RwLock<T> {
-	/// Creates a new instance of an `RwLock<T>` which is unlocked.
-	pub const fn new(t: T) -> Self {
-		Self(InnerRwLock::new(t))
-	}
+    /// Creates a new instance of an `RwLock<T>` which is unlocked.
+    pub const fn new(t: T) -> Self {
+        Self(InnerRwLock::new(t))
+    }
 }
 
 impl<T: ?Sized> RwLock<T> {
-	/// Locks this `RwLock` with shared read access, blocking the current thread
-	/// until it can be acquired.
-	///
-	/// The calling thread will be blocked until there are no more writers which
-	/// hold the lock. There may be other readers currently inside the lock when
-	/// this method returns. This method does not provide any guarantees with
-	/// respect to the ordering of whether contentious readers or writers will
-	/// acquire the lock first.
-	///
-	/// Returns an RAII guard which will release this thread's shared access
-	/// once it is dropped.
-	///
-	/// # Panics
-	///
-	/// This function might panic when called if the lock is already held by the
-	/// current thread, or if the `RwLock` is poisoned. An `RwLock` might be
-	/// poisoned whenever a writer panics while holding an exclusive lock.
-	/// Implementations are not required to implement poisoning.
-	#[inline]
-	pub fn read(&self) -> RwLockReadGuard<'_, T> {
-		RwLockReadGuard({
-			#[cfg(feature = "parking_lot")]
-			{
-				self.0.read()
-			}
-			#[cfg(not(feature = "parking_lot"))]
-			self.0.read().unwrap()
-		})
-	}
+    /// Locks this `RwLock` with shared read access, blocking the current thread
+    /// until it can be acquired.
+    ///
+    /// The calling thread will be blocked until there are no more writers which
+    /// hold the lock. There may be other readers currently inside the lock when
+    /// this method returns. This method does not provide any guarantees with
+    /// respect to the ordering of whether contentious readers or writers will
+    /// acquire the lock first.
+    ///
+    /// Returns an RAII guard which will release this thread's shared access
+    /// once it is dropped.
+    ///
+    /// # Panics
+    ///
+    /// This function might panic when called if the lock is already held by the
+    /// current thread, or if the `RwLock` is poisoned. An `RwLock` might be
+    /// poisoned whenever a writer panics while holding an exclusive lock.
+    /// Implementations are not required to implement poisoning.
+    #[inline]
+    pub fn read(&self) -> RwLockReadGuard<'_, T> {
+        RwLockReadGuard({
+            #[cfg(feature = "parking_lot")]
+            {
+                self.0.read()
+            }
+            #[cfg(not(feature = "parking_lot"))]
+            self.0.read().unwrap()
+        })
+    }
 
-	/// Locks this `RwLock` with exclusive write access, blocking the current
-	/// thread until it can be acquired.
-	///
-	/// This function will not return while other writers or other readers
-	/// currently have access to the lock.
-	///
-	/// Returns an RAII guard which will drop the write access of this `RwLock`
-	/// when dropped.
-	///
-	/// # Panics
-	///
-	/// This function might panic when called if the lock is already held by the
-	/// current thread, or if the `RwLock` is poisoned. An `RwLock` might be
-	/// poisoned whenever a writer panics while holding an exclusive lock.
-	/// Implementations are not required to implement poisoning.
-	#[inline]
-	pub fn write(&self) -> RwLockWriteGuard<'_, T> {
-		RwLockWriteGuard({
-			#[cfg(feature = "parking_lot")]
-			{
-				self.0.write()
-			}
-			#[cfg(not(feature = "parking_lot"))]
-			self.0.write().unwrap()
-		})
-	}
+    /// Locks this `RwLock` with exclusive write access, blocking the current
+    /// thread until it can be acquired.
+    ///
+    /// This function will not return while other writers or other readers
+    /// currently have access to the lock.
+    ///
+    /// Returns an RAII guard which will drop the write access of this `RwLock`
+    /// when dropped.
+    ///
+    /// # Panics
+    ///
+    /// This function might panic when called if the lock is already held by the
+    /// current thread, or if the `RwLock` is poisoned. An `RwLock` might be
+    /// poisoned whenever a writer panics while holding an exclusive lock.
+    /// Implementations are not required to implement poisoning.
+    #[inline]
+    pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+        RwLockWriteGuard({
+            #[cfg(feature = "parking_lot")]
+            {
+                self.0.write()
+            }
+            #[cfg(not(feature = "parking_lot"))]
+            self.0.write().unwrap()
+        })
+    }
 }
 
 impl<T: ?Sized> Deref for RwLockReadGuard<'_, T> {
-	type Target = T;
+    type Target = T;
 
-	fn deref(&self) -> &Self::Target {
-		&self.0
-	}
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl<T: ?Sized> Deref for RwLockWriteGuard<'_, T> {
-	type Target = T;
+    type Target = T;
 
-	fn deref(&self) -> &Self::Target {
-		&self.0
-	}
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl<T: ?Sized> DerefMut for RwLockWriteGuard<'_, T> {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		&mut self.0
-	}
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
