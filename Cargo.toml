@@ -10,6 +10,7 @@ keywords = ["lru", "concurrent", "cache"]
 categories = ["caching", "concurrency", "data-structures"]
 readme = "README.md"
 exclude = ["fuzz"]
+rust-version = "1.63"
 
 [features]
 default = ["ahash", "parking_lot"]
