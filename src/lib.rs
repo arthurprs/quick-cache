@@ -25,6 +25,12 @@
 //! By default the crate uses [ahash](https://crates.io/crates/ahash), which is enabled (by default) via
 //! a crate feature with the same name. If the `ahash` feature is disabled the crate defaults to the std lib
 //! implementation instead (currently Siphash13). Note that a custom hasher can also be provided if desirable.
+//!
+//! # Synchronization primitives
+//!
+//! By default the crate uses [parking_lot](https://crates.io/crates/parking_lot), which is enabled (by default) via
+//! a crate feature with the same name. If the `parking_lot` feature is disabled the crate defaults to the std lib
+//! implementation instead.
 
 use std::num::NonZeroU32;
 
@@ -36,6 +42,7 @@ pub mod linked_slab;
 mod options;
 #[cfg(fuzzing)]
 pub mod options;
+mod rw_lock;
 mod shard;
 /// Concurrent cache variants that can be used from multiple threads.
 pub mod sync;

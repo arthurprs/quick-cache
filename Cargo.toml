@@ -10,14 +10,15 @@ keywords = ["lru", "concurrent", "cache"]
 categories = ["caching", "concurrency", "data-structures"]
 readme = "README.md"
 exclude = ["fuzz"]
+rust-version = "1.63"
 
 [features]
-default = ["dep:ahash"]
+default = ["ahash", "parking_lot"]
 
 [dependencies]
 ahash = { optional = true, version = "0.8" }
 hashbrown = { version = "0.13", default-features = false, features = ["raw", "inline-more"] }
-parking_lot = "0.12"
+parking_lot = { optional = true, version = "0.12" }
 
 [dev-dependencies]
 criterion = "0.3"
