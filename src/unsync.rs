@@ -158,8 +158,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
         self.shard.peek_mut(self.shard.hash(key, qey), key, qey)
     }
 
-    /// Peeks an item from the cache whose key is `key` and qey is <= `highest_version`.
-    /// Contrary to gets, peeks don't alter the key "hotness".
+    /// Remove an item from the cache whose key is `key` and qey is `qey`.
+    /// Returns whether an entry was removed.
     pub fn remove<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, qey: &W) -> bool
     where
         Key: Borrow<Q>,
@@ -308,8 +308,8 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
         self.0.peek_mut(key, &())
     }
 
-    /// Peeks an item from the cache whose key is `key` and qey is <= `highest_version`.
-    /// Contrary to gets, peeks don't alter the key "hotness".
+    /// Remove an item from the cache whose key is `key`.
+    /// Returns whether an entry was removed.
     pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> bool
     where
         Key: Borrow<Q>,

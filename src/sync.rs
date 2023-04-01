@@ -220,8 +220,8 @@ impl<
         shard.read().peek(hash, key, qey).cloned()
     }
 
-    /// Peeks an item from the cache whose key is `key` and qey is <= `highest_version`.
-    /// Contrary to gets, peeks don't alter the key "hotness".
+    /// Remove an item from the cache whose key is `key` and qey is `qey`.
+    /// Returns whether an entry was removed.
     pub fn remove<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> bool
     where
         Key: Borrow<Q>,
@@ -368,8 +368,8 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
         self.0.peek(key, &())
     }
 
-    /// Peeks an item from the cache whose key is `key` and qey is <= `highest_version`.
-    /// Contrary to gets, peeks don't alter the key "hotness".
+    /// Remove an item from the cache whose key is `key`.
+    /// Returns whether an entry was removed.
     pub fn remove<Q: ?Sized>(&self, key: &Q) -> bool
     where
         Key: Borrow<Q>,
