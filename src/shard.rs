@@ -2,7 +2,10 @@ use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash, Hasher},
     mem,
-    sync::atomic::{self, AtomicBool, AtomicU64},
+    sync::{
+        atomic::{self, AtomicBool, AtomicU64},
+        Arc,
+    },
 };
 
 use hashbrown::raw::RawTable;
@@ -41,8 +44,48 @@ pub struct Resident<Key, Qey, Val> {
     referenced: AtomicBool,
 }
 
-/// Entries can be either Resident `Ok(Resident)` or Ghost `Err(hash)`.
-pub type Entry<Key, Qey, Val> = Result<Resident<Key, Qey, Val>, u64>;
+#[derive(Debug)]
+pub struct Sentinel<Key, Qey> {
+    key: Key,
+    qey: Qey,
+    shared: Option<Arc<SentinelShared>>,
+}
+
+#[derive(Debug, Default)]
+struct SentinelShared {
+    waiters: Vec<Waiter>,
+    state: SentinelState,
+}
+
+#[derive(Debug, Default)]
+enum SentinelState {
+    Loading,
+    Loaded,
+    #[default]
+    Abandoned,
+    Inserted,
+}
+
+#[derive(Debug)]
+enum Waiter {
+    Thread(std::thread::Thread),
+    Task(std::task::Waker),
+}
+
+impl Waiter {
+    fn notify(self) {
+        match self {
+            Waiter::Thread(t) => t.unpark(),
+            Waiter::Task(t) => t.wake(),
+        }
+    }
+}
+
+pub enum Entry<Key, Qey, Val> {
+    Resident(Resident<Key, Qey, Val>),
+    Sentinel(Sentinel<Key, Qey>),
+    Ghost(u64),
+}
 
 /// A qey aware cache using a modified CLOCK-PRO eviction policy.
 /// The implementation allows some parallelism as gets don't require exclusive access.
@@ -162,8 +205,11 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         self.map.reserve(additional, |&idx| {
             let (entry, _) = self.entries.get(idx).unwrap();
             match entry {
-                Ok(r) => Self::hash_static(&self.hash_builder, &r.key, &r.qey),
-                Err(non_resident_hash) => *non_resident_hash,
+                Entry::Resident(Resident { key, qey, .. })
+                | Entry::Sentinel(Sentinel { key, qey, .. }) => {
+                    Self::hash_static(&self.hash_builder, key, qey)
+                }
+                Entry::Ghost(non_resident_hash) => *non_resident_hash,
             }
         })
     }
@@ -214,7 +260,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
     }
 
     #[inline]
-    fn search<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<Token>
+    fn search<Q: ?Sized, W: ?Sized>(&self, hash: u64, k: &Q, q: &W) -> Option<Token>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
@@ -233,10 +279,13 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 let idx = *bucket.as_ref();
                 let (entry, _) = self.entries.get(idx).unwrap();
                 match entry {
-                    Ok(r) if r.key.borrow() == key && r.qey.borrow() == qey => {
+                    Entry::Resident(Resident { key, qey, .. })
+                    | Entry::Sentinel(Sentinel { key, qey, .. })
+                        if key.borrow() == k && qey.borrow() == q =>
+                    {
                         return Some(idx);
                     }
-                    Err(non_resident_hash) if *non_resident_hash == hash => {
+                    Entry::Ghost(non_resident_hash) if *non_resident_hash == hash => {
                         hash_match = Some(idx);
                     }
                     _ => (),
@@ -246,6 +295,27 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         }
     }
 
+    #[inline]
+    fn search_resident<Q: ?Sized, W: ?Sized>(&self, hash: u64, k: &Q, q: &W) -> Option<Token>
+    where
+        Key: Borrow<Q>,
+        Q: Hash + Eq,
+        Qey: Borrow<W>,
+        W: Hash + Eq,
+    {
+        self.map.get(hash, |&idx| {
+            let (entry, _) = self.entries.get(idx).unwrap();
+            match entry {
+                Entry::Resident(Resident { key, qey, .. })
+                    if key.borrow() == k && qey.borrow() == q =>
+                {
+                    true
+                }
+                _ => false,
+            }
+        }).copied()
+    }
+
     pub fn get<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<&Val>
     where
         Key: Borrow<Q>,
@@ -253,9 +323,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        if let Some(idx) = self.search(hash, key, qey) {
+        if let Some(idx) = self.search_resident(hash, key, qey) {
             let (entry, _) = self.entries.get(idx).unwrap();
-            if let Ok(resident) = entry {
+            if let Entry::Resident(resident) = entry {
                 resident.referenced.store(true, atomic::Ordering::Relaxed);
                 self.hits.fetch_add(1, atomic::Ordering::Relaxed);
                 return Some(&resident.value);
@@ -272,9 +342,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        if let Some(idx) = self.search(hash, key, qey) {
+        if let Some(idx) = self.search_resident(hash, key, qey) {
             let (entry, _) = self.entries.get_mut(idx).unwrap();
-            if let Ok(resident) = entry {
+            if let Entry::Resident(resident) = entry {
                 *resident.referenced.get_mut() = true;
                 *self.hits.get_mut() += 1;
                 return Some(&mut resident.value);
@@ -284,6 +354,58 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         None
     }
 
+    pub fn entry_or_sentinel<'a, Q: ?Sized, W: ?Sized>(
+        &mut self,
+        hash: u64,
+        key: &'a Q,
+        qey: &'a W,
+    ) -> &mut Entry<Key, Qey, Val>
+    where
+        Key: Borrow<Q> + From<&'a Q>,
+        Q: Hash + Eq,
+        Qey: Borrow<W> + From<&'a W>,
+        W: Hash + Eq + Into<Key>,
+    {
+        let idx = if let Some(idx) = self.search(hash, key, qey) {
+            let (entry, _) = self.entries.get_mut(idx).unwrap();
+            match entry {
+                Entry::Resident(resident) => {
+                    *resident.referenced.get_mut() = true;
+                    *self.hits.get_mut() += 1;
+                }
+                Entry::Sentinel(..) => {
+                    *self.hits.get_mut() += 1;
+                }
+                Entry::Ghost(..) => {
+                    *self.misses.get_mut() += 1;
+                    *entry = Entry::Sentinel(Sentinel {
+                        key: key.into(),
+                        qey: qey.into(),
+                        shared: Default::default(),
+                    });
+                    let next_ghost = self.entries.unlink(idx);
+                    if self.ghost_head == Some(idx) {
+                        self.ghost_head = next_ghost;
+                    }
+                }
+            }
+            idx
+        } else {
+            *self.misses.get_mut() += 1;
+            let idx = self.entries.insert(
+                Entry::Sentinel(Sentinel {
+                    key: key.into(),
+                    qey: qey.into(),
+                    shared: Default::default(),
+                }),
+                None,
+            );
+            self.map_insert(hash, idx);
+            idx
+        };
+        self.entries.get_mut(idx).unwrap().0
+    }
+
     pub fn peek<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<&Val>
     where
         Key: Borrow<Q>,
@@ -291,9 +413,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        let idx = self.search(hash, key, qey)?;
+        let idx = self.search_resident(hash, key, qey)?;
         let (entry, _) = self.entries.get(idx).unwrap();
-        if let Ok(resident) = entry {
+        if let Entry::Resident(resident) = entry {
             Some(&resident.value)
         } else {
             None
@@ -312,9 +434,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        let idx = self.search(hash, key, qey)?;
+        let idx = self.search_resident(hash, key, qey)?;
         let (entry, _) = self.entries.get_mut(idx).unwrap();
-        if let Ok(resident) = entry {
+        if let Entry::Resident(resident) = entry {
             Some(&mut resident.value)
         } else {
             None
@@ -334,10 +456,10 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         W: Hash + Eq,
     {
         let idx = self.search(hash, key, qey)?;
-        self.remove_from_map(hash, idx);
+        self.map_remove(hash, idx);
         let (entry, next) = self.entries.remove(idx).unwrap();
         let list_head = match &entry {
-            Ok(r) => {
+            Entry::Resident(r) => {
                 let weight = self.weighter.weight(&r.key, &r.qey, &r.value);
                 if r.state == ResidentState::Hot {
                     self.num_hot -= 1;
@@ -353,9 +475,12 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                     &mut self.cold_head
                 }
             }
-            Err(_) => {
+            Entry::Ghost(_) => {
                 self.num_non_resident -= 1;
                 &mut self.ghost_head
+            }
+            Entry::Sentinel(_) => {
+                return Some(entry);
             }
         };
         if *list_head == Some(idx) {
@@ -375,7 +500,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 self.advance_hot()
             };
             let (entry, next) = self.entries.get_mut(idx).unwrap();
-            let resident = entry.as_mut().unwrap();
+            let Entry::Resident(resident) = entry else { unreachable!() };
             debug_assert!(matches!(
                 resident.state,
                 ResidentState::ColdDemoted | ResidentState::ColdInTest
@@ -415,7 +540,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 .weighter
                 .weight(&resident.key, &resident.qey, &resident.value);
             let hash = Self::hash_static(&self.hash_builder, &resident.key, &resident.qey);
-            let resident = mem::replace(entry, Err(hash)).unwrap();
+            let Entry::Resident(resident) = mem::replace(entry, Entry::Ghost(hash)) else {
+                unreachable!()
+            };
             self.num_cold -= 1;
             self.weight_cold -= weight;
 
@@ -432,7 +559,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                     self.advance_ghost();
                 }
             } else {
-                self.remove_from_map(hash, idx);
+                self.map_remove(hash, idx);
                 let (_, next) = self.entries.remove(idx).unwrap();
                 self.cold_head = next;
             }
@@ -449,7 +576,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         loop {
             let idx = self.hot_head.unwrap();
             let (entry, next) = self.entries.get_mut(idx).unwrap();
-            let resident = entry.as_mut().unwrap();
+            let Entry::Resident(resident) = entry else { unreachable!() };
             debug_assert_eq!(resident.state, ResidentState::Hot);
             if *resident.referenced.get_mut() {
                 *resident.referenced.get_mut() = false;
@@ -480,9 +607,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         debug_assert_ne!(self.num_non_resident, 0);
         let idx = self.ghost_head.unwrap();
         let (entry, _) = self.entries.get_mut(idx).unwrap();
-        let hash = *entry.as_ref().err().unwrap();
+        let Entry::Ghost(hash) = *entry else { unreachable!() };
         self.num_non_resident -= 1;
-        self.remove_from_map(hash, idx);
+        self.map_remove(hash, idx);
         let (_, next) = self.entries.remove(idx).unwrap();
         self.ghost_head = next;
     }
@@ -494,50 +621,57 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         qey: Qey,
         value: Val,
         weight: u64,
-    ) -> Option<Resident<Key, Qey, Val>> {
+    ) -> Entry<Key, Qey, Val> {
         let (entry, _) = self.entries.get_mut(idx).unwrap();
         let mut evicted;
-        if let Ok(resident) = entry {
-            let evicted_weight =
-                self.weighter
-                    .weight(&resident.key, &resident.qey, &resident.value);
-            if resident.state == ResidentState::Hot {
-                self.weight_hot -= evicted_weight;
-                self.weight_hot += weight;
-            } else {
-                self.weight_cold -= evicted_weight;
-                self.weight_cold += weight;
+        match entry {
+            Entry::Resident(resident) => {
+                let evicted_weight =
+                    self.weighter
+                        .weight(&resident.key, &resident.qey, &resident.value);
+                if resident.state == ResidentState::Hot {
+                    self.weight_hot -= evicted_weight;
+                    self.weight_hot += weight;
+                } else {
+                    self.weight_cold -= evicted_weight;
+                    self.weight_cold += weight;
+                }
+                let new_resident = Resident {
+                    key,
+                    qey,
+                    value,
+                    state: resident.state,
+                    referenced: AtomicBool::new(true), // re-insert counts as a hit
+                };
+                evicted = Entry::Resident(mem::replace(resident, new_resident));
             }
-            let new_resident = Resident {
-                key,
-                qey,
-                value,
-                state: resident.state,
-                referenced: AtomicBool::new(true), // re-insert counts as a hit
-            };
-            evicted = Some(mem::replace(resident, new_resident));
-        } else {
-            debug_assert_eq!(
-                *entry.as_ref().err().unwrap(),
-                Self::hash_static(&self.hash_builder, &key, &qey)
-            );
-            *entry = Ok(Resident {
-                key,
-                qey,
-                value,
-                state: ResidentState::Hot,
-                referenced: Default::default(),
-            });
-            self.num_non_resident -= 1;
-            self.num_hot += 1;
-            self.weight_hot += weight;
-            Self::relink(
-                &mut self.entries,
-                idx,
-                &mut self.ghost_head,
-                &mut self.hot_head,
-            );
-            evicted = None;
+            Entry::Sentinel(..) | Entry::Ghost(..) => {
+                // debug_assert_eq!(
+                //     *entry.as_ref().err().unwrap(),
+                //     Self::hash_static(&self.hash_builder, &key, &qey)
+                // );
+                evicted = mem::replace(
+                    entry,
+                    Entry::Resident(Resident {
+                        key,
+                        qey,
+                        value,
+                        state: ResidentState::Hot,
+                        referenced: Default::default(),
+                    }),
+                );
+                self.num_hot += 1;
+                self.weight_hot += weight;
+                if matches!(entry, Entry::Ghost(..)) {
+                    self.num_non_resident -= 1;
+                    Self::relink(
+                        &mut self.entries,
+                        idx,
+                        &mut self.ghost_head,
+                        &mut self.hot_head,
+                    );
+                }
+            }
         }
 
         while self.weight_hot > self.weight_target_hot {
@@ -545,7 +679,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         }
         // the addition above might have made the cache too big
         while self.weight_hot + self.weight_cold > self.weight_capacity {
-            evicted = Some(self.advance_cold());
+            evicted = Entry::Resident(self.advance_cold());
         }
         evicted
     }
@@ -568,7 +702,21 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
     }
 
     #[inline]
-    fn remove_from_map(&mut self, hash: u64, idx: Token) {
+    fn map_insert(&mut self, hash: u64, idx: Token) {
+        self.map.insert(hash, idx, |&i| {
+            let (entry, _) = self.entries.get(i).unwrap();
+            match entry {
+                Entry::Resident(Resident { key, qey, .. })
+                | Entry::Sentinel(Sentinel { key, qey, .. }) => {
+                    Self::hash_static(&self.hash_builder, key, qey)
+                }
+                Entry::Ghost(hash) => *hash,
+            }
+        });
+    }
+
+    #[inline]
+    fn map_remove(&mut self, hash: u64, idx: Token) {
         let removed = self.map.erase_entry(hash, |&i| i == idx);
         debug_assert!(removed);
     }
@@ -579,7 +727,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         key: Key,
         qey: Qey,
         value: Val,
-    ) -> Option<Resident<Key, Qey, Val>> {
+    ) -> Option<Entry<Key, Qey, Val>> {
         let weight = self.weighter.weight(&key, &qey, &value);
         if weight > self.weight_capacity {
             // don't admit if it won't fit within the budget
@@ -587,14 +735,14 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         }
 
         if let Some(idx) = self.search(hash, &key, &qey) {
-            return self.insert_existing(idx, key, qey, value, weight);
+            return Some(self.insert_existing(idx, key, qey, value, weight));
         }
 
         let mut evicted;
         let enter_hot = if self.weight_hot + self.weight_cold + weight > self.weight_capacity {
             // evict until we have enough space for this entry
             loop {
-                evicted = Some(self.advance_cold());
+                evicted = Some(Entry::Resident(self.advance_cold()));
                 if self.weight_hot + self.weight_cold + weight <= self.weight_capacity {
                     break;
                 }
@@ -616,7 +764,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             (ResidentState::ColdInTest, &mut self.cold_head)
         };
         let idx = self.entries.insert(
-            Ok(Resident {
+            Entry::Resident(Resident {
                 key,
                 qey,
                 value,
@@ -629,13 +777,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             *list_head = Some(idx);
         }
         // insert the new key in the map
-        self.map.insert(hash, idx, |&i| {
-            let (entry, _) = self.entries.get(i).unwrap();
-            match entry {
-                Ok(r) => Self::hash_static(&self.hash_builder, &r.key, &r.qey),
-                Err(hash) => *hash,
-            }
-        });
+        self.map_insert(hash, idx);
         evicted
     }
 }

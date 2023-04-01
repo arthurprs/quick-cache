@@ -1,4 +1,8 @@
-use crate::{options::*, shard::KQCacheShard, DefaultHashBuilder, UnitWeighter, Weighter};
+use crate::{
+    options::*,
+    shard::{Entry, KQCacheShard},
+    DefaultHashBuilder, UnitWeighter, Weighter,
+};
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash},
@@ -169,7 +173,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
     {
         matches!(
             self.shard.remove(self.shard.hash(key, qey), key, qey),
-            Some(Ok(_))
+            Some(Entry::Resident(_))
         )
     }
 

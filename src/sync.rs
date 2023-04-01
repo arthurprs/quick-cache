@@ -1,7 +1,7 @@
 use crate::{
     options::{Options, OptionsBuilder},
     rw_lock::RwLock,
-    shard::KQCacheShard,
+    shard::{Entry, KQCacheShard},
     DefaultHashBuilder, UnitWeighter, Weighter,
 };
 use std::{
@@ -232,7 +232,7 @@ impl<
         if let Some((shard, hash)) = self.shard_for(key, qey) {
             // Any evictions will be dropped outside of the lock
             let evicted = shard.write().remove(hash, key, qey);
-            matches!(evicted, Some(Ok(_)))
+            matches!(evicted, Some(Entry::Resident(_)))
         } else {
             false
         }
