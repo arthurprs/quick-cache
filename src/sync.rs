@@ -1,12 +1,13 @@
 use crate::{
     options::{Options, OptionsBuilder},
     rw_lock::RwLock,
+    sentinel::{SentinelWriteGuard, JoinResult},
     shard::{Entry, KQCacheShard},
     DefaultHashBuilder, UnitWeighter, Weighter,
 };
 use std::{
     borrow::Borrow,
-    hash::{BuildHasher, Hash, Hasher},
+    hash::{BuildHasher, Hash, Hasher}, future::Future,
 };
 
 /// A concurrent two keys cache.
@@ -243,6 +244,83 @@ impl<
         if let Some((shard, hash)) = self.shard_for(&key, &qey) {
             // Any evictions will be dropped outside of the lock
             let _evicted = shard.write().insert(hash, key, qey, value);
+        }
+    }
+
+    /// Gets or inserts an item in the cache with key `key` and qey `qey`.
+    /// Note: It's only recommended to use this function if computing `Val` is very expensive and/or involves IO.
+    pub fn get_or_insert_with<'a, E>(
+        &self,
+        key: &Key,
+        qey: &Qey,
+        with: impl FnOnce() -> Result<Val, E>,
+    ) -> Result<Val, E>
+    where
+        Key: Clone,
+        Qey: Clone,
+    {
+        let (shard, hash) = self.shard_for(key, qey).unwrap();
+        if let Some(v) = shard.read().get(hash, key, qey) {
+            return Ok(v.clone());
+        }
+        loop {
+            let sentinel = match shard
+                .write()
+                .entry_or_sentinel(hash, key.clone(), qey.clone())
+            {
+                Entry::Resident(r) => return Ok(r.value.clone()),
+                Entry::Sentinel(s) => s.shared.clone(),
+                Entry::Ghost(_) => unreachable!(),
+            };
+
+            match SentinelWriteGuard::join(shard, hash, sentinel) {
+                JoinResult::Guard(guard) => {
+                    let v = with()?;
+                    let _waiters = guard.mark_inserted(v.clone());
+                    shard.write().insert(hash, key.clone(), qey.clone(), v.clone());
+                    return Ok(v);
+                }
+                JoinResult::Value(v) => return Ok(v),
+                JoinResult::Retry => (),
+            }
+        }
+    }
+
+    /// Gets or inserts an item in the cache with key `key` and qey `qey`.
+    /// Note: It's only recommended to use this function if computing `Val` is very expensive and/or involves IO.
+    pub async fn get_or_insert_async<'a, Fut, E>(
+        &self,
+        key: &Key,
+        qey: &Qey,
+        with: impl Future<Output=Result<Val, E>>,
+    ) -> Result<Val, E>
+    where
+        Key: Clone,
+        Qey: Clone,
+    {
+        let (shard, hash) = self.shard_for(key, qey).unwrap();
+        if let Some(v) = shard.read().get(hash, key, qey) {
+            return Ok(v.clone());
+        }
+        loop {
+            let sentinel = match shard
+                .write()
+                .entry_or_sentinel(hash, key.clone(), qey.clone())
+            {
+                Entry::Resident(r) => return Ok(r.value.clone()),
+                Entry::Sentinel(s) => s.shared.clone(),
+                Entry::Ghost(_) => unreachable!(),
+            };
+
+            match SentinelWriteGuard::join_async(shard, hash, sentinel).await {
+                JoinResult::Guard(guard) => {
+                    let v = with.await?;
+                    guard.mark_inserted(v.clone());
+                    return Ok(v);
+                }
+                JoinResult::Value(v) => return Ok(v),
+                JoinResult::Retry => (),
+            }
         }
     }
 }

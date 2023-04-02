@@ -43,6 +43,7 @@ mod options;
 #[cfg(fuzzing)]
 pub mod options;
 mod rw_lock;
+mod sentinel;
 mod shard;
 /// Concurrent cache variants that can be used from multiple threads.
 pub mod sync;
@@ -72,6 +73,8 @@ impl<Key, Qey, Val> Weighter<Key, Qey, Val> for UnitWeighter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
 
     #[test]
@@ -120,5 +123,28 @@ mod tests {
         cache.get(&b""[..], &b""[..]);
         let cache = sync::KQCache::<String, String, u64>::new(0);
         cache.get("", "");
+    }
+
+    #[test]
+    fn test_get_or_insert() {
+        for _ in 0..1000 {
+            let mut entered = AtomicUsize::default();
+            let cache = sync::KQCache::<u64, u64, u64>::new(100);
+            const THREADS: usize = 100;
+            let wg = std::sync::Barrier::new(THREADS);
+            std::thread::scope(|s| {
+                for _ in 0..THREADS {
+                    s.spawn(|| {
+                        wg.wait();
+                        let result = cache.get_or_insert_with(&1, &1, || {
+                            entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Ok::<u64, ()>(1)
+                        });
+                        assert_eq!(result, Ok(1));
+                    });
+                }
+            });
+            assert_eq!(*entered.get_mut(), 1);
+        }
     }
 }

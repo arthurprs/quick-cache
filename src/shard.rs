@@ -10,7 +10,10 @@ use std::{
 
 use hashbrown::raw::RawTable;
 
-use crate::linked_slab::{LinkedSlab, Token};
+use crate::{
+    linked_slab::{LinkedSlab, Token},
+    sentinel::SentinelShared,
+};
 
 /// Superset of Weighter (weights 1u32..=u32::MAX) that returns the same weight as u64.
 /// Since each shard can only hold up to u32::MAX - 1 items its internal weight cannot overflow.
@@ -39,51 +42,21 @@ enum ResidentState {
 pub struct Resident<Key, Qey, Val> {
     key: Key,
     qey: Qey,
-    value: Val,
+    pub value: Val,
     state: ResidentState,
     referenced: AtomicBool,
 }
 
 #[derive(Debug)]
-pub struct Sentinel<Key, Qey> {
+pub struct Sentinel<Key, Qey, Val> {
     key: Key,
     qey: Qey,
-    shared: Option<Arc<SentinelShared>>,
-}
-
-#[derive(Debug, Default)]
-struct SentinelShared {
-    waiters: Vec<Waiter>,
-    state: SentinelState,
-}
-
-#[derive(Debug, Default)]
-enum SentinelState {
-    Loading,
-    Loaded,
-    #[default]
-    Abandoned,
-    Inserted,
-}
-
-#[derive(Debug)]
-enum Waiter {
-    Thread(std::thread::Thread),
-    Task(std::task::Waker),
-}
-
-impl Waiter {
-    fn notify(self) {
-        match self {
-            Waiter::Thread(t) => t.unpark(),
-            Waiter::Task(t) => t.wake(),
-        }
-    }
+    pub shared: SentinelShared<Val>,
 }
 
 pub enum Entry<Key, Qey, Val> {
     Resident(Resident<Key, Qey, Val>),
-    Sentinel(Sentinel<Key, Qey>),
+    Sentinel(Sentinel<Key, Qey, Val>),
     Ghost(u64),
 }
 
@@ -114,6 +87,18 @@ pub struct KQCacheShard<Key, Qey, Val, We, B> {
     hits: AtomicU64,
     misses: AtomicU64,
     weighter: We,
+}
+
+impl<Key, Qey, Val, We, B> KQCacheShard<Key, Qey, Val, We, B> {
+    pub fn remove_sentinel(&mut self, hash: u64, sentinel: &SentinelShared<Val>) {
+        self.map.remove_entry(hash, |&idx| {
+            let (entry, _) = self.entries.get(idx).unwrap();
+            match entry {
+                Entry::Sentinel(Sentinel { shared, .. }) if Arc::ptr_eq(shared, sentinel) => true,
+                _ => false,
+            }
+        });
+    }
 }
 
 impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B: BuildHasher>
@@ -303,17 +288,19 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        self.map.get(hash, |&idx| {
-            let (entry, _) = self.entries.get(idx).unwrap();
-            match entry {
-                Entry::Resident(Resident { key, qey, .. })
-                    if key.borrow() == k && qey.borrow() == q =>
-                {
-                    true
+        self.map
+            .get(hash, |&idx| {
+                let (entry, _) = self.entries.get(idx).unwrap();
+                match entry {
+                    Entry::Resident(Resident { key, qey, .. })
+                        if key.borrow() == k && qey.borrow() == q =>
+                    {
+                        true
+                    }
+                    _ => false,
                 }
-                _ => false,
-            }
-        }).copied()
+            })
+            .copied()
     }
 
     pub fn get<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<&Val>
@@ -354,19 +341,13 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         None
     }
 
-    pub fn entry_or_sentinel<'a, Q: ?Sized, W: ?Sized>(
+    pub fn entry_or_sentinel<'a>(
         &mut self,
         hash: u64,
-        key: &'a Q,
-        qey: &'a W,
-    ) -> &mut Entry<Key, Qey, Val>
-    where
-        Key: Borrow<Q> + From<&'a Q>,
-        Q: Hash + Eq,
-        Qey: Borrow<W> + From<&'a W>,
-        W: Hash + Eq + Into<Key>,
-    {
-        let idx = if let Some(idx) = self.search(hash, key, qey) {
+        key: Key,
+        qey: Qey,
+    ) -> &mut Entry<Key, Qey, Val> {
+        let idx = if let Some(idx) = self.search(hash, &key, &qey) {
             let (entry, _) = self.entries.get_mut(idx).unwrap();
             match entry {
                 Entry::Resident(resident) => {
@@ -480,6 +461,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 &mut self.ghost_head
             }
             Entry::Sentinel(_) => {
+                // TODO: this is probably undesirable, but we already called map_remove above
                 return Some(entry);
             }
         };
