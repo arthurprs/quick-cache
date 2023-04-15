@@ -1,13 +1,14 @@
 use crate::{
     options::{Options, OptionsBuilder},
+    placeholder::{JoinResult, PlaceholderGuard},
     rw_lock::RwLock,
-    sentinel::{SentinelWriteGuard, JoinResult},
     shard::{Entry, KQCacheShard},
     DefaultHashBuilder, UnitWeighter, Weighter,
 };
 use std::{
     borrow::Borrow,
-    hash::{BuildHasher, Hash, Hasher}, future::Future,
+    future::Future,
+    hash::{BuildHasher, Hash, Hasher}, time::Duration,
 };
 
 /// A concurrent two keys cache.
@@ -247,9 +248,33 @@ impl<
         }
     }
 
+    pub fn get_value_or_guard<'a>(
+        &'a self,
+        key: &Key,
+        qey: &Qey,
+        timeout: Option<Duration>,
+    ) -> JoinResult<'a, Key, Qey, Val, We, B>
+    where
+        Key: Clone,
+        Qey: Clone,
+    {
+        let (shard, hash) = self.shard_for(key, qey).unwrap();
+        if let Some(v) = shard.read().get(hash, key, qey) {
+            return JoinResult::Value(v.clone());
+        }
+        let mut shard_guard = shard.write();
+        match shard_guard.value_or_placeholder(hash, key.clone(), qey.clone()) {
+            Ok(v) => JoinResult::Value(v),
+            Err((shared, false)) => PlaceholderGuard::join(shard_guard, shard, shared, timeout),
+            Err((shared, true)) => {
+                JoinResult::Guard(PlaceholderGuard::start_loading(shard_guard, shard, shared))
+            }
+        }
+    }
+
     /// Gets or inserts an item in the cache with key `key` and qey `qey`.
     /// Note: It's only recommended to use this function if computing `Val` is very expensive and/or involves IO.
-    pub fn get_or_insert_with<'a, E>(
+    pub fn get_or_insert_with<E>(
         &self,
         key: &Key,
         qey: &Qey,
@@ -259,29 +284,36 @@ impl<
         Key: Clone,
         Qey: Clone,
     {
+        match self.get_value_or_guard(key, qey, None) {
+            JoinResult::Value(v) => Ok(v),
+            JoinResult::Guard(g) => {
+                let v = with()?;
+                g.insert(v.clone());
+                Ok(v)
+            }
+            JoinResult::Timeout => unreachable!(),
+        }
+    }
+
+    pub async fn get_value_or_guard_async<'a>(
+        &'a self,
+        key: &Key,
+        qey: &Qey,
+    ) -> Result<Val, PlaceholderGuard<'a, Key, Qey, Val, We, B>>
+    where
+        Key: Clone,
+        Qey: Clone,
+    {
         let (shard, hash) = self.shard_for(key, qey).unwrap();
         if let Some(v) = shard.read().get(hash, key, qey) {
             return Ok(v.clone());
         }
-        loop {
-            let sentinel = match shard
-                .write()
-                .entry_or_sentinel(hash, key.clone(), qey.clone())
-            {
-                Entry::Resident(r) => return Ok(r.value.clone()),
-                Entry::Sentinel(s) => s.shared.clone(),
-                Entry::Ghost(_) => unreachable!(),
-            };
-
-            match SentinelWriteGuard::join(shard, hash, sentinel) {
-                JoinResult::Guard(guard) => {
-                    let v = with()?;
-                    let _waiters = guard.mark_inserted(v.clone());
-                    shard.write().insert(hash, key.clone(), qey.clone(), v.clone());
-                    return Ok(v);
-                }
-                JoinResult::Value(v) => return Ok(v),
-                JoinResult::Retry => (),
+        let mut shard_guard = shard.write();
+        match shard_guard.value_or_placeholder(hash, key.clone(), qey.clone()) {
+            Ok(v) => Ok(v),
+            Err((shared, false)) => PlaceholderGuard::join_future(shard_guard, shard, shared).await,
+            Err((shared, true)) => {
+                Err(PlaceholderGuard::start_loading(shard_guard, shard, shared))
             }
         }
     }
@@ -292,34 +324,18 @@ impl<
         &self,
         key: &Key,
         qey: &Qey,
-        with: impl Future<Output=Result<Val, E>>,
+        with: impl Future<Output = Result<Val, E>>,
     ) -> Result<Val, E>
     where
         Key: Clone,
         Qey: Clone,
     {
-        let (shard, hash) = self.shard_for(key, qey).unwrap();
-        if let Some(v) = shard.read().get(hash, key, qey) {
-            return Ok(v.clone());
-        }
-        loop {
-            let sentinel = match shard
-                .write()
-                .entry_or_sentinel(hash, key.clone(), qey.clone())
-            {
-                Entry::Resident(r) => return Ok(r.value.clone()),
-                Entry::Sentinel(s) => s.shared.clone(),
-                Entry::Ghost(_) => unreachable!(),
-            };
-
-            match SentinelWriteGuard::join_async(shard, hash, sentinel).await {
-                JoinResult::Guard(guard) => {
-                    let v = with.await?;
-                    guard.mark_inserted(v.clone());
-                    return Ok(v);
-                }
-                JoinResult::Value(v) => return Ok(v),
-                JoinResult::Retry => (),
+        match self.get_value_or_guard_async(key, qey).await {
+            Ok(v) => Ok(v),
+            Err(g) => {
+                let v = with.await?;
+                g.insert(v.clone());
+                Ok(v)
             }
         }
     }

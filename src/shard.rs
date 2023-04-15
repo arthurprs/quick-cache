@@ -12,7 +12,7 @@ use hashbrown::raw::RawTable;
 
 use crate::{
     linked_slab::{LinkedSlab, Token},
-    sentinel::SentinelShared,
+    placeholder::{new_shared_placeholder, SharedPlaceholder},
 };
 
 /// Superset of Weighter (weights 1u32..=u32::MAX) that returns the same weight as u64.
@@ -48,15 +48,16 @@ pub struct Resident<Key, Qey, Val> {
 }
 
 #[derive(Debug)]
-pub struct Sentinel<Key, Qey, Val> {
+pub struct Placeholder<Key, Qey, Val> {
     key: Key,
     qey: Qey,
-    pub shared: SentinelShared<Val>,
+    hot: bool,
+    pub(in crate::shard) shared: SharedPlaceholder<Val>,
 }
 
 pub enum Entry<Key, Qey, Val> {
     Resident(Resident<Key, Qey, Val>),
-    Sentinel(Sentinel<Key, Qey, Val>),
+    Placeholder(Placeholder<Key, Qey, Val>),
     Ghost(u64),
 }
 
@@ -90,13 +91,13 @@ pub struct KQCacheShard<Key, Qey, Val, We, B> {
 }
 
 impl<Key, Qey, Val, We, B> KQCacheShard<Key, Qey, Val, We, B> {
-    pub fn remove_sentinel(&mut self, hash: u64, sentinel: &SentinelShared<Val>) {
-        self.map.remove_entry(hash, |&idx| {
-            let (entry, _) = self.entries.get(idx).unwrap();
-            match entry {
-                Entry::Sentinel(Sentinel { shared, .. }) if Arc::ptr_eq(shared, sentinel) => true,
-                _ => false,
+    pub fn remove_placeholder(&mut self, placeholder: &SharedPlaceholder<Val>) {
+        self.map.remove_entry(placeholder.hash, |&idx| {
+            if idx != placeholder.idx {
+                return false;
             }
+            let (entry, _) = self.entries.get(idx).unwrap();
+            matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if Arc::ptr_eq(shared, placeholder))
         });
     }
 }
@@ -191,7 +192,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             let (entry, _) = self.entries.get(idx).unwrap();
             match entry {
                 Entry::Resident(Resident { key, qey, .. })
-                | Entry::Sentinel(Sentinel { key, qey, .. }) => {
+                | Entry::Placeholder(Placeholder { key, qey, .. }) => {
                     Self::hash_static(&self.hash_builder, key, qey)
                 }
                 Entry::Ghost(non_resident_hash) => *non_resident_hash,
@@ -265,7 +266,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 let (entry, _) = self.entries.get(idx).unwrap();
                 match entry {
                     Entry::Resident(Resident { key, qey, .. })
-                    | Entry::Sentinel(Sentinel { key, qey, .. })
+                    | Entry::Placeholder(Placeholder { key, qey, .. })
                         if key.borrow() == k && qey.borrow() == q =>
                     {
                         return Some(idx);
@@ -291,14 +292,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         self.map
             .get(hash, |&idx| {
                 let (entry, _) = self.entries.get(idx).unwrap();
-                match entry {
-                    Entry::Resident(Resident { key, qey, .. })
-                        if key.borrow() == k && qey.borrow() == q =>
-                    {
-                        true
-                    }
-                    _ => false,
-                }
+                matches!(entry, Entry::Resident(Resident { key, qey, .. }) if key.borrow() == k && qey.borrow() == q)
             })
             .copied()
     }
@@ -339,52 +333,6 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         }
         *self.misses.get_mut() += 1;
         None
-    }
-
-    pub fn entry_or_sentinel<'a>(
-        &mut self,
-        hash: u64,
-        key: Key,
-        qey: Qey,
-    ) -> &mut Entry<Key, Qey, Val> {
-        let idx = if let Some(idx) = self.search(hash, &key, &qey) {
-            let (entry, _) = self.entries.get_mut(idx).unwrap();
-            match entry {
-                Entry::Resident(resident) => {
-                    *resident.referenced.get_mut() = true;
-                    *self.hits.get_mut() += 1;
-                }
-                Entry::Sentinel(..) => {
-                    *self.hits.get_mut() += 1;
-                }
-                Entry::Ghost(..) => {
-                    *self.misses.get_mut() += 1;
-                    *entry = Entry::Sentinel(Sentinel {
-                        key: key.into(),
-                        qey: qey.into(),
-                        shared: Default::default(),
-                    });
-                    let next_ghost = self.entries.unlink(idx);
-                    if self.ghost_head == Some(idx) {
-                        self.ghost_head = next_ghost;
-                    }
-                }
-            }
-            idx
-        } else {
-            *self.misses.get_mut() += 1;
-            let idx = self.entries.insert(
-                Entry::Sentinel(Sentinel {
-                    key: key.into(),
-                    qey: qey.into(),
-                    shared: Default::default(),
-                }),
-                None,
-            );
-            self.map_insert(hash, idx);
-            idx
-        };
-        self.entries.get_mut(idx).unwrap().0
     }
 
     pub fn peek<Q: ?Sized, W: ?Sized>(&self, hash: u64, key: &Q, qey: &W) -> Option<&Val>
@@ -460,7 +408,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 self.num_non_resident -= 1;
                 &mut self.ghost_head
             }
-            Entry::Sentinel(_) => {
+            Entry::Placeholder(_) => {
                 // TODO: this is probably undesirable, but we already called map_remove above
                 return Some(entry);
             }
@@ -627,7 +575,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 };
                 evicted = Entry::Resident(mem::replace(resident, new_resident));
             }
-            Entry::Sentinel(..) | Entry::Ghost(..) => {
+            Entry::Placeholder(..) | Entry::Ghost(..) => {
                 // debug_assert_eq!(
                 //     *entry.as_ref().err().unwrap(),
                 //     Self::hash_static(&self.hash_builder, &key, &qey)
@@ -656,10 +604,10 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             }
         }
 
+        // the replacement may have made the hot section/cache too big
         while self.weight_hot > self.weight_target_hot {
             self.advance_hot();
         }
-        // the addition above might have made the cache too big
         while self.weight_hot + self.weight_cold > self.weight_capacity {
             evicted = Entry::Resident(self.advance_cold());
         }
@@ -689,7 +637,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             let (entry, _) = self.entries.get(i).unwrap();
             match entry {
                 Entry::Resident(Resident { key, qey, .. })
-                | Entry::Sentinel(Sentinel { key, qey, .. }) => {
+                | Entry::Placeholder(Placeholder { key, qey, .. }) => {
                     Self::hash_static(&self.hash_builder, key, qey)
                 }
                 Entry::Ghost(hash) => *hash,
@@ -701,6 +649,66 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
     fn map_remove(&mut self, hash: u64, idx: Token) {
         let removed = self.map.erase_entry(hash, |&i| i == idx);
         debug_assert!(removed);
+    }
+
+    pub fn replace_placeholder(
+        &mut self,
+        placeholder: &SharedPlaceholder<Val>,
+        referenced: bool,
+        value: Val,
+    ) -> Result<Option<Entry<Key, Qey, Val>>, Val> {
+        let found = self.map.find(placeholder.hash, |&idx| {
+            if idx != placeholder.idx {
+                return false;
+            }
+            let (entry, _) = self.entries.get(idx).unwrap();
+            matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if Arc::ptr_eq(shared, placeholder))
+        }).is_some();
+        if !found {
+            return Err(value);
+        }
+        let (entry, _) = self.entries.get_mut(placeholder.idx).unwrap();
+        let Entry::Placeholder(Placeholder { key, qey, hot: placeholder_hot, .. }) =
+            mem::replace(entry, Entry::Ghost(0)) else { unreachable!() };
+        let weight = self.weighter.weight(&key, &qey, &value);
+        if weight > self.weight_capacity {
+            // don't admit if it won't fit within the budget
+            return Ok(None);
+        }
+        let enter_hot =
+            placeholder_hot || self.weight_hot + self.weight_cold + weight <= self.weight_capacity;
+        let (state, list_head) = if enter_hot {
+            self.num_hot += 1;
+            self.weight_hot += weight;
+            (ResidentState::Hot, &mut self.hot_head)
+        } else {
+            self.num_cold += 1;
+            self.weight_cold += weight;
+            (ResidentState::ColdInTest, &mut self.cold_head)
+        };
+        *entry = Entry::Resident(Resident {
+            key,
+            qey,
+            value,
+            state,
+            referenced: referenced.into(),
+        });
+
+        self.entries.link(placeholder.idx, *list_head);
+        if list_head.is_none() {
+            *list_head = Some(placeholder.idx);
+        }
+
+        let mut evicted = None;
+        // the replacement may have made the hot section/cache too big
+        while self.weight_hot > self.weight_target_hot {
+            self.advance_hot();
+        }
+        while self.weight_hot + self.weight_cold > self.weight_capacity {
+            evicted = Some(Entry::Resident(self.advance_cold()));
+        }
+
+        Ok(evicted)
     }
 
     pub fn insert(
@@ -761,5 +769,61 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         // insert the new key in the map
         self.map_insert(hash, idx);
         evicted
+    }
+
+    pub fn value_or_placeholder(
+        &mut self,
+        hash: u64,
+        key: Key,
+        qey: Qey,
+    ) -> Result<Val, (SharedPlaceholder<Val>, bool)>
+    where
+        Val: Clone,
+    {
+        if let Some(idx) = self.search(hash, &key, &qey) {
+            let (entry, _) = self.entries.get_mut(idx).unwrap();
+            match entry {
+                Entry::Resident(resident) => {
+                    *resident.referenced.get_mut() = true;
+                    *self.hits.get_mut() += 1;
+                    Ok(resident.value.clone())
+                }
+                Entry::Placeholder(p) => {
+                    *self.hits.get_mut() += 1;
+                    Err((p.shared.clone(), false))
+                }
+                Entry::Ghost(..) => {
+                    *self.misses.get_mut() += 1;
+                    let shared = new_shared_placeholder(hash, idx);
+                    *entry = Entry::Placeholder(Placeholder {
+                        key,
+                        qey,
+                        hot: true,
+                        shared: shared.clone(),
+                    });
+                    let next_ghost = self.entries.unlink(idx);
+                    if self.ghost_head == Some(idx) {
+                        self.ghost_head = next_ghost;
+                    }
+                    Err((shared, true))
+                }
+            }
+        } else {
+            *self.misses.get_mut() += 1;
+            let idx = self.entries.next_free();
+            let shared = new_shared_placeholder(hash, idx);
+            let idx_ = self.entries.insert(
+                Entry::Placeholder(Placeholder {
+                    key,
+                    qey,
+                    hot: false,
+                    shared: shared.clone(),
+                }),
+                None,
+            );
+            debug_assert_eq!(idx, idx_);
+            self.map_insert(hash, idx);
+            Err((shared, true))
+        }
     }
 }

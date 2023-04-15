@@ -42,8 +42,8 @@ pub mod linked_slab;
 mod options;
 #[cfg(fuzzing)]
 pub mod options;
+mod placeholder;
 mod rw_lock;
-mod sentinel;
 mod shard;
 /// Concurrent cache variants that can be used from multiple threads.
 pub mod sync;
@@ -127,24 +127,31 @@ mod tests {
 
     #[test]
     fn test_get_or_insert() {
-        for _ in 0..1000 {
+        use rand::prelude::*;
+        for _i in 0..1000 {
+            dbg!(_i);
             let mut entered = AtomicUsize::default();
             let cache = sync::KQCache::<u64, u64, u64>::new(100);
             const THREADS: usize = 100;
             let wg = std::sync::Barrier::new(THREADS);
+            let solve_at = rand::thread_rng().gen_range(0..THREADS);
             std::thread::scope(|s| {
                 for _ in 0..THREADS {
                     s.spawn(|| {
                         wg.wait();
-                        let result = cache.get_or_insert_with(&1, &1, || {
-                            entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            Ok::<u64, ()>(1)
+                        let _result = cache.get_or_insert_with(&1, &1, || {
+                            let before = entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if before == solve_at {
+                                Ok(1)
+                            } else {
+                                Err(())
+                            }
                         });
-                        assert_eq!(result, Ok(1));
+                        // assert_eq!(result, Ok(1));
                     });
                 }
             });
-            assert_eq!(*entered.get_mut(), 1);
+            assert_eq!(*entered.get_mut(), solve_at + 1);
         }
     }
 }
