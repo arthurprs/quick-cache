@@ -73,7 +73,7 @@ impl<Key, Qey, Val> Weighter<Key, Qey, Val> for UnitWeighter {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::{atomic::AtomicUsize, Arc};
 
     use super::*;
 
@@ -152,6 +152,43 @@ mod tests {
                 }
             });
             assert_eq!(*entered.get_mut(), solve_at + 1);
+        }
+    }
+
+    #[tokio::test(flavor="multi_thread")]
+    async fn test_get_or_insert_async() {
+        use rand::prelude::*;
+        for _i in 0..1000 {
+            dbg!(_i);
+            let entered = Arc::new(AtomicUsize::default());
+            let cache = Arc::new(sync::KQCache::<u64, u64, u64>::new(100));
+            const TASKS: usize = 100;
+            let wg = Arc::new(tokio::sync::Barrier::new(TASKS));
+            let solve_at = rand::thread_rng().gen_range(0..TASKS);
+            dbg!(solve_at);
+            let mut tasks = Vec::new();
+            for _ in 0..TASKS {
+                let cache = cache.clone();
+                let wg = wg.clone();
+                let entered = entered.clone();
+                let task = tokio::spawn(async move {
+                    wg.wait().await;
+                    let _result = cache.get_or_insert_async(&1, &1, async {
+                        let before = entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if before == solve_at {
+                            Ok(1)
+                        } else {
+                            Err(())
+                        }
+                    }).await;
+                    // assert_eq!(result, Ok(1));
+                });
+                tasks.push(task);
+            }
+            for task in tasks {
+                task.await.unwrap();
+            }
+            assert_eq!(entered.load(std::sync::atomic::Ordering::Relaxed), solve_at + 1);
         }
     }
 }

@@ -35,6 +35,9 @@ pub struct Placeholder<Val> {
 
 #[derive(Debug)]
 pub struct State<Val> {
+    /// The waiters list
+    /// Manipulating the list requires holding the outer shard lock to avoid races between
+    /// removing the placeholder from the cache and adding a new waiter to it.
     waiters: Vec<Waiter>,
     loading: LoadingState<Val>,
 }
@@ -56,7 +59,7 @@ pub struct PlaceholderGuard<'a, Key, Qey, Val, We, B> {
 }
 
 #[derive(Debug)]
-struct TaskWaiter {
+pub struct TaskWaiter {
     notified: bool,
     waker: std::task::Waker,
 }
@@ -98,7 +101,7 @@ pub enum JoinResult<'a, Key, Qey, Val, We, B> {
 }
 
 impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
-    pub fn start_loading_unchecked(
+    pub fn start_loading(
         shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
         shared: SharedPlaceholder<Val>,
     ) -> Self {
@@ -113,17 +116,11 @@ impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
         }
     }
 
-    pub fn start_loading(
-        _shard_lock: RwLockWriteGuard<'a, KQCacheShard<Key, Qey, Val, We, B>>,
-        shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
-        shared: SharedPlaceholder<Val>,
-    ) -> Self {
-        Self::start_loading_unchecked(shard, shared)
-    }
-
     #[allow(clippy::type_complexity)]
     fn join_internal(
-        shard_lock: RwLockWriteGuard<'a, KQCacheShard<Key, Qey, Val, We, B>>,
+        // We take shard lock here even if unused, as manipulating the waiters list
+        // requires holding it to avoid races.
+        _shard_lock: RwLockWriteGuard<'a, KQCacheShard<Key, Qey, Val, We, B>>,
         shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
         shared: &SharedPlaceholder<Val>,
         notified: bool,
@@ -136,7 +133,7 @@ impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
         match &state.loading {
             LoadingState::Loading if notified => {
                 drop(state);
-                Some(Err(Self::start_loading(shard_lock, shard, shared.clone())))
+                Some(Err(Self::start_loading(shard, shared.clone())))
             }
             LoadingState::Loading => {
                 state.waiters.push(waiter_fn());
@@ -167,9 +164,7 @@ impl<
         let mut shard_guard = shard.write();
         let shared = match shard_guard.value_or_placeholder(hash, key, qey) {
             Ok(v) => return JoinResult::Value(v),
-            Err((shared, true)) => {
-                return JoinResult::Guard(Self::start_loading(shard_guard, shard, shared))
-            }
+            Err((shared, true)) => return JoinResult::Guard(Self::start_loading(shard, shared)),
             Err((shared, false)) => shared,
         };
         let mut notification: Option<Arc<AtomicBool>> = None;
@@ -264,19 +259,19 @@ impl<'a, Key, Qey, Val, We, B> Drop for PlaceholderGuard<'a, Key, Qey, Val, We, 
 }
 
 /// Future that results in an Ok(Value) or Err(Guard)
-///
-/// Possible states for (hkq, shared, waiter):
-/// (some, none, none) => never polled
-/// (some, _    , _  ) => invalid
-/// (none, some, some) => pending, waiter added to state
-/// (none, none, none) => after returning Ready in the 1st poll
-/// (none, some, none) => after returning Ready in the 2nd+ poll
-/// (none, none, some) => invalid
-pub struct JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
-    shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
-    hkq: Option<(u64, &'b Key, &'b Qey)>,
-    shared: Option<SharedPlaceholder<Val>>,
-    waiter: Option<SharedTaskWaiter>,
+pub enum JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
+    Created {
+        shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
+        hash: u64,
+        key: &'b Key,
+        qey: &'b Qey,
+    },
+    Pending {
+        shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
+        shared: SharedPlaceholder<Val>,
+        waiter: Option<SharedTaskWaiter>,
+    },
+    Done,
 }
 
 impl<'a, 'b, Key, Qey, Val, We, B> JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
@@ -286,24 +281,24 @@ impl<'a, 'b, Key, Qey, Val, We, B> JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
         key: &'b Key,
         qey: &'b Qey,
     ) -> JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
-        JoinFuture {
+        JoinFuture::Created {
             shard,
-            hkq: Some((hash, key, qey)),
-            shared: None,
-            waiter: None,
+            hash,
+            key,
+            qey,
         }
     }
 
     #[cold]
-    fn drop_slow(&mut self, waiter: SharedTaskWaiter) {
-        let shared = self.shared.as_ref().unwrap();
+    fn drop_pending_waiter(&mut self) {
+        let Self::Pending { shard, shared, waiter: Some(waiter) } = self else { unreachable!() };
         let mut state = shared.state.write();
         if waiter.read().notified {
             if matches!(state.loading, LoadingState::Loading) {
                 // The write guard was abandoned and the future was notified but didn't get polled.
                 // So the next waiter, if any, will get notified.
                 drop(state); // Drop state to avoid a deadlock
-                let _ = PlaceholderGuard::start_loading_unchecked(self.shard, shared.clone());
+                let _ = PlaceholderGuard::start_loading(shard, shared.clone());
             }
         } else {
             let waiter_idx = state.waiters.iter().position(|w| w.is_task(&waiter));
@@ -314,8 +309,14 @@ impl<'a, 'b, Key, Qey, Val, We, B> JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
 
 impl<'a, 'b, Key, Qey, Val, We, B> Drop for JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
     fn drop(&mut self) {
-        if let Some(waiter) = self.waiter.take() {
-            self.drop_slow(waiter)
+        if matches!(
+            self,
+            Self::Pending {
+                waiter: Some(_),
+                ..
+            }
+        ) {
+            self.drop_pending_waiter()
         }
     }
 }
@@ -336,59 +337,74 @@ impl<
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let mut shard_guard = self.shard.write();
-        if let Some((hash, key, qey)) = self.hkq.take() {
-            match shard_guard.value_or_placeholder(hash, key.clone(), qey.clone()) {
-                Ok(v) => return std::task::Poll::Ready(Ok(v)),
-                Err((shared, true)) => {
-                    let guard = PlaceholderGuard::start_loading(shard_guard, self.shard, shared);
-                    return std::task::Poll::Ready(Err(guard));
+        let shard_guard = match &*self {
+            JoinFuture::Created {
+                shard,
+                hash,
+                key,
+                qey,
+            } => {
+                let mut shard_guard = shard.write();
+                match shard_guard.value_or_placeholder(*hash, Key::clone(key), Qey::clone(qey)) {
+                    Ok(v) => {
+                        *self = Self::Done;
+                        return std::task::Poll::Ready(Ok(v));
+                    }
+                    Err((shared, true)) => {
+                        let guard = PlaceholderGuard::start_loading(shard, shared);
+                        *self = Self::Done;
+                        return std::task::Poll::Ready(Err(guard));
+                    }
+                    Err((shared, false)) => {
+                        *self = Self::Pending {
+                            shard,
+                            shared,
+                            waiter: None,
+                        };
+                        shard_guard
+                    }
                 }
-                Err((shared, false)) => self.shared = Some(shared),
             }
-        }
-
-        let mut waiter_opt = self.waiter.take();
-        if let Some(waiter) = &waiter_opt {
-            if !waiter.write().notified {
-                // Lock waiters, double check and adjust waker if needed
-                let state = self.shared.as_ref().unwrap().state.write();
+            JoinFuture::Pending {
+                shard,
+                waiter: Some(waiter),
+                ..
+            } => {
                 let mut waiter = waiter.write();
-                if !waiter.notified {
+                if waiter.notified {
+                    waiter.notified = false;
+                } else {
                     if !waiter.waker.will_wake(cx.waker()) {
                         waiter.waker = cx.waker().clone();
                     }
-                    drop(state);
-                    drop(waiter);
-                    self.waiter = waiter_opt;
                     return std::task::Poll::Pending;
                 }
+                shard.write()
             }
-        }
+            JoinFuture::Pending { .. } => unreachable!(),
+            JoinFuture::Done => panic!("Polled after ready"),
+        };
 
-        // If we reach here and waiter_opt is some, it means we got a notification.
-        let notified = waiter_opt.is_some();
-        match PlaceholderGuard::join_internal(
-            shard_guard,
-            self.shard,
-            self.shared.as_ref().unwrap(),
-            notified,
-            || {
-                let task_waiter = waiter_opt
-                    .get_or_insert_with(|| {
-                        Arc::new(RwLock::new(TaskWaiter {
-                            notified: false,
-                            waker: cx.waker().clone(),
-                        }))
-                    })
-                    .clone();
-                Waiter::Task(task_waiter)
-            },
-        ) {
-            Some(result) => std::task::Poll::Ready(result),
+        let Self::Pending { shard, shared, waiter } = &mut *self else { unreachable!() };
+        // If we reach here and waiter is some, it means we got a notification.
+        match PlaceholderGuard::join_internal(shard_guard, shard, shared, waiter.is_some(), || {
+            let task_waiter = waiter
+                .get_or_insert_with(|| {
+                    Arc::new(RwLock::new(TaskWaiter {
+                        notified: false,
+                        waker: cx.waker().clone(),
+                    }))
+                })
+                .clone();
+            Waiter::Task(task_waiter)
+        }) {
+            Some(result) => {
+                *waiter = None;
+                *self = Self::Done;
+                std::task::Poll::Ready(result)
+            }
             None => {
-                debug_assert!(waiter_opt.is_some());
-                self.waiter = waiter_opt;
+                debug_assert!(waiter.is_some());
                 std::task::Poll::Pending
             }
         }
