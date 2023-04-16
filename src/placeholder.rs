@@ -3,6 +3,7 @@ use std::{
     hash::{BuildHasher, Hash},
     mem,
     sync::{atomic::AtomicBool, Arc},
+    task::Poll,
     time::{Duration, Instant},
 };
 
@@ -129,7 +130,7 @@ impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
     where
         Val: Clone,
     {
-        let mut state = shared.state.write();
+        let mut state = shared.state.read();
         match &state.loading {
             LoadingState::Loading if notified => {
                 drop(state);
@@ -336,7 +337,7 @@ impl<
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
+    ) -> Poll<Self::Output> {
         let shard_guard = match &*self {
             JoinFuture::Created {
                 shard,
@@ -348,12 +349,12 @@ impl<
                 match shard_guard.value_or_placeholder(*hash, Key::clone(key), Qey::clone(qey)) {
                     Ok(v) => {
                         *self = Self::Done;
-                        return std::task::Poll::Ready(Ok(v));
+                        return Poll::Ready(Ok(v));
                     }
                     Err((shared, true)) => {
                         let guard = PlaceholderGuard::start_loading(shard, shared);
                         *self = Self::Done;
-                        return std::task::Poll::Ready(Err(guard));
+                        return Poll::Ready(Err(guard));
                     }
                     Err((shared, false)) => {
                         *self = Self::Pending {
@@ -377,7 +378,7 @@ impl<
                     if !waiter.waker.will_wake(cx.waker()) {
                         waiter.waker = cx.waker().clone();
                     }
-                    return std::task::Poll::Pending;
+                    return Poll::Pending;
                 }
                 shard.write()
             }
@@ -401,11 +402,11 @@ impl<
             Some(result) => {
                 *waiter = None;
                 *self = Self::Done;
-                std::task::Poll::Ready(result)
+                Poll::Ready(result)
             }
             None => {
                 debug_assert!(waiter.is_some());
-                std::task::Poll::Pending
+                Poll::Pending
             }
         }
     }
