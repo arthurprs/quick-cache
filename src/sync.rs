@@ -1,6 +1,6 @@
 use crate::{
     options::{Options, OptionsBuilder},
-    placeholder::{JoinResult, PlaceholderGuard},
+    placeholder::{JoinResult, PlaceholderGuard, JoinFuture},
     rw_lock::RwLock,
     shard::{Entry, KQCacheShard},
     DefaultHashBuilder, UnitWeighter, Weighter,
@@ -262,14 +262,7 @@ impl<
         if let Some(v) = shard.read().get(hash, key, qey) {
             return JoinResult::Value(v.clone());
         }
-        let mut shard_guard = shard.write();
-        match shard_guard.value_or_placeholder(hash, key.clone(), qey.clone()) {
-            Ok(v) => JoinResult::Value(v),
-            Err((shared, false)) => PlaceholderGuard::join(shard_guard, shard, shared, timeout),
-            Err((shared, true)) => {
-                JoinResult::Guard(PlaceholderGuard::start_loading(shard_guard, shard, shared))
-            }
-        }
+        PlaceholderGuard::join(shard, hash, key.clone(), qey.clone(), timeout)
     }
 
     /// Gets or inserts an item in the cache with key `key` and qey `qey`.
@@ -295,10 +288,10 @@ impl<
         }
     }
 
-    pub async fn get_value_or_guard_async<'a>(
+    pub async fn get_value_or_guard_async<'a, 'b>(
         &'a self,
-        key: &Key,
-        qey: &Qey,
+        key: &'b Key,
+        qey: &'b Qey,
     ) -> Result<Val, PlaceholderGuard<'a, Key, Qey, Val, We, B>>
     where
         Key: Clone,
@@ -308,19 +301,12 @@ impl<
         if let Some(v) = shard.read().get(hash, key, qey) {
             return Ok(v.clone());
         }
-        let mut shard_guard = shard.write();
-        match shard_guard.value_or_placeholder(hash, key.clone(), qey.clone()) {
-            Ok(v) => Ok(v),
-            Err((shared, false)) => PlaceholderGuard::join_future(shard_guard, shard, shared).await,
-            Err((shared, true)) => {
-                Err(PlaceholderGuard::start_loading(shard_guard, shard, shared))
-            }
-        }
+        JoinFuture::new(shard, hash, key, qey).await
     }
 
     /// Gets or inserts an item in the cache with key `key` and qey `qey`.
     /// Note: It's only recommended to use this function if computing `Val` is very expensive and/or involves IO.
-    pub async fn get_or_insert_async<'a, Fut, E>(
+    pub async fn get_or_insert_async<'a, E>(
         &self,
         key: &Key,
         qey: &Qey,
