@@ -1,6 +1,6 @@
 use crate::{
     options::{Options, OptionsBuilder},
-    placeholder::{JoinResult, PlaceholderGuard, JoinFuture},
+    placeholder::{JoinFuture, JoinResult, PlaceholderGuard},
     rw_lock::RwLock,
     shard::{Entry, KQCacheShard},
     DefaultHashBuilder, UnitWeighter, Weighter,
@@ -8,7 +8,8 @@ use crate::{
 use std::{
     borrow::Borrow,
     future::Future,
-    hash::{BuildHasher, Hash, Hasher}, time::Duration,
+    hash::{BuildHasher, Hash, Hasher},
+    time::Duration,
 };
 
 /// A concurrent two keys cache.

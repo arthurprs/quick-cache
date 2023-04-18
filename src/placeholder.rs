@@ -1,9 +1,12 @@
 use std::{
     future::Future,
     hash::{BuildHasher, Hash},
-    mem,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{
+        atomic::{self, AtomicBool},
+        Arc,
+    },
     task::Poll,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -69,7 +72,7 @@ type SharedTaskWaiter = Arc<RwLock<TaskWaiter>>;
 
 #[derive(Debug)]
 enum Waiter {
-    Thread(std::thread::Thread, Arc<AtomicBool>),
+    Thread(thread::Thread, Arc<AtomicBool>),
     Task(SharedTaskWaiter),
 }
 
@@ -78,7 +81,7 @@ impl Waiter {
     fn notify(self) {
         match self {
             Waiter::Thread(t, n) => {
-                n.store(true, std::sync::atomic::Ordering::Release);
+                n.store(true, atomic::Ordering::Release);
                 t.unpark()
             }
             Waiter::Task(t) => {
@@ -93,8 +96,14 @@ impl Waiter {
     fn is_task(&self, other: &SharedTaskWaiter) -> bool {
         matches!(self, Waiter::Task(t) if Arc::ptr_eq(t, other))
     }
+
+    #[inline]
+    fn is_thread(&self, other: thread::ThreadId) -> bool {
+        matches!(self, Waiter::Thread(t, _) if t.id() == other)
+    }
 }
 
+#[derive(Debug)]
 pub enum JoinResult<'a, Key, Qey, Val, We, B> {
     Value(Val),
     Guard(PlaceholderGuard<'a, Key, Qey, Val, We, B>),
@@ -130,7 +139,7 @@ impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
     where
         Val: Clone,
     {
-        let mut state = shared.state.read();
+        let mut state = shared.state.write();
         match &state.loading {
             LoadingState::Loading if notified => {
                 drop(state);
@@ -173,7 +182,7 @@ impl<
         loop {
             if let Some(result) = Self::join_internal(shard_guard, shard, &shared, notified, || {
                 Waiter::Thread(
-                    std::thread::current(),
+                    thread::current(),
                     notification.get_or_insert_with(Default::default).clone(),
                 )
             }) {
@@ -184,20 +193,31 @@ impl<
             }
             let notification = notification.as_ref().unwrap();
             if let Some(timeout) = timeout {
+                let start = Instant::now();
                 loop {
-                    let start = Instant::now();
-                    std::thread::park_timeout(timeout);
-                    if notification.load(std::sync::atomic::Ordering::Acquire) {
+                    thread::park_timeout(Instant::now().saturating_duration_since(start));
+                    if notification.load(atomic::Ordering::Acquire) {
                         break;
                     }
-                    if start.elapsed() >= timeout {
-                        return JoinResult::Timeout;
+                    if start.elapsed() < timeout {
+                        // spurious unpark
+                        continue;
                     }
+                    // Lock state and re-check
+                    let mut state: RwLockWriteGuard<State<Val>> = shared.state.write();
+                    if notification.load(atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    // We really timed out... remove from waiters list
+                    let tid: thread::ThreadId = thread::current().id();
+                    let waiter_idx = state.waiters.iter().position(|w| w.is_thread(tid));
+                    state.waiters.swap_remove(waiter_idx.unwrap());
+                    return JoinResult::Timeout;
                 }
             } else {
                 loop {
-                    std::thread::park();
-                    if notification.load(std::sync::atomic::Ordering::Acquire) {
+                    thread::park();
+                    if notification.load(atomic::Ordering::Acquire) {
                         break;
                     }
                 }
@@ -218,15 +238,16 @@ impl<
     > PlaceholderGuard<'a, Key, Qey, Val, We, B>
 {
     pub fn insert(mut self, value: Val) {
-        let waiters = {
+        let referenced;
+        {
             let mut state = self.shared.state.write();
             state.loading = LoadingState::Inserted(value.clone());
-            mem::take(&mut state.waiters)
-        };
-        let referenced = !waiters.is_empty();
-        for w in waiters {
-            w.notify();
+            referenced = !state.waiters.is_empty();
+            for w in state.waiters.drain(..) {
+                w.notify();
+            }
         }
+
         let _result = self
             .shard
             .write()
@@ -256,6 +277,11 @@ impl<'a, Key, Qey, Val, We, B> Drop for PlaceholderGuard<'a, Key, Qey, Val, We, 
         if !self.inserted {
             self.drop_slow();
         }
+    }
+}
+impl<'a, Key, Qey, Val, We, B> std::fmt::Debug for PlaceholderGuard<'a, Key, Qey, Val, We, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlaceholderGuard").finish_non_exhaustive()
     }
 }
 
@@ -296,8 +322,8 @@ impl<'a, 'b, Key, Qey, Val, We, B> JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
         let mut state = shared.state.write();
         if waiter.read().notified {
             if matches!(state.loading, LoadingState::Loading) {
-                // The write guard was abandoned and the future was notified but didn't get polled.
-                // So the next waiter, if any, will get notified.
+                // The write guard was abandoned elsewhere, this future was notified but didn't get polled.
+                // So we get and drop the guard here to handle the side effects.
                 drop(state); // Drop state to avoid a deadlock
                 let _ = PlaceholderGuard::start_loading(shard, shared.clone());
             }

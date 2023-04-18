@@ -51,6 +51,7 @@ pub mod sync;
 pub mod unsync;
 
 pub use options::{Options, OptionsBuilder};
+pub use placeholder::{JoinResult, PlaceholderGuard};
 
 #[cfg(feature = "ahash")]
 pub type DefaultHashBuilder = ahash::RandomState;
@@ -73,7 +74,10 @@ impl<Key, Qey, Val> Weighter<Key, Qey, Val> for UnitWeighter {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{atomic::AtomicUsize, Arc};
+    use std::{
+        sync::{atomic::AtomicUsize, Arc},
+        time::Duration,
+    };
 
     use super::*;
 
@@ -128,7 +132,7 @@ mod tests {
     #[test]
     fn test_get_or_insert() {
         use rand::prelude::*;
-        for _i in 0..1000 {
+        for _i in 0..2000 {
             dbg!(_i);
             let mut entered = AtomicUsize::default();
             let cache = sync::KQCache::<u64, u64, u64>::new(100);
@@ -139,7 +143,7 @@ mod tests {
                 for _ in 0..THREADS {
                     s.spawn(|| {
                         wg.wait();
-                        let _result = cache.get_or_insert_with(&1, &1, || {
+                        let result = cache.get_or_insert_with(&1, &1, || {
                             let before = entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if before == solve_at {
                                 Ok(1)
@@ -147,7 +151,7 @@ mod tests {
                                 Err(())
                             }
                         });
-                        // assert_eq!(result, Ok(1));
+                        assert!(matches!(result, Ok(1) | Err(())));
                     });
                 }
             });
@@ -155,17 +159,51 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor="multi_thread")]
+    #[test]
+    fn test_value_or_guard() {
+        use rand::prelude::*;
+        for _i in 0..2000 {
+            dbg!(_i);
+            let mut entered = AtomicUsize::default();
+            let cache = sync::KQCache::<u64, u64, u64>::new(100);
+            const THREADS: usize = 100;
+            let wg = std::sync::Barrier::new(THREADS);
+            let solve_at = rand::thread_rng().gen_range(0..THREADS);
+            std::thread::scope(|s| {
+                for _ in 0..THREADS {
+                    s.spawn(|| {
+                        wg.wait();
+                        loop {
+                            match cache.get_value_or_guard(&1, &1, Some(Duration::from_millis(1))) {
+                                JoinResult::Value(v) => assert_eq!(v, 1),
+                                JoinResult::Guard(g) => {
+                                    let before =
+                                        entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    if before == solve_at {
+                                        g.insert(1);
+                                    }
+                                }
+                                JoinResult::Timeout => continue,
+                            }
+                            break;
+                        }
+                    });
+                }
+            });
+            assert_eq!(*entered.get_mut(), solve_at + 1);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_get_or_insert_async() {
         use rand::prelude::*;
-        for _i in 0..1000 {
+        for _i in 0..5000 {
             dbg!(_i);
             let entered = Arc::new(AtomicUsize::default());
             let cache = Arc::new(sync::KQCache::<u64, u64, u64>::new(100));
             const TASKS: usize = 100;
             let wg = Arc::new(tokio::sync::Barrier::new(TASKS));
             let solve_at = rand::thread_rng().gen_range(0..TASKS);
-            dbg!(solve_at);
             let mut tasks = Vec::new();
             for _ in 0..TASKS {
                 let cache = cache.clone();
@@ -173,22 +211,78 @@ mod tests {
                 let entered = entered.clone();
                 let task = tokio::spawn(async move {
                     wg.wait().await;
-                    let _result = cache.get_or_insert_async(&1, &1, async {
-                        let before = entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if before == solve_at {
-                            Ok(1)
-                        } else {
-                            Err(())
-                        }
-                    }).await;
-                    // assert_eq!(result, Ok(1));
+                    let result = cache
+                        .get_or_insert_async(&1, &1, async {
+                            let before = entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if before == solve_at {
+                                Ok(1)
+                            } else {
+                                Err(())
+                            }
+                        })
+                        .await;
+                    assert!(matches!(result, Ok(1) | Err(())));
                 });
                 tasks.push(task);
             }
             for task in tasks {
                 task.await.unwrap();
             }
-            assert_eq!(entered.load(std::sync::atomic::Ordering::Relaxed), solve_at + 1);
+            assert_eq!(cache.get(&1, &1), Some(1));
+            assert_eq!(
+                entered.load(std::sync::atomic::Ordering::Relaxed),
+                solve_at + 1
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_value_or_guard_async() {
+        use rand::prelude::*;
+        for _i in 0..5000 {
+            dbg!(_i);
+            let entered = Arc::new(AtomicUsize::default());
+            let cache = Arc::new(sync::KQCache::<u64, u64, u64>::new(100));
+            const TASKS: usize = 100;
+            let wg = Arc::new(tokio::sync::Barrier::new(TASKS));
+            let solve_at = rand::thread_rng().gen_range(0..TASKS);
+            let mut tasks = Vec::new();
+            for _ in 0..TASKS {
+                let cache = cache.clone();
+                let wg = wg.clone();
+                let entered = entered.clone();
+                let task = tokio::spawn(async move {
+                    wg.wait().await;
+                    loop {
+                        match tokio::time::timeout(
+                            Duration::from_millis(1),
+                            cache.get_value_or_guard_async(&1, &1),
+                        )
+                        .await
+                        {
+                            Ok(Ok(r)) => assert_eq!(r, 1),
+                            Ok(Err(g)) => {
+                                let before =
+                                    entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if before == solve_at {
+                                    g.insert(1);
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                        break;
+                    }
+                });
+                tasks.push(task);
+            }
+            for task in tasks {
+                task.await.unwrap();
+            }
+            assert_eq!(cache.get(&1, &1), Some(1));
+            assert_eq!(
+                entered.load(std::sync::atomic::Ordering::Relaxed),
+                solve_at + 1
+            );
         }
     }
 }
