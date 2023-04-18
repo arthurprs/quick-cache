@@ -431,7 +431,6 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Fetches an item from the cache.
-    /// Callers should prefer `get_mut` whenever possible as it's more efficient.
     pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<Val>
     where
         Key: Borrow<Q>,
@@ -459,7 +458,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
         self.0.remove(key, &())
     }
 
-    /// Inserts an item in the cache with key `key` and qey `qey`.
+    /// Inserts an item in the cache with key `key`.
     pub fn insert(&self, key: Key, value: Val) {
         self.0.insert(key, (), value);
     }
