@@ -61,6 +61,16 @@ pub enum Entry<Key, Qey, Val> {
     Ghost(u64),
 }
 
+impl<Key, Qey, Val> Entry<Key, Qey, Val> {
+    fn dbg(&self) -> &'static str {
+        match self {
+            Entry::Resident(_) => "Resident",
+            Entry::Placeholder(_) => "Placeholder",
+            Entry::Ghost(_) => "Ghost",
+        }
+    }
+}
+
 /// A qey aware cache using a modified CLOCK-PRO eviction policy.
 /// The implementation allows some parallelism as gets don't require exclusive access.
 /// Any evicted items are returned so they can be dropped by the caller, outside the locks.
@@ -305,12 +315,10 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         W: Hash + Eq,
     {
         if let Some(idx) = self.search_resident(hash, key, qey) {
-            let (entry, _) = self.entries.get(idx).unwrap();
-            if let Entry::Resident(resident) = entry {
-                resident.referenced.store(true, atomic::Ordering::Relaxed);
-                self.hits.fetch_add(1, atomic::Ordering::Relaxed);
-                return Some(&resident.value);
-            }
+            let Some((Entry::Resident(resident), _)) = self.entries.get(idx) else { unreachable!() };
+            resident.referenced.store(true, atomic::Ordering::Relaxed);
+            self.hits.fetch_add(1, atomic::Ordering::Relaxed);
+            return Some(&resident.value);
         }
         self.misses.fetch_add(1, atomic::Ordering::Relaxed);
         None
@@ -324,12 +332,10 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         W: Hash + Eq,
     {
         if let Some(idx) = self.search_resident(hash, key, qey) {
-            let (entry, _) = self.entries.get_mut(idx).unwrap();
-            if let Entry::Resident(resident) = entry {
-                *resident.referenced.get_mut() = true;
-                *self.hits.get_mut() += 1;
-                return Some(&mut resident.value);
-            }
+            let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else { unreachable!() };
+            *resident.referenced.get_mut() = true;
+            *self.hits.get_mut() += 1;
+            return Some(&mut resident.value);
         }
         *self.misses.get_mut() += 1;
         None
@@ -343,12 +349,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         W: Hash + Eq,
     {
         let idx = self.search_resident(hash, key, qey)?;
-        let (entry, _) = self.entries.get(idx).unwrap();
-        if let Entry::Resident(resident) = entry {
-            Some(&resident.value)
-        } else {
-            None
-        }
+        let Some((Entry::Resident(resident), _)) = self.entries.get(idx) else { unreachable!() };
+        Some(&resident.value)
     }
 
     pub fn peek_mut<Q: ?Sized, W: ?Sized>(
@@ -364,12 +366,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         W: Hash + Eq,
     {
         let idx = self.search_resident(hash, key, qey)?;
-        let (entry, _) = self.entries.get_mut(idx).unwrap();
-        if let Entry::Resident(resident) = entry {
-            Some(&mut resident.value)
-        } else {
-            None
-        }
+        let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else { unreachable!() };
+        Some(&mut resident.value)
     }
 
     pub fn remove<Q: ?Sized, W: ?Sized>(
@@ -537,7 +535,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         debug_assert_ne!(self.num_non_resident, 0);
         let idx = self.ghost_head.unwrap();
         let (entry, _) = self.entries.get_mut(idx).unwrap();
-        let Entry::Ghost(hash) = *entry else { unreachable!() };
+        let Entry::Ghost(hash) = *entry else { unreachable!("{}", entry.dbg()) };
         self.num_non_resident -= 1;
         self.map_remove(hash, idx);
         let (_, next) = self.entries.remove(idx).unwrap();
