@@ -403,11 +403,12 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 }
             }
             Entry::Ghost(_) => {
+                // Since this an user invoked remove we opt to remove even Ghost entries that could match it.
                 self.num_non_resident -= 1;
                 &mut self.ghost_head
             }
             Entry::Placeholder(_) => {
-                // TODO: this is probably undesirable, but we already called map_remove above
+                // TODO: this is probably undesirable as it could leak to two placeholders for the same key.
                 return Some(entry);
             }
         };
@@ -574,10 +575,6 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 evicted = Entry::Resident(mem::replace(resident, new_resident));
             }
             Entry::Placeholder(..) | Entry::Ghost(..) => {
-                // debug_assert_eq!(
-                //     *entry.as_ref().err().unwrap(),
-                //     Self::hash_static(&self.hash_builder, &key, &qey)
-                // );
                 evicted = mem::replace(
                     entry,
                     Entry::Resident(Resident {
@@ -590,7 +587,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 );
                 self.num_hot += 1;
                 self.weight_hot += weight;
-                if matches!(entry, Entry::Ghost(..)) {
+                if matches!(evicted, Entry::Ghost(..)) {
                     self.num_non_resident -= 1;
                     Self::relink(
                         &mut self.entries,
