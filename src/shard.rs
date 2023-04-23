@@ -153,9 +153,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         let mut num_non_resident = 0;
         let mut weight_hot = 0;
         let mut weight_cold = 0;
-        for a in self.entries.iter_entries() {
-            match a {
-                Ok(r)
+        for e in self.entries.iter_entries() {
+            match e {
+                Entry::Resident(r)
                     if matches!(
                         r.state,
                         ResidentState::ColdDemoted | ResidentState::ColdInTest
@@ -164,13 +164,14 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                     num_cold += 1;
                     weight_cold += self.weighter.weight(&r.key, &r.qey, &r.value);
                 }
-                Ok(r) => {
+                Entry::Resident(r) => {
                     num_hot += 1;
                     weight_hot += self.weighter.weight(&r.key, &r.qey, &r.value);
                 }
-                Err(_) => {
+                Entry::Ghost(_) => {
                     num_non_resident += 1;
                 }
+                Entry::Placeholder(_) => (),
             }
         }
         // eprintln!("-------------");
