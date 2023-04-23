@@ -12,7 +12,7 @@ use std::{
 
 use crate::{
     linked_slab::Token,
-    rw_lock::{RwLock, RwLockWriteGuard},
+    rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard},
     shard::KQCacheShard,
     Weighter,
 };
@@ -127,10 +127,14 @@ impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
     }
 
     #[allow(clippy::type_complexity)]
+    #[inline]
     fn join_internal(
         // We take shard lock here even if unused, as manipulating the waiters list
         // requires holding it to avoid races.
-        _shard_lock: RwLockWriteGuard<'a, KQCacheShard<Key, Qey, Val, We, B>>,
+        _shard_lock: Result<
+            RwLockWriteGuard<'a, KQCacheShard<Key, Qey, Val, We, B>>,
+            RwLockReadGuard<'a, KQCacheShard<Key, Qey, Val, We, B>>,
+        >,
         shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
         shared: &SharedPlaceholder<Val>,
         notified: bool,
@@ -139,18 +143,26 @@ impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
     where
         Val: Clone,
     {
-        let mut state = shared.state.write();
-        match &state.loading {
-            LoadingState::Loading if notified => {
-                drop(state);
-                Some(Err(Self::start_loading(shard, shared.clone())))
+        if notified {
+            let state = shared.state.read();
+            match &state.loading {
+                LoadingState::Loading => {
+                    drop(state);
+                    Some(Err(Self::start_loading(shard, shared.clone())))
+                }
+                LoadingState::Inserted(value) => Some(Ok(value.clone())),
+                LoadingState::Terminated => unreachable!(),
             }
-            LoadingState::Loading => {
-                state.waiters.push(waiter_fn());
-                None
+        } else {
+            let mut state = shared.state.write();
+            match &state.loading {
+                LoadingState::Loading => {
+                    state.waiters.push(waiter_fn());
+                    None
+                }
+                LoadingState::Inserted(value) => Some(Ok(value.clone())),
+                LoadingState::Terminated => unreachable!(),
             }
-            LoadingState::Inserted(value) => Some(Ok(value.clone())),
-            LoadingState::Terminated => unreachable!(),
         }
     }
 }
@@ -179,6 +191,7 @@ impl<
         };
         let mut notification: Option<Arc<AtomicBool>> = None;
         let mut notified = false;
+        let mut shard_guard = Ok(shard_guard);
         loop {
             if let Some(result) = Self::join_internal(shard_guard, shard, &shared, notified, || {
                 Waiter::Thread(
@@ -204,12 +217,12 @@ impl<
                         continue;
                     }
                     // Lock state and re-check
-                    let mut state: RwLockWriteGuard<State<Val>> = shared.state.write();
+                    let mut state = shared.state.write();
                     if notification.load(atomic::Ordering::Acquire) {
                         break;
                     }
                     // We really timed out... remove from waiters list
-                    let tid: thread::ThreadId = thread::current().id();
+                    let tid = thread::current().id();
                     let waiter_idx = state.waiters.iter().position(|w| w.is_thread(tid));
                     state.waiters.swap_remove(waiter_idx.unwrap());
                     return JoinResult::Timeout;
@@ -223,7 +236,7 @@ impl<
                 }
             }
             notified = true;
-            shard_guard = shard.write();
+            shard_guard = Err(shard.read());
         }
     }
 }
@@ -388,7 +401,7 @@ impl<
                             shared,
                             waiter: None,
                         };
-                        shard_guard
+                        Ok(shard_guard)
                     }
                 }
             }
@@ -406,7 +419,7 @@ impl<
                     }
                     return Poll::Pending;
                 }
-                shard.write()
+                Err(shard.read())
             }
             JoinFuture::Pending { .. } => unreachable!(),
             JoinFuture::Done => panic!("Polled after ready"),
