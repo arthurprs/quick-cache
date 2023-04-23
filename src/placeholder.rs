@@ -328,7 +328,7 @@ impl<'a, 'b, Key, Qey, Val, We, B> JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
                 let _ = PlaceholderGuard::start_loading(shard, shared.clone());
             }
         } else {
-            let waiter_idx = state.waiters.iter().position(|w| w.is_task(&waiter));
+            let waiter_idx = state.waiters.iter().position(|w| w.is_task(waiter));
             state.waiters.swap_remove(waiter_idx.unwrap());
         }
     }
