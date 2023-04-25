@@ -42,7 +42,7 @@ enum ResidentState {
 pub struct Resident<Key, Qey, Val> {
     key: Key,
     qey: Qey,
-    pub value: Val,
+    value: Val,
     state: ResidentState,
     referenced: AtomicBool,
 }
@@ -52,7 +52,7 @@ pub struct Placeholder<Key, Qey, Val> {
     key: Key,
     qey: Qey,
     hot: bool,
-    pub(in crate::shard) shared: SharedPlaceholder<Val>,
+    shared: SharedPlaceholder<Val>,
 }
 
 pub enum Entry<Key, Qey, Val> {
@@ -767,7 +767,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         evicted
     }
 
-    pub fn value_or_placeholder(
+    pub fn get_value_or_placeholder(
         &mut self,
         hash: u64,
         key: Key,

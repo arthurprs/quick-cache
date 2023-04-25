@@ -249,6 +249,12 @@ impl<
         }
     }
 
+    /// Gets an item from the cache with key `key` and qey `qey`.
+    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// that can be used to insert the value once it's computed.
+    /// While the returned guard is alive, other calls with the same key and qey using the
+    /// `get_value_guard` or `get_or_insert` family of functions will block until the guard
+    /// is dropped or the value is inserted.
     pub fn get_value_or_guard<'a>(
         &'a self,
         key: &Key,
@@ -267,7 +273,6 @@ impl<
     }
 
     /// Gets or inserts an item in the cache with key `key` and qey `qey`.
-    /// Note: It's only recommended to use this function if computing `Val` is very expensive and/or involves IO.
     pub fn get_or_insert_with<E>(
         &self,
         key: &Key,
@@ -289,6 +294,12 @@ impl<
         }
     }
 
+    /// Gets an item from the cache with key `key` and qey `qey`.
+    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// that can be used to insert the value once it's computed.
+    /// While the returned guard is alive, other calls with the same key and qey using the
+    /// `get_value_guard` or `get_or_insert` family of functions will block until the guard
+    /// is dropped or the value is inserted.
     pub async fn get_value_or_guard_async<'a, 'b>(
         &'a self,
         key: &'b Key,
@@ -306,7 +317,6 @@ impl<
     }
 
     /// Gets or inserts an item in the cache with key `key` and qey `qey`.
-    /// Note: It's only recommended to use this function if computing `Val` is very expensive and/or involves IO.
     pub async fn get_or_insert_async<'a, E>(
         &self,
         key: &Key,
@@ -461,6 +471,63 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     /// Inserts an item in the cache with key `key`.
     pub fn insert(&self, key: Key, value: Val) {
         self.0.insert(key, (), value);
+    }
+
+    /// Gets an item from the cache with key `key`.
+    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// that can be used to insert the value once it's computed.
+    /// While the returned guard is alive, other calls with the same key using the
+    /// `get_value_guard` or `get_or_insert` family of functions will block until the guard
+    /// is dropped or the value is inserted.
+    pub fn get_value_or_guard<'a>(
+        &'a self,
+        key: &Key,
+        timeout: Option<Duration>,
+    ) -> JoinResult<'a, Key, (), Val, We, B>
+    where
+        Key: Clone,
+    {
+        self.0.get_value_or_guard(key, &(), timeout)
+    }
+
+    /// Gets or inserts an item in the cache with key `key`.
+    pub fn get_or_insert_with<E>(
+        &self,
+        key: &Key,
+        with: impl FnOnce() -> Result<Val, E>,
+    ) -> Result<Val, E>
+    where
+        Key: Clone,
+    {
+        self.0.get_or_insert_with(key, &(), with)
+    }
+
+    /// Gets an item from the cache with key `key`.
+    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// that can be used to insert the value once it's computed.
+    /// While the returned guard is alive, other calls with the same key using the
+    /// `get_value_guard` or `get_or_insert` family of functions will block until the guard
+    /// is dropped or the value is inserted.
+    pub async fn get_value_or_guard_async<'a, 'b>(
+        &'a self,
+        key: &'b Key,
+    ) -> Result<Val, PlaceholderGuard<'a, Key, (), Val, We, B>>
+    where
+        Key: Clone,
+    {
+        self.0.get_value_or_guard_async(key, &()).await
+    }
+
+    /// Gets or inserts an item in the cache with key `key`.
+    pub async fn get_or_insert_async<'a, E>(
+        &self,
+        key: &Key,
+        with: impl Future<Output = Result<Val, E>>,
+    ) -> Result<Val, E>
+    where
+        Key: Clone,
+    {
+        self.0.get_or_insert_async(key, &(), with).await
     }
 }
 

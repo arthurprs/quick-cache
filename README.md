@@ -6,12 +6,14 @@ Lightweight and high performance concurrent cache optimized for low cache overhe
 * Scan resistent and high hit rate caching policy
 * User defined weight per item
 * Scales well with the number of threads
+* Atomic operations with `get_or_insert` and `get_value_or_guard` functions
+* Atomic async operations with `get_or_insert_async` and `get_value_or_guard_async` functions
 * Doesn't use background threads
-* One usage of unsafe, trivially verifiable
+* One trivially verifiable usage of unsafe
 * Small dependency tree
 
 The implementation is optimized for use cases where the cache access times and overhead can add up to be a significant cost.
-Features like: time to live, event listeners and others; are not current implemented in Quick Cache.
+Features like: time to live, iterators, event listeners and others; are not current implemented in Quick Cache.
 If you need these features you may want to take a look at the [Moka](https://crates.io/crates/moka) crate.
 
 ## Examples

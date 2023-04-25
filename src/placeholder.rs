@@ -184,7 +184,7 @@ impl<
         timeout: Option<Duration>,
     ) -> JoinResult<'a, Key, Qey, Val, We, B> {
         let mut shard_guard = shard.write();
-        let shared = match shard_guard.value_or_placeholder(hash, key, qey) {
+        let shared = match shard_guard.get_value_or_placeholder(hash, key, qey) {
             Ok(v) => return JoinResult::Value(v),
             Err((shared, true)) => return JoinResult::Guard(Self::start_loading(shard, shared)),
             Err((shared, false)) => shared,
@@ -385,7 +385,8 @@ impl<
                 qey,
             } => {
                 let mut shard_guard = shard.write();
-                match shard_guard.value_or_placeholder(*hash, Key::clone(key), Qey::clone(qey)) {
+                match shard_guard.get_value_or_placeholder(*hash, Key::clone(key), Qey::clone(qey))
+                {
                     Ok(v) => {
                         *self = Self::Done;
                         return Poll::Ready(Ok(v));
