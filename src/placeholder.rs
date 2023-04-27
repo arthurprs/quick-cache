@@ -40,8 +40,8 @@ pub struct Placeholder<Val> {
 #[derive(Debug)]
 pub struct State<Val> {
     /// The waiters list
-    /// Manipulating the list requires holding the outer shard lock to avoid races between
-    /// removing the placeholder from the cache and adding a new waiter to it.
+    /// Adding to the list requires holding the outer shard lock to avoid races between
+    /// removing the orphan placeholder from the cache and adding a new waiter to it.
     waiters: Vec<Waiter>,
     loading: LoadingState<Val>,
 }
@@ -333,11 +333,12 @@ impl<'a, 'b, Key, Qey, Val, We, B> JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
     fn drop_pending_waiter(&mut self) {
         let Self::Pending { shard, shared, waiter: Some(waiter) } = self else { unreachable!() };
         let mut state = shared.state.write();
-        if waiter.read().notified {
+        let notified = waiter.read().notified; // Drop waiter guard to avoid a deadlock with start_loading
+        if notified {
             if matches!(state.loading, LoadingState::Loading) {
                 // The write guard was abandoned elsewhere, this future was notified but didn't get polled.
                 // So we get and drop the guard here to handle the side effects.
-                drop(state); // Drop state to avoid a deadlock
+                drop(state); // Drop state guard to avoid a deadlock with start_loading
                 let _ = PlaceholderGuard::start_loading(shard, shared.clone());
             }
         } else {
@@ -356,7 +357,7 @@ impl<'a, 'b, Key, Qey, Val, We, B> Drop for JoinFuture<'a, 'b, Key, Qey, Val, We
                 ..
             }
         ) {
-            self.drop_pending_waiter()
+            self.drop_pending_waiter();
         }
     }
 }
@@ -420,6 +421,8 @@ impl<
                     }
                     return Poll::Pending;
                 }
+                // drop waiter first to avoid deadlock due to lock order
+                drop(waiter);
                 Err(shard.read())
             }
             JoinFuture::Pending { .. } => unreachable!(),
