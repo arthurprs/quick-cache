@@ -1,6 +1,7 @@
 pub const DEFAULT_HOT_ALLOCATION: f64 = 0.99;
 pub const DEFAULT_GHOST_ALLOCATION: f64 = 0.5;
 
+/// Cache options. Built with [OptionsBuilder].
 #[derive(Debug, Clone)]
 pub struct Options {
     pub(crate) shards: usize,
@@ -10,6 +11,23 @@ pub struct Options {
     pub(crate) weight_capacity: u64,
 }
 
+/// Builder for [Options].
+///
+/// # Example
+///
+/// ```rust
+/// use quick_cache::{sync::Cache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
+///
+/// Cache::<String, String>::with_options(
+///   OptionsBuilder::new()
+///     .estimated_items_capacity(10000)
+///     .weight_capacity(10000)
+///     .build()
+///     .unwrap(),
+///     UnitWeighter,
+///     DefaultHashBuilder::default(),
+/// );
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct OptionsBuilder {
     shards: Option<usize>,

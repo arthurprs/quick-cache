@@ -104,7 +104,7 @@ impl Waiter {
 }
 
 #[derive(Debug)]
-pub enum JoinResult<'a, Key, Qey, Val, We, B> {
+pub enum GuardResult<'a, Key, Qey, Val, We, B> {
     Value(Val),
     Guard(PlaceholderGuard<'a, Key, Qey, Val, We, B>),
     Timeout,
@@ -182,11 +182,11 @@ impl<
         key: Key,
         qey: Qey,
         timeout: Option<Duration>,
-    ) -> JoinResult<'a, Key, Qey, Val, We, B> {
+    ) -> GuardResult<'a, Key, Qey, Val, We, B> {
         let mut shard_guard = shard.write();
         let shared = match shard_guard.get_value_or_placeholder(hash, key, qey) {
-            Ok(v) => return JoinResult::Value(v),
-            Err((shared, true)) => return JoinResult::Guard(Self::start_loading(shard, shared)),
+            Ok(v) => return GuardResult::Value(v),
+            Err((shared, true)) => return GuardResult::Guard(Self::start_loading(shard, shared)),
             Err((shared, false)) => shared,
         };
         let mut notification: Option<Arc<AtomicBool>> = None;
@@ -200,8 +200,8 @@ impl<
                 )
             }) {
                 return match result {
-                    Ok(v) => JoinResult::Value(v),
-                    Err(g) => JoinResult::Guard(g),
+                    Ok(v) => GuardResult::Value(v),
+                    Err(g) => GuardResult::Guard(g),
                 };
             }
             let notification = notification.as_ref().unwrap();
@@ -225,7 +225,7 @@ impl<
                     let tid = thread::current().id();
                     let waiter_idx = state.waiters.iter().position(|w| w.is_thread(tid));
                     state.waiters.swap_remove(waiter_idx.unwrap());
-                    return JoinResult::Timeout;
+                    return GuardResult::Timeout;
                 }
             } else {
                 loop {

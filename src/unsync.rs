@@ -70,6 +70,23 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
         )
     }
 
+    /// Constructs a cache based on [OptionsBuilder].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use quick_cache::{unsync::KQCache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
+    ///
+    /// KQCache::<String, u64, String>::with_options(
+    ///   OptionsBuilder::new()
+    ///     .estimated_items_capacity(10000)
+    ///     .weight_capacity(10000)
+    ///     .build()
+    ///     .unwrap(),
+    ///     UnitWeighter,
+    ///     DefaultHashBuilder::default(),
+    /// );
+    /// ```
     pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
         let shard = KQCacheShard::new(
             options.hot_allocation,
@@ -235,6 +252,23 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
         ))
     }
 
+    /// Constructs a cache based on [OptionsBuilder].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use quick_cache::{unsync::Cache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
+    ///
+    /// Cache::<String, String>::with_options(
+    ///   OptionsBuilder::new()
+    ///     .estimated_items_capacity(10000)
+    ///     .weight_capacity(10000)
+    ///     .build()
+    ///     .unwrap(),
+    ///     UnitWeighter,
+    ///     DefaultHashBuilder::default(),
+    /// );
+    /// ```
     pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
         Self(KQCache::with_options(options, weighter, hash_builder))
     }

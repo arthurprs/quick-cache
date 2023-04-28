@@ -20,6 +20,16 @@
 //! of the `Borrow` trait you cannot access such keys without building the tuple and thus potentially
 //! cloning `K` and/or `Q`.
 //!
+//! # User defined weight
+//!
+//! By implementing the [Weighter] trait the user can define different weights for each cache entry.
+//!
+//! # Atomic operations
+//!
+//! By using the `get_or_insert` or `get_value_or_guard` family of functions (both sync and async variants
+//! are available, they can be mix and matched) the user can coordinate the insertion of entries, so only
+//! one value is "computed" and inserted after a cache miss.
+//!
 //! # Hasher
 //!
 //! By default the crate uses [ahash](https://crates.io/crates/ahash), which is enabled (by default) via
@@ -51,23 +61,48 @@ pub mod sync;
 pub mod unsync;
 
 pub use options::{Options, OptionsBuilder};
-pub use placeholder::{JoinResult, PlaceholderGuard};
+pub use placeholder::{GuardResult, PlaceholderGuard};
 
 #[cfg(feature = "ahash")]
 pub type DefaultHashBuilder = ahash::RandomState;
 #[cfg(not(feature = "ahash"))]
 pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 
+/// Defines the weight of a cache entry.
+///
+/// # Example
+///
+/// ```
+/// use quick_cache::{sync::Cache, Weighter};
+/// use std::num::NonZeroU32;
+///
+/// #[derive(Clone)]
+/// struct StringWeighter;
+///
+/// impl Weighter<u64, (), String> for StringWeighter {
+///     fn weight(&self, _key: &u64, _qey: &(), val: &String) -> NonZeroU32 {
+///         NonZeroU32::new(val.len().clamp(1, u32::MAX as usize) as u32).unwrap()
+///     }
+/// }
+///
+/// let cache = Cache::with_weighter(100, 100_000, StringWeighter);
+/// cache.insert(1, "1".to_string());
+/// ```
 pub trait Weighter<Key, Qey, Val> {
-    fn weight(&self, key: &Key, _qey: &Qey, val: &Val) -> NonZeroU32;
+    /// Returns the weight of the cache item.
+    /// Note that this it's undefined behavior for a cache item to change its weight.
+    ///
+    /// For performance reasons this function should be trivially cheap as
+    /// it's called during the cache eviction routine.
+    /// If weight is expensive to calculate, consider caching it alongside the value.
+    fn weight(&self, key: &Key, qey: &Qey, val: &Val) -> NonZeroU32;
 }
 
+/// Each cache entry weights exactly `1` unit of weight.
 #[derive(Debug, Clone)]
 pub struct UnitWeighter;
 
 impl<Key, Qey, Val> Weighter<Key, Qey, Val> for UnitWeighter {
-    /// Weight of the cache item.
-    /// Note that this it's undefined behavior for a cache item to change its weight.
     #[inline]
     fn weight(&self, _key: &Key, _qey: &Qey, _val: &Val) -> NonZeroU32 {
         NonZeroU32::new(1).unwrap()
@@ -177,15 +212,15 @@ mod tests {
                         wg.wait();
                         loop {
                             match cache.get_value_or_guard(&1, &1, Some(Duration::from_millis(1))) {
-                                JoinResult::Value(v) => assert_eq!(v, 1),
-                                JoinResult::Guard(g) => {
+                                GuardResult::Value(v) => assert_eq!(v, 1),
+                                GuardResult::Guard(g) => {
                                     let before =
                                         entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     if before == solve_at {
                                         g.insert(1);
                                     }
                                 }
-                                JoinResult::Timeout => continue,
+                                GuardResult::Timeout => continue,
                             }
                             break;
                         }

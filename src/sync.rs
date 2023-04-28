@@ -1,6 +1,6 @@
 use crate::{
     options::{Options, OptionsBuilder},
-    placeholder::{JoinFuture, JoinResult, PlaceholderGuard},
+    placeholder::{GuardResult, JoinFuture, PlaceholderGuard},
     rw_lock::RwLock,
     shard::{Entry, KQCacheShard},
     DefaultHashBuilder, UnitWeighter, Weighter,
@@ -93,6 +93,23 @@ impl<
         )
     }
 
+    /// Constructs a cache based on [OptionsBuilder].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use quick_cache::{sync::KQCache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
+    ///
+    /// KQCache::<String, u64, String>::with_options(
+    ///   OptionsBuilder::new()
+    ///     .estimated_items_capacity(10000)
+    ///     .weight_capacity(10000)
+    ///     .build()
+    ///     .unwrap(),
+    ///     UnitWeighter,
+    ///     DefaultHashBuilder::default(),
+    /// );
+    /// ```
     pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
         let mut num_shards = options.shards.next_power_of_two() as u64;
         let estimated_items_capacity = options.estimated_items_capacity as u64;
@@ -253,21 +270,21 @@ impl<
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
     /// While the returned guard is alive, other calls with the same key and qey using the
-    /// `get_value_guard` or `get_or_insert` family of functions will block until the guard
+    /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
     pub fn get_value_or_guard<'a>(
         &'a self,
         key: &Key,
         qey: &Qey,
         timeout: Option<Duration>,
-    ) -> JoinResult<'a, Key, Qey, Val, We, B>
+    ) -> GuardResult<'a, Key, Qey, Val, We, B>
     where
         Key: Clone,
         Qey: Clone,
     {
         let (shard, hash) = self.shard_for(key, qey).unwrap();
         if let Some(v) = shard.read().get(hash, key, qey) {
-            return JoinResult::Value(v.clone());
+            return GuardResult::Value(v.clone());
         }
         PlaceholderGuard::join(shard, hash, key.clone(), qey.clone(), timeout)
     }
@@ -284,13 +301,13 @@ impl<
         Qey: Clone,
     {
         match self.get_value_or_guard(key, qey, None) {
-            JoinResult::Value(v) => Ok(v),
-            JoinResult::Guard(g) => {
+            GuardResult::Value(v) => Ok(v),
+            GuardResult::Guard(g) => {
                 let v = with()?;
                 g.insert(v.clone());
                 Ok(v)
             }
-            JoinResult::Timeout => unreachable!(),
+            GuardResult::Timeout => unreachable!(),
         }
     }
 
@@ -298,7 +315,7 @@ impl<
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
     /// While the returned guard is alive, other calls with the same key and qey using the
-    /// `get_value_guard` or `get_or_insert` family of functions will block until the guard
+    /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
     pub async fn get_value_or_guard_async<'a, 'b>(
         &'a self,
@@ -400,6 +417,23 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
         ))
     }
 
+    /// Constructs a cache based on [OptionsBuilder].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use quick_cache::{sync::Cache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
+    ///
+    /// Cache::<String, String>::with_options(
+    ///   OptionsBuilder::new()
+    ///     .estimated_items_capacity(10000)
+    ///     .weight_capacity(10000)
+    ///     .build()
+    ///     .unwrap(),
+    ///     UnitWeighter,
+    ///     DefaultHashBuilder::default(),
+    /// );
+    /// ```
     pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
         Self(KQCache::with_options(options, weighter, hash_builder))
     }
@@ -477,13 +511,13 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
     /// While the returned guard is alive, other calls with the same key using the
-    /// `get_value_guard` or `get_or_insert` family of functions will block until the guard
+    /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
     pub fn get_value_or_guard<'a>(
         &'a self,
         key: &Key,
         timeout: Option<Duration>,
-    ) -> JoinResult<'a, Key, (), Val, We, B>
+    ) -> GuardResult<'a, Key, (), Val, We, B>
     where
         Key: Clone,
     {
@@ -506,7 +540,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
     /// While the returned guard is alive, other calls with the same key using the
-    /// `get_value_guard` or `get_or_insert` family of functions will block until the guard
+    /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
     pub async fn get_value_or_guard_async<'a, 'b>(
         &'a self,
