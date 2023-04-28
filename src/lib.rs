@@ -66,6 +66,8 @@ pub trait Weighter<Key, Qey, Val> {
 pub struct UnitWeighter;
 
 impl<Key, Qey, Val> Weighter<Key, Qey, Val> for UnitWeighter {
+    /// Weight of the cache item.
+    /// Note that this it's undefined behavior for a cache item to change its weight.
     #[inline]
     fn weight(&self, _key: &Key, _qey: &Qey, _val: &Val) -> NonZeroU32 {
         NonZeroU32::new(1).unwrap()
