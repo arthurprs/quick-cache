@@ -38,6 +38,7 @@ type InnerRwLockWriteGuard<'rwlock, T> = std::sync::RwLockWriteGuard<'rwlock, T>
 /// An `RwLock` might become poisoned on a panic. Note, however, that an `RwLock`
 /// may only be poisoned if a panic occurs while it is locked exclusively (write
 /// mode). If a panic occurs in any reader, then the lock will not be poisoned.
+#[derive(Default, Debug)]
 #[repr(transparent)]
 pub struct RwLock<T: ?Sized>(InnerRwLock<T>);
 

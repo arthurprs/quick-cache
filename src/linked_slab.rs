@@ -149,4 +149,9 @@ impl<T> LinkedSlab<T> {
         self.next_free = idx;
         Some((old_item, next))
     }
+
+    /// The Token that will be returned by the next call to `insert()`
+    pub fn next_free(&self) -> Token {
+        self.next_free
+    }
 }
