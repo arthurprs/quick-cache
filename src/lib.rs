@@ -44,6 +44,15 @@
 
 use std::num::NonZeroU32;
 
+#[cfg(loom)]
+pub(crate) use loom::sync as std_sync;
+#[cfg(loom)]
+pub(crate) use loom::thread as std_thread;
+#[cfg(not(loom))]
+pub(crate) use std::sync as std_sync;
+#[cfg(not(loom))]
+pub(crate) use std::thread as std_thread;
+
 #[cfg(not(fuzzing))]
 mod linked_slab;
 #[cfg(fuzzing)]
@@ -195,6 +204,65 @@ mod tests {
             assert_eq!(*entered.get_mut(), solve_at + 1);
         }
     }
+
+    #[cfg(loom)]
+    #[test]
+    fn test_value_or_guard_loom() {
+        use crate::{
+            std_sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc, Barrier,
+            },
+            std_thread as thread,
+        };
+
+        fn fun_name(cache: Arc<sync::KQCache<u64, u64, u64>>, entered: Arc<AtomicUsize>, solve_at: usize) {
+            loop {
+                match cache.get_value_or_guard(&1, &1, None) {
+                    GuardResult::Value(v) => assert_eq!(v, 1),
+                    GuardResult::Guard(g) => {
+                        let before = entered.fetch_add(1, Ordering::Relaxed);
+                        if before == solve_at {
+                            g.insert(1);
+                        }
+                    }
+                    GuardResult::Timeout => continue,
+                }
+                break;
+            }
+        }
+
+
+        use rand::prelude::*;
+        const THREADS: usize = 3;
+        let solve_at = 2;
+        // let rng = rand::rngs::SmallRng::from_entropy();
+        loom::model(move || {
+            let entered = Arc::new(AtomicUsize::default());
+            let cache = Arc::new(sync::KQCache::<u64, u64, u64>::new(100));
+            let wg: Arc<rw_lock::RwLock<()>> = Arc::new(rw_lock::RwLock::new(()));
+            let wg_lock = wg.write();
+            let mut threads = Vec::new();
+            for _ in 0..THREADS {
+                let solve_at = solve_at;
+                let entered = entered.clone();
+                let cache = cache.clone();
+                let wg = wg.clone();
+                let thread = thread::spawn(move || {
+                    wg.read();
+                    fun_name(cache, entered, solve_at);
+                });
+                threads.push(thread);
+            }
+            drop(wg_lock);
+            fun_name(cache, entered.clone(), solve_at);
+            for thread in threads {
+                thread.join().unwrap();
+            }
+            assert_eq!(entered.load(Ordering::SeqCst), solve_at + 1);
+        });
+    }
+
 
     #[test]
     fn test_value_or_guard() {

@@ -111,6 +111,9 @@ impl OptionsBuilder {
 
     /// Builds an `Option` struct which can be used in `Cache::with_options` and `KQCache::with_options` constructors.
     pub fn build(&self) -> Result<Options, Error> {
+        #[cfg(loom)]
+        let shards = 2;
+        #[cfg(not(loom))]
         let shards = self
             .shards
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get() * 4));

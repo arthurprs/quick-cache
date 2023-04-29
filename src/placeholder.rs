@@ -1,13 +1,16 @@
 use std::{
     future::Future,
     hash::{BuildHasher, Hash},
-    sync::{
+    task::Poll,
+    time::{Duration, Instant},
+};
+
+use crate::{
+    std_sync::{
         atomic::{self, AtomicBool},
         Arc,
     },
-    task::Poll,
-    thread,
-    time::{Duration, Instant},
+    std_thread as thread,
 };
 
 use crate::{
@@ -206,7 +209,14 @@ impl<
             }
             let notification = notification.as_ref().unwrap();
             if let Some(timeout) = timeout {
+                #[cfg(loom)]
+                {
+                    drop(timeout);
+                    unimplemented!();
+                }
+                #[cfg(not(loom))]
                 let start = Instant::now();
+                #[cfg(not(loom))]
                 loop {
                     thread::park_timeout(Instant::now().saturating_duration_since(start));
                     if notification.load(atomic::Ordering::Acquire) {

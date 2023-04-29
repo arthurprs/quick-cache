@@ -2,13 +2,14 @@ use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash, Hasher},
     mem,
-    sync::{
-        atomic::{self, AtomicBool, AtomicU64},
-        Arc,
-    },
 };
 
 use hashbrown::raw::RawTable;
+
+use crate::std_sync::{
+    atomic::{self, AtomicBool, AtomicU64},
+    Arc,
+};
 
 use crate::{
     linked_slab::{LinkedSlab, Token},
@@ -334,11 +335,11 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
     {
         if let Some(idx) = self.search_resident(hash, key, qey) {
             let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else { unreachable!() };
-            *resident.referenced.get_mut() = true;
-            *self.hits.get_mut() += 1;
+            resident.referenced.set_mut(true);
+            self.hits.inc_mut();
             return Some(&mut resident.value);
         }
-        *self.misses.get_mut() += 1;
+        self.misses.inc_mut();
         None
     }
 
@@ -435,8 +436,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 resident.state,
                 ResidentState::ColdDemoted | ResidentState::ColdInTest
             ));
-            if *resident.referenced.get_mut() {
-                *resident.referenced.get_mut() = false;
+            if resident.referenced.load_mut() {
+                resident.referenced.set_mut(false);
                 if resident.state == ResidentState::ColdInTest {
                     resident.state = ResidentState::Hot;
                     self.num_hot += 1;
@@ -508,8 +509,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             let (entry, next) = self.entries.get_mut(idx).unwrap();
             let Entry::Resident(resident) = entry else { unreachable!() };
             debug_assert_eq!(resident.state, ResidentState::Hot);
-            if *resident.referenced.get_mut() {
-                *resident.referenced.get_mut() = false;
+            if resident.referenced.load_mut() {
+                resident.referenced.set_mut(false);
                 self.hot_head = Some(next);
                 continue;
             } else {
@@ -780,16 +781,16 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             let (entry, _) = self.entries.get_mut(idx).unwrap();
             match entry {
                 Entry::Resident(resident) => {
-                    *resident.referenced.get_mut() = true;
-                    *self.hits.get_mut() += 1;
+                    resident.referenced.set_mut(true);
+                    self.hits.set_mut(1);
                     Ok(resident.value.clone())
                 }
                 Entry::Placeholder(p) => {
-                    *self.hits.get_mut() += 1;
+                    self.hits.inc_mut();
                     Err((p.shared.clone(), false))
                 }
                 Entry::Ghost(..) => {
-                    *self.misses.get_mut() += 1;
+                    self.misses.inc_mut();
                     let shared = new_shared_placeholder(hash, idx);
                     *entry = Entry::Placeholder(Placeholder {
                         key,
@@ -805,7 +806,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 }
             }
         } else {
-            *self.misses.get_mut() += 1;
+            self.misses.inc_mut();
             let idx = self.entries.next_free();
             let shared = new_shared_placeholder(hash, idx);
             let idx_ = self.entries.insert(
@@ -821,5 +822,69 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             self.map_insert(hash, idx);
             Err((shared, true))
         }
+    }
+}
+
+trait AtomicExt<T> {
+    fn set_mut(&mut self, value: T);
+    fn load_mut(&mut self) -> T;
+    fn inc_mut(&mut self) {
+        unimplemented!()
+    }
+}
+
+#[cfg(not(loom))]
+impl AtomicExt<bool> for AtomicBool {
+    fn set_mut(&mut self, value: bool) {
+        *self.get_mut() = value;
+    }
+
+    fn load_mut(&mut self) -> bool {
+        *self.get_mut()
+    }
+}
+
+#[cfg(loom)]
+impl AtomicExt<bool> for AtomicBool {
+    fn set_mut(&mut self, value: bool) {
+        self.store(value, loom::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn load_mut(&mut self) -> bool {
+        unsafe { self.unsync_load() }
+    }
+}
+
+#[cfg(not(loom))]
+impl AtomicExt<u64> for AtomicU64 {
+    fn set_mut(&mut self, value: u64) {
+        *self.get_mut() = value;
+    }
+
+    fn load_mut(&mut self) -> u64 {
+        *self.get_mut()
+    }
+
+    fn inc_mut(&mut self) {
+        *self.get_mut() += 1;
+    }
+}
+
+#[cfg(loom)]
+impl AtomicExt<u64> for AtomicU64 {
+    fn set_mut(&mut self, value: u64) {
+        self.with_mut(|v| {
+            *v = value;
+        });
+    }
+
+    fn load_mut(&mut self) -> u64 {
+        self.with_mut(|v| *v)
+    }
+
+    fn inc_mut(&mut self) {
+        self.with_mut(|v| {
+            *v += 1;
+        })
     }
 }

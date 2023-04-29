@@ -3,17 +3,17 @@ use std::ops::{Deref, DerefMut};
 #[cfg(feature = "parking_lot")]
 type InnerRwLock<T> = parking_lot::RwLock<T>;
 #[cfg(not(feature = "parking_lot"))]
-type InnerRwLock<T> = std::sync::RwLock<T>;
+type InnerRwLock<T> = crate::std_sync::RwLock<T>;
 
 #[cfg(feature = "parking_lot")]
 type InnerRwLockReadGuard<'rwlock, T> = parking_lot::RwLockReadGuard<'rwlock, T>;
 #[cfg(not(feature = "parking_lot"))]
-type InnerRwLockReadGuard<'rwlock, T> = std::sync::RwLockReadGuard<'rwlock, T>;
+type InnerRwLockReadGuard<'rwlock, T> = crate::std_sync::RwLockReadGuard<'rwlock, T>;
 
 #[cfg(feature = "parking_lot")]
 type InnerRwLockWriteGuard<'rwlock, T> = parking_lot::RwLockWriteGuard<'rwlock, T>;
 #[cfg(not(feature = "parking_lot"))]
-type InnerRwLockWriteGuard<'rwlock, T> = std::sync::RwLockWriteGuard<'rwlock, T>;
+type InnerRwLockWriteGuard<'rwlock, T> = crate::std_sync::RwLockWriteGuard<'rwlock, T>;
 
 /// A reader-writer lock.
 ///
@@ -40,26 +40,26 @@ type InnerRwLockWriteGuard<'rwlock, T> = std::sync::RwLockWriteGuard<'rwlock, T>
 /// mode). If a panic occurs in any reader, then the lock will not be poisoned.
 #[derive(Default, Debug)]
 #[repr(transparent)]
-pub struct RwLock<T: ?Sized>(InnerRwLock<T>);
+pub struct RwLock<T>(InnerRwLock<T>);
 
 /// RAII structure used to release the shared read access of a lock when dropped.
 #[repr(transparent)]
 #[must_use = "if unused the RwLock will immediately unlock"]
-pub struct RwLockReadGuard<'rwlock, T: ?Sized>(InnerRwLockReadGuard<'rwlock, T>);
+pub struct RwLockReadGuard<'rwlock, T>(InnerRwLockReadGuard<'rwlock, T>);
 
 /// RAII structure used to release the exclusive write access of a lock when dropped.
 #[repr(transparent)]
 #[must_use = "if unused the RwLock will immediately unlock"]
-pub struct RwLockWriteGuard<'rwlock, T: ?Sized>(InnerRwLockWriteGuard<'rwlock, T>);
+pub struct RwLockWriteGuard<'rwlock, T>(InnerRwLockWriteGuard<'rwlock, T>);
 
 impl<T> RwLock<T> {
     /// Creates a new instance of an `RwLock<T>` which is unlocked.
-    pub const fn new(t: T) -> Self {
+    pub fn new(t: T) -> Self {
         Self(InnerRwLock::new(t))
     }
 }
 
-impl<T: ?Sized> RwLock<T> {
+impl<T> RwLock<T> {
     /// Locks this `RwLock` with shared read access, blocking the current thread
     /// until it can be acquired.
     ///
@@ -118,7 +118,7 @@ impl<T: ?Sized> RwLock<T> {
     }
 }
 
-impl<T: ?Sized> Deref for RwLockReadGuard<'_, T> {
+impl<T> Deref for RwLockReadGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -126,7 +126,7 @@ impl<T: ?Sized> Deref for RwLockReadGuard<'_, T> {
     }
 }
 
-impl<T: ?Sized> Deref for RwLockWriteGuard<'_, T> {
+impl<T> Deref for RwLockWriteGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -134,7 +134,7 @@ impl<T: ?Sized> Deref for RwLockWriteGuard<'_, T> {
     }
 }
 
-impl<T: ?Sized> DerefMut for RwLockWriteGuard<'_, T> {
+impl<T> DerefMut for RwLockWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
