@@ -13,7 +13,7 @@ Lightweight and high performance concurrent cache optimized for low cache overhe
 * Small dependency tree
 
 The implementation is optimized for use cases where the cache access times and overhead can add up to be a significant cost.
-Features like: time to live, iterators, event listeners and others; are not current implemented in Quick Cache.
+Features like: time to live, iterators, event listeners and others; are not currently implemented in Quick Cache.
 If you need these features you may want to take a look at the [Moka](https://crates.io/crates/moka) crate.
 
 ## Examples
