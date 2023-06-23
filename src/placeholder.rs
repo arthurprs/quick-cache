@@ -16,6 +16,7 @@ use crate::{
     shard::KQCacheShard,
     Weighter,
 };
+use crate::shard::Entry;
 
 pub type SharedPlaceholder<Val> = Arc<Placeholder<Val>>;
 
@@ -250,7 +251,12 @@ impl<
         B: BuildHasher,
     > PlaceholderGuard<'a, Key, Qey, Val, We, B>
 {
-    pub fn insert(mut self, value: Val) {
+    #[inline]
+    pub fn insert(self, value: Val) {
+        self.insert_evict(value);
+    }
+
+    pub fn insert_evict(mut self, value: Val) -> Option<(Key, Qey, Val)> {
         let referenced;
         {
             let mut state = self.shared.state.write();
@@ -261,11 +267,15 @@ impl<
             }
         }
 
-        let _result = self
+        let result = self
             .shard
             .write()
             .replace_placeholder(&self.shared, referenced, value);
         self.inserted = true;
+        match result {
+            Ok(Some(Entry::Resident(val))) => Some((val.key, val.qey, val.value)),
+            _ => None
+        }
     }
 }
 

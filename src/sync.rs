@@ -242,6 +242,7 @@ impl<
 
     /// Remove an item from the cache whose key is `key` and qey is `qey`.
     /// Returns whether an entry was removed.
+    #[inline]
     pub fn remove<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> bool
     where
         Key: Borrow<Q>,
@@ -249,26 +250,48 @@ impl<
         Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        if let Some((shard, hash)) = self.shard_for(key, qey) {
-            // Any evictions will be dropped outside of the lock
+        self.remove_evict(key, qey).is_some()
+    }
+
+    /// Remove an item from the cache whose key is `key` and qey is `qey`.
+    /// Returns entry if it was removed.
+    pub fn remove_evict<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> Option<Val>
+        where
+            Key: Borrow<Q>,
+            Q: Hash + Eq,
+            Qey: Borrow<W>,
+            W: Hash + Eq,
+    {
+        self.shard_for(key, qey).and_then(|(shard, hash)| {
             let evicted = shard.write().remove(hash, key, qey);
-            matches!(evicted, Some(Entry::Resident(_)))
-        } else {
-            false
-        }
+            if let Some(Entry::Resident(val)) = evicted {
+                Some(val.value)
+            } else {
+                None
+            }
+        })
     }
 
     /// Inserts an item in the cache with key `key` and qey `qey`.
+    #[inline]
     pub fn insert(&self, key: Key, qey: Qey, value: Val) {
-        if let Some((shard, hash)) = self.shard_for(&key, &qey) {
-            // Any evictions will be dropped outside of the lock
-            let _evicted = shard.write().insert(hash, key, qey, value);
-        }
+        self.insert_evict(key, qey, value);
+    }
+
+    /// Inserts an item in the cache with key `key` and qey `qey`.
+    /// Returns entry if it was removed.
+    pub fn insert_evict(&self, key: Key, qey: Qey, value: Val) -> Option<(Key, Qey, Val)>{
+        self.shard_for(&key, &qey).and_then(|(shard, hash)| {
+            match shard.write().insert(hash, key, qey, value) {
+                Some(Entry::Resident(inner)) => Some((inner.key, inner.qey, inner.value)),
+                _ => None
+            }
+        })
     }
 
     /// Gets an item from the cache with key `key` and qey `qey`.
     /// If the corresponding value isn't present in the cache, this functions returns a guard
-    /// that can be used to insert the value once it's computed.
+    /// that can be used to insert the value once it's computed. Guard may return evicted value.
     /// While the returned guard is alive, other calls with the same key and qey using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
@@ -290,6 +313,7 @@ impl<
     }
 
     /// Gets or inserts an item in the cache with key `key` and qey `qey`.
+    #[inline]
     pub fn get_or_insert_with<E>(
         &self,
         key: &Key,
@@ -300,12 +324,27 @@ impl<
         Key: Clone,
         Qey: Clone,
     {
+        self.get_or_insert_with_evict(key, qey, with).map(|(val, _)| val)
+    }
+
+    /// Gets or inserts an item in the cache with key `key` and qey `qey`.
+    /// Returns entry if it was removed.
+    pub fn get_or_insert_with_evict<E>(
+        &self,
+        key: &Key,
+        qey: &Qey,
+        with: impl FnOnce() -> Result<Val, E>,
+    ) -> Result<(Val, Option<(Key, Qey, Val)>), E>
+        where
+            Key: Clone,
+            Qey: Clone,
+    {
         match self.get_value_or_guard(key, qey, None) {
-            GuardResult::Value(v) => Ok(v),
+            GuardResult::Value(v) => Ok((v, None)),
             GuardResult::Guard(g) => {
                 let v = with()?;
-                g.insert(v.clone());
-                Ok(v)
+                let evicted = g.insert_evict(v.clone());
+                Ok((v, evicted))
             }
             GuardResult::Timeout => unreachable!(),
         }
@@ -313,7 +352,7 @@ impl<
 
     /// Gets an item from the cache with key `key` and qey `qey`.
     /// If the corresponding value isn't present in the cache, this functions returns a guard
-    /// that can be used to insert the value once it's computed.
+    /// that can be used to insert the value once it's computed. Guard may return evicted value.
     /// While the returned guard is alive, other calls with the same key and qey using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
@@ -334,6 +373,7 @@ impl<
     }
 
     /// Gets or inserts an item in the cache with key `key` and qey `qey`.
+    #[inline]
     pub async fn get_or_insert_async<'a, E>(
         &self,
         key: &Key,
@@ -344,12 +384,27 @@ impl<
         Key: Clone,
         Qey: Clone,
     {
+        self.get_or_insert_evict_async(key, qey, with).await.map(|(val, _)| val)
+    }
+
+    /// Gets or inserts an item in the cache with key `key` and qey `qey`.
+    /// Returns entry if it was removed.
+    pub async fn get_or_insert_evict_async<'a, E>(
+        &self,
+        key: &Key,
+        qey: &Qey,
+        with: impl Future<Output = Result<Val, E>>,
+    ) -> Result<(Val, Option<(Key, Qey, Val)>), E>
+        where
+            Key: Clone,
+            Qey: Clone,
+    {
         match self.get_value_or_guard_async(key, qey).await {
-            Ok(v) => Ok(v),
+            Ok(v) => Ok((v, None)),
             Err(g) => {
                 let v = with.await?;
-                g.insert(v.clone());
-                Ok(v)
+                let evicted = g.insert_evict(v.clone());
+                Ok((v, evicted))
             }
         }
     }
@@ -439,42 +494,50 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Returns whether the cache is empty
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Returns the number of cached items
+    #[inline]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
     /// Returns the total weight of cached items
+    #[inline]
     pub fn weight(&self) -> u64 {
         self.0.weight()
     }
 
     /// Returns the maximum weight of cached items
+    #[inline]
     pub fn capacity(&self) -> u64 {
         self.0.capacity()
     }
 
     /// Returns the number of misses
+    #[inline]
     pub fn misses(&self) -> u64 {
         self.0.misses()
     }
 
     /// Returns the number of hits
+    #[inline]
     pub fn hits(&self) -> u64 {
         self.0.hits()
     }
 
     /// Reserver additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
+    #[inline]
     pub fn reserve(&mut self, additional: usize) {
         self.0.reserve(additional)
     }
 
     /// Fetches an item from the cache.
+    #[inline]
     pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<Val>
     where
         Key: Borrow<Q>,
@@ -484,6 +547,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
+    #[inline]
     pub fn peek<Q: ?Sized>(&self, key: &Q) -> Option<Val>
     where
         Key: Borrow<Q>,
@@ -494,6 +558,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
 
     /// Remove an item from the cache whose key is `key`.
     /// Returns whether an entry was removed.
+    #[inline]
     pub fn remove<Q: ?Sized>(&self, key: &Q) -> bool
     where
         Key: Borrow<Q>,
@@ -502,9 +567,28 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
         self.0.remove(key, &())
     }
 
+    /// Remove an item from the cache whose key is `key`.
+    /// Returns entry if it was removed.
+    #[inline]
+    pub fn remove_evict<Q: ?Sized>(&self, key: &Q) -> Option<Val>
+        where
+            Key: Borrow<Q>,
+            Q: Eq + Hash,
+    {
+        self.0.remove_evict(key, &())
+    }
+
     /// Inserts an item in the cache with key `key`.
+    #[inline]
     pub fn insert(&self, key: Key, value: Val) {
         self.0.insert(key, (), value);
+    }
+
+    /// Inserts an item in the cache with key `key`.
+    /// Returns entry if it was removed.
+    #[inline]
+    pub fn insert_evict(&self, key: Key, value: Val) -> Option<(Key, Val)> {
+        self.0.insert_evict(key, (), value).map(|(key, _, val)| (key, val))
     }
 
     /// Gets an item from the cache with key `key`.
@@ -513,11 +597,12 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
-    pub fn get_value_or_guard<'a>(
-        &'a self,
+    #[inline]
+    pub fn get_value_or_guard(
+        &self,
         key: &Key,
         timeout: Option<Duration>,
-    ) -> GuardResult<'a, Key, (), Val, We, B>
+    ) -> GuardResult<Key, (), Val, We, B>
     where
         Key: Clone,
     {
@@ -525,6 +610,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Gets or inserts an item in the cache with key `key`.
+    #[inline]
     pub fn get_or_insert_with<E>(
         &self,
         key: &Key,
@@ -536,12 +622,31 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
         self.0.get_or_insert_with(key, &(), with)
     }
 
+    /// Gets or inserts an item in the cache with key `key`.
+    /// Returns entry if it was removed.
+    #[inline]
+    pub fn get_or_insert_with_evict<E>(
+        &self,
+        key: &Key,
+        with: impl FnOnce() -> Result<Val, E>,
+    ) -> Result<(Val, Option<(Key, Val)>), E>
+        where
+            Key: Clone,
+    {
+        match self.0.get_or_insert_with_evict(key, &(), with) {
+            Ok((val, Some((key, _, evicted)))) => Ok((val, Some((key, evicted)))),
+            Ok((val, _)) => Ok((val, None)),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Gets an item from the cache with key `key`.
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
     /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
+    #[inline]
     pub async fn get_value_or_guard_async<'a, 'b>(
         &'a self,
         key: &'b Key,
@@ -553,6 +658,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Gets or inserts an item in the cache with key `key`.
+    #[inline]
     pub async fn get_or_insert_async<'a, E>(
         &self,
         key: &Key,
@@ -562,6 +668,24 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
         Key: Clone,
     {
         self.0.get_or_insert_async(key, &(), with).await
+    }
+
+    /// Gets or inserts an item in the cache with key `key`.
+    /// Returns entry if it was removed.
+    #[inline]
+    pub async fn get_or_insert_evict_async<'a, E>(
+        &self,
+        key: &Key,
+        with: impl Future<Output = Result<Val, E>>,
+    ) -> Result<(Val, Option<(Key, Val)>), E>
+        where
+            Key: Clone,
+    {
+        match self.0.get_or_insert_evict_async(key, &(), with).await {
+            Ok((val, Some((key, _, evicted)))) => Ok((val, Some((key, evicted)))),
+            Ok((val, _)) => Ok((val, None)),
+            Err(e) => Err(e),
+        }
     }
 }
 

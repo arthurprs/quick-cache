@@ -40,9 +40,9 @@ enum ResidentState {
 
 #[derive(Debug)]
 pub struct Resident<Key, Qey, Val> {
-    key: Key,
-    qey: Qey,
-    value: Val,
+    pub(crate) key: Key,
+    pub(crate) qey: Qey,
+    pub(crate) value: Val,
     state: ResidentState,
     referenced: AtomicBool,
 }

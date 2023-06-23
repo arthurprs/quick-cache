@@ -100,37 +100,44 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
     }
 
     /// Returns whether the cache is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.shard.len() == 0
     }
 
     /// Returns the number of cached items
+    #[inline]
     pub fn len(&self) -> usize {
         self.shard.len()
     }
 
     /// Returns the total weight of cached items
+    #[inline]
     pub fn weight(&self) -> u64 {
         self.shard.weight()
     }
 
     /// Returns the maximum weight of cached items
+    #[inline]
     pub fn capacity(&self) -> u64 {
         self.shard.capacity()
     }
 
     /// Returns the number of misses
+    #[inline]
     pub fn misses(&self) -> u64 {
         self.shard.misses()
     }
 
     /// Returns the number of hits
+    #[inline]
     pub fn hits(&self) -> u64 {
         self.shard.hits()
     }
 
     /// Reserver additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
+    #[inline]
     pub fn reserve(&mut self, additional: usize) {
         self.shard.reserve(additional);
     }
@@ -181,6 +188,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
 
     /// Remove an item from the cache whose key is `key` and qey is `qey`.
     /// Returns whether an entry was removed.
+    #[inline]
     pub fn remove<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, qey: &W) -> bool
     where
         Key: Borrow<Q>,
@@ -188,16 +196,45 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
         Qey: Borrow<W>,
         W: Hash + Eq,
     {
-        matches!(
-            self.shard.remove(self.shard.hash(key, qey), key, qey),
-            Some(Entry::Resident(_))
-        )
+        self.remove_evict(key, qey).is_some()
+    }
+
+    /// Remove an item from the cache whose key is `key` and qey is `qey`.
+    /// Returns entry if it was removed.
+    pub fn remove_evict<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, qey: &W) -> Option<Val>
+        where
+            Key: Borrow<Q>,
+            Q: Hash + Eq,
+            Qey: Borrow<W>,
+            W: Hash + Eq,
+    {
+        self.shard.remove(self.shard.hash(key, qey), key, qey).and_then(|entry| {
+            if let Entry::Resident(entry) = entry {
+                Some(entry.value)
+            } else {
+                None
+            }
+        })
     }
 
     /// Inserts an item in the cache with key `key` and qey `qey`.
+    #[inline]
     pub fn insert(&mut self, key: Key, qey: Qey, value: Val) {
+        self.insert_evict(key, qey, value);
+    }
+
+    /// Inserts an item in the cache with key `key` and qey `qey`.
+    /// Returns entry if it was removed.
+    #[inline]
+    pub fn insert_evict(&mut self, key: Key, qey: Qey, value: Val) -> Option<Val> {
         self.shard
-            .insert(self.shard.hash(&key, &qey), key, qey, value);
+            .insert(self.shard.hash(&key, &qey), key, qey, value).and_then(|entry| {
+            if let Entry::Resident(entry) = entry {
+                Some(entry.value)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -274,43 +311,51 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
     }
 
     /// Returns whether the cache is empty
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Returns the number of cached items
+    #[inline]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
     /// Returns the total weight of cached items
+    #[inline]
     pub fn weight(&self) -> u64 {
         self.0.weight()
     }
 
     /// Returns the maximum weight of cached items
+    #[inline]
     pub fn capacity(&self) -> u64 {
         self.0.capacity()
     }
 
     /// Returns the number of misses
+    #[inline]
     pub fn misses(&self) -> u64 {
         self.0.misses()
     }
 
     /// Returns the number of hits
+    #[inline]
     pub fn hits(&self) -> u64 {
         self.0.hits()
     }
 
     /// Reserver additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
+    #[inline]
     pub fn reserve(&mut self, additional: usize) {
         self.0.reserve(additional);
     }
 
     /// Fetches an item from the cache.
     /// Callers should prefer `get_mut` whenever possible as it's more efficient.
+    #[inline]
     pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<&Val>
     where
         Key: Borrow<Q>,
@@ -320,6 +365,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
     }
 
     /// Fetches an item from the cache.
+    #[inline]
     pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&mut Val>
     where
         Key: Borrow<Q>,
@@ -329,6 +375,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
     }
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
+    #[inline]
     pub fn peek<Q: ?Sized>(&self, key: &Q) -> Option<&Val>
     where
         Key: Borrow<Q>,
@@ -338,6 +385,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
     }
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
+    #[inline]
     pub fn peek_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&mut Val>
     where
         Key: Borrow<Q>,
@@ -348,6 +396,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
 
     /// Remove an item from the cache whose key is `key`.
     /// Returns whether an entry was removed.
+    #[inline]
     pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> bool
     where
         Key: Borrow<Q>,
@@ -356,9 +405,27 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
         self.0.remove(key, &())
     }
 
+    /// Remove an item from the cache whose key is `key`.
+    /// Returns entry if it was removed.
+    #[inline]
+    pub fn remove_evict<Q: ?Sized>(&mut self, key: &Q) -> Option<Val>
+        where
+            Key: Borrow<Q>,
+            Q: Eq + Hash,
+    {
+        self.0.remove_evict(key, &())
+    }
+
     /// Inserts an item in the cache with key `key` and qey `qey`.
+    #[inline]
     pub fn insert(&mut self, key: Key, value: Val) {
         self.0.insert(key, (), value);
+    }
+
+    /// Inserts an item in the cache with key `key` and qey `qey`.
+    #[inline]
+    pub fn insert_evict(&mut self, key: Key, value: Val) -> Option<Val> {
+        self.0.insert_evict(key, (), value)
     }
 }
 
