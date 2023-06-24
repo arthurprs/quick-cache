@@ -51,6 +51,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
     KQCache<Key, Qey, Val, We, B>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    ///
     /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
     /// roughly equivalent to `weight_capacity / average item weight`.
     pub fn with(
@@ -136,6 +137,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
     }
 
     /// Reserver additional space for `additional` entries.
+    ///
     /// Note that this is counted in entries, and is not weighted.
     #[inline]
     pub fn reserve(&mut self, additional: usize) {
@@ -187,6 +189,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
     }
 
     /// Remove an item from the cache whose key is `key` and qey is `qey`.
+    ///
     /// Returns whether an entry was removed.
     #[inline]
     pub fn remove<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, qey: &W) -> bool
@@ -200,21 +203,24 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
     }
 
     /// Remove an item from the cache whose key is `key` and qey is `qey`.
+    ///
     /// Returns entry if it was removed.
     pub fn remove_evict<Q: ?Sized, W: ?Sized>(&mut self, key: &Q, qey: &W) -> Option<Val>
-        where
-            Key: Borrow<Q>,
-            Q: Hash + Eq,
-            Qey: Borrow<W>,
-            W: Hash + Eq,
+    where
+        Key: Borrow<Q>,
+        Q: Hash + Eq,
+        Qey: Borrow<W>,
+        W: Hash + Eq,
     {
-        self.shard.remove(self.shard.hash(key, qey), key, qey).and_then(|entry| {
-            if let Entry::Resident(entry) = entry {
-                Some(entry.value)
-            } else {
-                None
-            }
-        })
+        self.shard
+            .remove(self.shard.hash(key, qey), key, qey)
+            .and_then(|entry| {
+                if let Entry::Resident(entry) = entry {
+                    Some(entry.value)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Inserts an item in the cache with key `key` and qey `qey`.
@@ -224,17 +230,13 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: Weighter<Key, Qey, Val>, B: BuildH
     }
 
     /// Inserts an item in the cache with key `key` and qey `qey`.
-    /// Returns entry if it was removed.
+    ///
+    /// Returns entries if they were removed. Vector is guarantied to be non empty.
     #[inline]
-    pub fn insert_evict(&mut self, key: Key, qey: Qey, value: Val) -> Option<Val> {
+    pub fn insert_evict(&mut self, key: Key, qey: Qey, value: Val) -> Option<Vec<(Key, Qey, Val)>> {
         self.shard
-            .insert(self.shard.hash(&key, &qey), key, qey, value).and_then(|entry| {
-            if let Entry::Resident(entry) = entry {
-                Some(entry.value)
-            } else {
-                None
-            }
-        })
+            .insert(self.shard.hash(&key, &qey), key, qey, value)
+            .map(|vec| vec.into_iter().filter_map(Entry::map_to_value).collect())
     }
 }
 
@@ -255,6 +257,7 @@ impl<Key: Eq + Hash, Val> Cache<Key, Val, UnitWeighter, DefaultHashBuilder> {
 
 impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>> Cache<Key, Val, We, DefaultHashBuilder> {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    ///
     /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
     /// roughly equivalent to `weight_capacity / average item weight`.
     pub fn with_weighter(
@@ -273,6 +276,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>> Cache<Key, Val, We, Defaul
 
 impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key, Val, We, B> {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    ///
     /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
     /// roughly equivalent to `weight_capacity / average item weight`.
     pub fn with(
@@ -347,6 +351,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
     }
 
     /// Reserver additional space for `additional` entries.
+    ///
     /// Note that this is counted in entries, and is not weighted.
     #[inline]
     pub fn reserve(&mut self, additional: usize) {
@@ -354,6 +359,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
     }
 
     /// Fetches an item from the cache.
+    ///
     /// Callers should prefer `get_mut` whenever possible as it's more efficient.
     #[inline]
     pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<&Val>
@@ -395,6 +401,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
     }
 
     /// Remove an item from the cache whose key is `key`.
+    ///
     /// Returns whether an entry was removed.
     #[inline]
     pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> bool
@@ -406,12 +413,13 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
     }
 
     /// Remove an item from the cache whose key is `key`.
+    ///
     /// Returns entry if it was removed.
     #[inline]
     pub fn remove_evict<Q: ?Sized>(&mut self, key: &Q) -> Option<Val>
-        where
-            Key: Borrow<Q>,
-            Q: Eq + Hash,
+    where
+        Key: Borrow<Q>,
+        Q: Eq + Hash,
     {
         self.0.remove_evict(key, &())
     }
@@ -423,9 +431,13 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, (), Val>, B: BuildHasher> Cache<Key,
     }
 
     /// Inserts an item in the cache with key `key` and qey `qey`.
+    ///
+    /// Returns entries if they were removed. Vector is guarantied to be non empty.
     #[inline]
-    pub fn insert_evict(&mut self, key: Key, value: Val) -> Option<Val> {
-        self.0.insert_evict(key, (), value)
+    pub fn insert_evict(&mut self, key: Key, value: Val) -> Option<Vec<(Key, Val)>> {
+        self.0
+            .insert_evict(key, (), value)
+            .map(|vec| vec.into_iter().map(|(key, _, val)| (key, val)).collect())
     }
 }
 

@@ -10,13 +10,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::shard::Entry;
 use crate::{
     linked_slab::Token,
     rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard},
     shard::KQCacheShard,
     Weighter,
 };
-use crate::shard::Entry;
 
 pub type SharedPlaceholder<Val> = Arc<Placeholder<Val>>;
 
@@ -256,7 +256,7 @@ impl<
         self.insert_evict(value);
     }
 
-    pub fn insert_evict(mut self, value: Val) -> Option<(Key, Qey, Val)> {
+    pub fn insert_evict(mut self, value: Val) -> Option<Vec<(Key, Qey, Val)>> {
         let referenced;
         {
             let mut state = self.shared.state.write();
@@ -273,8 +273,16 @@ impl<
             .replace_placeholder(&self.shared, referenced, value);
         self.inserted = true;
         match result {
-            Ok(Some(Entry::Resident(val))) => Some((val.key, val.qey, val.value)),
-            _ => None
+            Ok(Some(vec)) => {
+                let evicted: Vec<(Key, Qey, Val)> =
+                    vec.into_iter().filter_map(Entry::map_to_value).collect();
+                if evicted.is_empty() {
+                    None
+                } else {
+                    Some(evicted)
+                }
+            }
+            _ => None,
         }
     }
 }

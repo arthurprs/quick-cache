@@ -16,6 +16,7 @@ use crate::{
 };
 
 /// Superset of Weighter (weights 1u32..=u32::MAX) that returns the same weight as u64.
+///
 /// Since each shard can only hold up to u32::MAX - 1 items its internal weight cannot overflow.
 pub trait InternalWeighter<Key, Qey, Val> {
     fn weight(&self, key: &Key, qey: &Qey, val: &Val) -> u64;
@@ -69,10 +70,20 @@ impl<Key, Qey, Val> Entry<Key, Qey, Val> {
             Entry::Ghost(_) => "Ghost",
         }
     }
+
+    pub(crate) fn map_to_value(self) -> Option<(Key, Qey, Val)> {
+        if let Entry::Resident(val) = self {
+            Some((val.key, val.qey, val.value))
+        } else {
+            None
+        }
+    }
 }
 
 /// A qey aware cache using a modified CLOCK-PRO eviction policy.
+///
 /// The implementation allows some parallelism as gets don't require exclusive access.
+///
 /// Any evicted items are returned so they can be dropped by the caller, outside the locks.
 pub struct KQCacheShard<Key, Qey, Val, We, B> {
     hash_builder: B,
@@ -195,6 +206,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
     }
 
     /// Reserver additional space for `additional` entries.
+    ///
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&mut self, additional: usize) {
         // extra 50% for non-resident entries
@@ -206,7 +218,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                 | Entry::Placeholder(Placeholder { key, qey, .. }) => {
                     Self::hash_static(&self.hash_builder, key, qey)
                 }
-                Entry::Ghost(non_resident_hash) => *non_resident_hash,
+                Entry::Ghost(hash) => *hash,
             }
         })
     }
@@ -420,7 +432,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
     }
 
     /// Advance cold ring, promoting to hot and demoting as needed.
+    ///
     /// Returns the evicted entry.
+    ///
     /// Panics if the cache is empty.
     fn advance_cold(&mut self) -> Resident<Key, Qey, Val> {
         loop {
@@ -498,7 +512,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
     }
 
     /// Advance hot ring demoting entries to cold.
+    ///
     /// Returns the Token of the new cold entry.
+    ///
     /// Panics if there are no hot entries.
     #[inline]
     fn advance_hot(&mut self) -> Token {
@@ -551,9 +567,9 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         qey: Qey,
         value: Val,
         weight: u64,
-    ) -> Entry<Key, Qey, Val> {
+    ) -> Vec<Entry<Key, Qey, Val>> {
         let (entry, _) = self.entries.get_mut(idx).unwrap();
-        let mut evicted;
+        let mut evicted = Vec::new();
         match entry {
             Entry::Resident(resident) => {
                 let evicted_weight =
@@ -573,10 +589,10 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                     state: resident.state,
                     referenced: AtomicBool::new(true), // re-insert counts as a hit
                 };
-                evicted = Entry::Resident(mem::replace(resident, new_resident));
+                evicted.push(Entry::Resident(mem::replace(resident, new_resident)));
             }
             Entry::Placeholder(..) | Entry::Ghost(..) => {
-                evicted = mem::replace(
+                let currently_evicted = mem::replace(
                     entry,
                     Entry::Resident(Resident {
                         key,
@@ -586,9 +602,10 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                         referenced: Default::default(),
                     }),
                 );
+
                 self.num_hot += 1;
                 self.weight_hot += weight;
-                if matches!(evicted, Entry::Ghost(..)) {
+                if matches!(currently_evicted, Entry::Ghost(..)) {
                     self.num_non_resident -= 1;
                     Self::relink(
                         &mut self.entries,
@@ -597,6 +614,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
                         &mut self.hot_head,
                     );
                 }
+
+                evicted.push(currently_evicted);
             }
         }
 
@@ -605,7 +624,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             self.advance_hot();
         }
         while self.weight_hot + self.weight_cold > self.weight_capacity {
-            evicted = Entry::Resident(self.advance_cold());
+            evicted.push(Entry::Resident(self.advance_cold()));
         }
         evicted
     }
@@ -629,8 +648,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
 
     #[inline]
     fn map_insert(&mut self, hash: u64, idx: Token) {
-        self.map.insert(hash, idx, |&i| {
-            let (entry, _) = self.entries.get(i).unwrap();
+        self.map.insert(hash, idx, |&idx| {
+            let (entry, _) = self.entries.get(idx).unwrap();
             match entry {
                 Entry::Resident(Resident { key, qey, .. })
                 | Entry::Placeholder(Placeholder { key, qey, .. }) => {
@@ -647,19 +666,23 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         debug_assert!(removed);
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn replace_placeholder(
         &mut self,
         placeholder: &SharedPlaceholder<Val>,
         referenced: bool,
         value: Val,
-    ) -> Result<Option<Entry<Key, Qey, Val>>, Val> {
-        let found = self.map.find(placeholder.hash, |&idx| {
-            if idx != placeholder.idx {
-                return false;
-            }
-            let (entry, _) = self.entries.get(idx).unwrap();
-            matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if Arc::ptr_eq(shared, placeholder))
-        }).is_some();
+    ) -> Result<Option<Vec<Entry<Key, Qey, Val>>>, Val> {
+        let found = self
+            .map
+            .find(placeholder.hash, |&idx| {
+                if idx != placeholder.idx {
+                    return false;
+                }
+                let (entry, _) = self.entries.get(idx).unwrap();
+                matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if Arc::ptr_eq(shared, placeholder))
+            })
+            .is_some();
         if !found {
             return Err(value);
         }
@@ -673,14 +696,16 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         }
         let enter_hot =
             placeholder_hot || self.weight_hot + self.weight_cold + weight <= self.weight_capacity;
-        let (state, list_head) = if enter_hot {
-            self.num_hot += 1;
-            self.weight_hot += weight;
-            (ResidentState::Hot, &mut self.hot_head)
-        } else {
-            self.num_cold += 1;
-            self.weight_cold += weight;
-            (ResidentState::ColdInTest, &mut self.cold_head)
+        let (state, list_head) = {
+            if enter_hot {
+                self.num_hot += 1;
+                self.weight_hot += weight;
+                (ResidentState::Hot, &mut self.hot_head)
+            } else {
+                self.num_cold += 1;
+                self.weight_cold += weight;
+                (ResidentState::ColdInTest, &mut self.cold_head)
+            }
         };
         *entry = Entry::Resident(Resident {
             key,
@@ -695,16 +720,20 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             *list_head = Some(placeholder.idx);
         }
 
-        let mut evicted = None;
+        let mut evicted = Vec::new();
         // the replacement may have made the hot section/cache too big
         while self.weight_hot > self.weight_target_hot {
             self.advance_hot();
         }
         while self.weight_hot + self.weight_cold > self.weight_capacity {
-            evicted = Some(Entry::Resident(self.advance_cold()));
+            evicted.push(Entry::Resident(self.advance_cold()));
         }
 
-        Ok(evicted)
+        if evicted.is_empty() {
+            Ok(Some(evicted))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn insert(
@@ -713,7 +742,7 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         key: Key,
         qey: Qey,
         value: Val,
-    ) -> Option<Entry<Key, Qey, Val>> {
+    ) -> Option<Vec<Entry<Key, Qey, Val>>> {
         let weight = self.weighter.weight(&key, &qey, &value);
         if weight > self.weight_capacity {
             // don't admit if it won't fit within the budget
@@ -724,11 +753,11 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             return Some(self.insert_existing(idx, key, qey, value, weight));
         }
 
-        let mut evicted;
+        let mut evicted = Vec::new();
         let enter_hot = if self.weight_hot + self.weight_cold + weight > self.weight_capacity {
             // evict until we have enough space for this entry
             loop {
-                evicted = Some(Entry::Resident(self.advance_cold()));
+                evicted.push(Entry::Resident(self.advance_cold()));
                 if self.weight_hot + self.weight_cold + weight <= self.weight_capacity {
                     break;
                 }
@@ -736,18 +765,19 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
             false
         } else {
             // cache is filling up
-            evicted = None;
             self.weight_hot + weight <= self.weight_target_hot
         };
 
-        let (state, list_head) = if enter_hot {
-            self.num_hot += 1;
-            self.weight_hot += weight;
-            (ResidentState::Hot, &mut self.hot_head)
-        } else {
-            self.num_cold += 1;
-            self.weight_cold += weight;
-            (ResidentState::ColdInTest, &mut self.cold_head)
+        let (state, list_head) = {
+            if enter_hot {
+                self.num_hot += 1;
+                self.weight_hot += weight;
+                (ResidentState::Hot, &mut self.hot_head)
+            } else {
+                self.num_cold += 1;
+                self.weight_cold += weight;
+                (ResidentState::ColdInTest, &mut self.cold_head)
+            }
         };
         let idx = self.entries.insert(
             Entry::Resident(Resident {
@@ -764,7 +794,11 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val, We: InternalWeighter<Key, Qey, Val>, B
         }
         // insert the new key in the map
         self.map_insert(hash, idx);
-        evicted
+        if evicted.is_empty() {
+            None
+        } else {
+            Some(evicted)
+        }
     }
 
     pub fn get_value_or_placeholder(

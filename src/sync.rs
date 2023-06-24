@@ -206,6 +206,7 @@ impl<
     }
 
     /// Reserver additional space for `additional` entries.
+    ///
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&mut self, additional: usize) {
         let additional_per_shard =
@@ -228,6 +229,7 @@ impl<
     }
 
     /// Peeks an item from the cache whose keys are `key` + `qey`.
+    ///
     /// Contrary to gets, peeks don't alter the key "hotness".
     pub fn peek<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> Option<Val>
     where
@@ -241,6 +243,7 @@ impl<
     }
 
     /// Remove an item from the cache whose key is `key` and qey is `qey`.
+    ///
     /// Returns whether an entry was removed.
     #[inline]
     pub fn remove<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> bool
@@ -254,13 +257,14 @@ impl<
     }
 
     /// Remove an item from the cache whose key is `key` and qey is `qey`.
+    ///
     /// Returns entry if it was removed.
     pub fn remove_evict<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> Option<Val>
-        where
-            Key: Borrow<Q>,
-            Q: Hash + Eq,
-            Qey: Borrow<W>,
-            W: Hash + Eq,
+    where
+        Key: Borrow<Q>,
+        Q: Hash + Eq,
+        Qey: Borrow<W>,
+        W: Hash + Eq,
     {
         self.shard_for(key, qey).and_then(|(shard, hash)| {
             let evicted = shard.write().remove(hash, key, qey);
@@ -279,19 +283,22 @@ impl<
     }
 
     /// Inserts an item in the cache with key `key` and qey `qey`.
-    /// Returns entry if it was removed.
-    pub fn insert_evict(&self, key: Key, qey: Qey, value: Val) -> Option<(Key, Qey, Val)>{
+    ///
+    /// Returns entries if they were removed. Vector is guarantied to be non empty.
+    pub fn insert_evict(&self, key: Key, qey: Qey, value: Val) -> Option<Vec<(Key, Qey, Val)>> {
         self.shard_for(&key, &qey).and_then(|(shard, hash)| {
-            match shard.write().insert(hash, key, qey, value) {
-                Some(Entry::Resident(inner)) => Some((inner.key, inner.qey, inner.value)),
-                _ => None
-            }
+            shard
+                .write()
+                .insert(hash, key, qey, value)
+                .map(|vec| vec.into_iter().filter_map(Entry::map_to_value).collect())
         })
     }
 
     /// Gets an item from the cache with key `key` and qey `qey`.
+    ///
     /// If the corresponding value isn't present in the cache, this functions returns a guard
-    /// that can be used to insert the value once it's computed. Guard may return evicted value.
+    /// that can be used to insert the value once it's computed. Guard may return evicted values.
+    ///
     /// While the returned guard is alive, other calls with the same key and qey using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
@@ -324,20 +331,23 @@ impl<
         Key: Clone,
         Qey: Clone,
     {
-        self.get_or_insert_with_evict(key, qey, with).map(|(val, _)| val)
+        self.get_or_insert_with_evict(key, qey, with)
+            .map(|(val, _)| val)
     }
 
     /// Gets or inserts an item in the cache with key `key` and qey `qey`.
-    /// Returns entry if it was removed.
+    ///
+    /// Returns entries if they were removed. Vector is guarantied to be non empty.
+    #[allow(clippy::type_complexity)]
     pub fn get_or_insert_with_evict<E>(
         &self,
         key: &Key,
         qey: &Qey,
         with: impl FnOnce() -> Result<Val, E>,
-    ) -> Result<(Val, Option<(Key, Qey, Val)>), E>
-        where
-            Key: Clone,
-            Qey: Clone,
+    ) -> Result<(Val, Option<Vec<(Key, Qey, Val)>>), E>
+    where
+        Key: Clone,
+        Qey: Clone,
     {
         match self.get_value_or_guard(key, qey, None) {
             GuardResult::Value(v) => Ok((v, None)),
@@ -351,8 +361,10 @@ impl<
     }
 
     /// Gets an item from the cache with key `key` and qey `qey`.
+    ///
     /// If the corresponding value isn't present in the cache, this functions returns a guard
-    /// that can be used to insert the value once it's computed. Guard may return evicted value.
+    /// that can be used to insert the value once it's computed. Guard may return evicted values.
+    ///
     /// While the returned guard is alive, other calls with the same key and qey using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
@@ -384,20 +396,23 @@ impl<
         Key: Clone,
         Qey: Clone,
     {
-        self.get_or_insert_evict_async(key, qey, with).await.map(|(val, _)| val)
+        self.get_or_insert_evict_async(key, qey, with)
+            .await
+            .map(|(val, _)| val)
     }
 
     /// Gets or inserts an item in the cache with key `key` and qey `qey`.
-    /// Returns entry if it was removed.
+    ///
+    /// Returns entries if they were removed. Vector is guarantied to be non empty.
     pub async fn get_or_insert_evict_async<'a, E>(
         &self,
         key: &Key,
         qey: &Qey,
         with: impl Future<Output = Result<Val, E>>,
-    ) -> Result<(Val, Option<(Key, Qey, Val)>), E>
-        where
-            Key: Clone,
-            Qey: Clone,
+    ) -> Result<(Val, Option<Vec<(Key, Qey, Val)>>), E>
+    where
+        Key: Clone,
+        Qey: Clone,
     {
         match self.get_value_or_guard_async(key, qey).await {
             Ok(v) => Ok((v, None)),
@@ -456,6 +471,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     Cache<Key, Val, We, B>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
+    ///
     /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
     /// roughly equivalent to `weight_capacity / average item weight`.
     pub fn with(
@@ -530,6 +546,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Reserver additional space for `additional` entries.
+    ///
     /// Note that this is counted in entries, and is not weighted.
     #[inline]
     pub fn reserve(&mut self, additional: usize) {
@@ -557,6 +574,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Remove an item from the cache whose key is `key`.
+    ///
     /// Returns whether an entry was removed.
     #[inline]
     pub fn remove<Q: ?Sized>(&self, key: &Q) -> bool
@@ -568,12 +586,13 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Remove an item from the cache whose key is `key`.
+    ///
     /// Returns entry if it was removed.
     #[inline]
     pub fn remove_evict<Q: ?Sized>(&self, key: &Q) -> Option<Val>
-        where
-            Key: Borrow<Q>,
-            Q: Eq + Hash,
+    where
+        Key: Borrow<Q>,
+        Q: Eq + Hash,
     {
         self.0.remove_evict(key, &())
     }
@@ -585,15 +604,20 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Inserts an item in the cache with key `key`.
-    /// Returns entry if it was removed.
+    ///
+    /// Returns entries if they were removed. Vector is guarantied to be non empty.
     #[inline]
-    pub fn insert_evict(&self, key: Key, value: Val) -> Option<(Key, Val)> {
-        self.0.insert_evict(key, (), value).map(|(key, _, val)| (key, val))
+    pub fn insert_evict(&self, key: Key, value: Val) -> Option<Vec<(Key, Val)>> {
+        self.0
+            .insert_evict(key, (), value)
+            .map(|vec| vec.into_iter().map(|(key, _, val)| (key, val)).collect())
     }
 
     /// Gets an item from the cache with key `key`.
+    ///
     /// If the corresponding value isn't present in the cache, this functions returns a guard
-    /// that can be used to insert the value once it's computed.
+    /// that can be used to insert the value once it's computed. Guard may return evicted values.
+    ///
     /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
@@ -623,26 +647,33 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Gets or inserts an item in the cache with key `key`.
-    /// Returns entry if it was removed.
+    ///
+    /// Returns entries if they were removed. Vector is guarantied to be non empty.
     #[inline]
+    #[allow(clippy::type_complexity)]
     pub fn get_or_insert_with_evict<E>(
         &self,
         key: &Key,
         with: impl FnOnce() -> Result<Val, E>,
-    ) -> Result<(Val, Option<(Key, Val)>), E>
-        where
-            Key: Clone,
+    ) -> Result<(Val, Option<Vec<(Key, Val)>>), E>
+    where
+        Key: Clone,
     {
         match self.0.get_or_insert_with_evict(key, &(), with) {
-            Ok((val, Some((key, _, evicted)))) => Ok((val, Some((key, evicted)))),
-            Ok((val, _)) => Ok((val, None)),
+            Ok((val, Some(vec))) => Ok((
+                val,
+                Some(vec.into_iter().map(|(key, _, val)| (key, val)).collect()),
+            )),
+            Ok((val, None)) => Ok((val, None)),
             Err(e) => Err(e),
         }
     }
 
     /// Gets an item from the cache with key `key`.
+    ///
     /// If the corresponding value isn't present in the cache, this functions returns a guard
-    /// that can be used to insert the value once it's computed.
+    /// that can be used to insert the value once it's computed. Guard may return evicted values.
+    ///
     /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
@@ -671,19 +702,23 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHas
     }
 
     /// Gets or inserts an item in the cache with key `key`.
-    /// Returns entry if it was removed.
+    ///
+    /// Returns entries if they were removed. Vector is guarantied to be non empty.
     #[inline]
     pub async fn get_or_insert_evict_async<'a, E>(
         &self,
         key: &Key,
         with: impl Future<Output = Result<Val, E>>,
-    ) -> Result<(Val, Option<(Key, Val)>), E>
-        where
-            Key: Clone,
+    ) -> Result<(Val, Option<Vec<(Key, Val)>>), E>
+    where
+        Key: Clone,
     {
         match self.0.get_or_insert_evict_async(key, &(), with).await {
-            Ok((val, Some((key, _, evicted)))) => Ok((val, Some((key, evicted)))),
-            Ok((val, _)) => Ok((val, None)),
+            Ok((val, Some(vec))) => Ok((
+                val,
+                Some(vec.into_iter().map(|(key, _, val)| (key, val)).collect()),
+            )),
+            Ok((val, None)) => Ok((val, None)),
             Err(e) => Err(e),
         }
     }
