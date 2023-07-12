@@ -13,7 +13,7 @@ use std::{
 use crate::{
     linked_slab::Token,
     rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard},
-    shard::KQCacheShard,
+    shard::CacheShard,
     Weighter,
 };
 
@@ -56,8 +56,8 @@ enum LoadingState<Val> {
     Terminated,
 }
 
-pub struct PlaceholderGuard<'a, Key, Qey, Val, We, B> {
-    shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
+pub struct PlaceholderGuard<'a, Key, Val, We, B> {
+    shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
     shared: SharedPlaceholder<Val>,
     inserted: bool,
 }
@@ -104,15 +104,15 @@ impl Waiter {
 }
 
 #[derive(Debug)]
-pub enum GuardResult<'a, Key, Qey, Val, We, B> {
+pub enum GuardResult<'a, Key, Val, We, B> {
     Value(Val),
-    Guard(PlaceholderGuard<'a, Key, Qey, Val, We, B>),
+    Guard(PlaceholderGuard<'a, Key, Val, We, B>),
     Timeout,
 }
 
-impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
+impl<'a, Key, Val, We, B> PlaceholderGuard<'a, Key, Val, We, B> {
     pub fn start_loading(
-        shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
         shared: SharedPlaceholder<Val>,
     ) -> Self {
         debug_assert!(matches!(
@@ -132,14 +132,14 @@ impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
         // We take shard lock here even if unused, as manipulating the waiters list
         // requires holding it to avoid races.
         _shard_lock: Result<
-            RwLockWriteGuard<'a, KQCacheShard<Key, Qey, Val, We, B>>,
-            RwLockReadGuard<'a, KQCacheShard<Key, Qey, Val, We, B>>,
+            RwLockWriteGuard<'a, CacheShard<Key, Val, We, B>>,
+            RwLockReadGuard<'a, CacheShard<Key, Val, We, B>>,
         >,
-        shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
         shared: &SharedPlaceholder<Val>,
         notified: bool,
         waiter_fn: impl FnOnce() -> Waiter,
-    ) -> Option<Result<Val, PlaceholderGuard<'a, Key, Qey, Val, We, B>>>
+    ) -> Option<Result<Val, PlaceholderGuard<'a, Key, Val, We, B>>>
     where
         Val: Clone,
     {
@@ -170,21 +170,19 @@ impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
 impl<
         'a,
         Key: Eq + Hash,
-        Qey: Eq + Hash,
         Val: Clone,
-        We: Weighter<Key, Qey, Val>,
+        We: Weighter<Key, Val>,
         B: BuildHasher,
-    > PlaceholderGuard<'a, Key, Qey, Val, We, B>
+    > PlaceholderGuard<'a, Key, Val, We, B>
 {
     pub fn join(
-        shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
         hash: u64,
         key: Key,
-        qey: Qey,
         timeout: Option<Duration>,
-    ) -> GuardResult<'a, Key, Qey, Val, We, B> {
+    ) -> GuardResult<'a, Key, Val, We, B> {
         let mut shard_guard = shard.write();
-        let shared = match shard_guard.get_value_or_placeholder(hash, key, qey) {
+        let shared = match shard_guard.get_value_or_placeholder(hash, key) {
             Ok(v) => return GuardResult::Value(v),
             Err((shared, true)) => return GuardResult::Guard(Self::start_loading(shard, shared)),
             Err((shared, false)) => shared,
@@ -244,11 +242,10 @@ impl<
 impl<
         'a,
         Key: Eq + Hash,
-        Qey: Eq + Hash,
         Val: Clone,
-        We: Weighter<Key, Qey, Val>,
+        We: Weighter<Key, Val>,
         B: BuildHasher,
-    > PlaceholderGuard<'a, Key, Qey, Val, We, B>
+    > PlaceholderGuard<'a, Key, Val, We, B>
 {
     pub fn insert(mut self, value: Val) {
         let referenced;
@@ -269,7 +266,7 @@ impl<
     }
 }
 
-impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
+impl<'a, Key, Val, We, B> PlaceholderGuard<'a, Key, Val, We, B> {
     #[cold]
     fn drop_slow(&mut self) {
         // Make sure to acquire the shard lock to prevent races with other threads
@@ -285,47 +282,46 @@ impl<'a, Key, Qey, Val, We, B> PlaceholderGuard<'a, Key, Qey, Val, We, B> {
     }
 }
 
-impl<'a, Key, Qey, Val, We, B> Drop for PlaceholderGuard<'a, Key, Qey, Val, We, B> {
+impl<'a, Key, Val, We, B> Drop for PlaceholderGuard<'a, Key, Val, We, B> {
     fn drop(&mut self) {
         if !self.inserted {
             self.drop_slow();
         }
     }
 }
-impl<'a, Key, Qey, Val, We, B> std::fmt::Debug for PlaceholderGuard<'a, Key, Qey, Val, We, B> {
+impl<'a, Key, Val, We, B> std::fmt::Debug for PlaceholderGuard<'a, Key, Val, We, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlaceholderGuard").finish_non_exhaustive()
     }
 }
 
 /// Future that results in an Ok(Value) or Err(Guard)
-pub enum JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
+pub enum JoinFuture<'a, 'b, Key, Val, We, B> {
     Created {
-        shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
         hash: u64,
         key: &'b Key,
-        qey: &'b Qey,
+
     },
     Pending {
-        shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
         shared: SharedPlaceholder<Val>,
         waiter: Option<SharedTaskWaiter>,
     },
     Done,
 }
 
-impl<'a, 'b, Key, Qey, Val, We, B> JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
+impl<'a, 'b, Key, Val, We, B> JoinFuture<'a, 'b, Key, Val, We, B> {
     pub fn new(
-        shard: &'a RwLock<KQCacheShard<Key, Qey, Val, We, B>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
         hash: u64,
         key: &'b Key,
-        qey: &'b Qey,
-    ) -> JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
+
+    ) -> JoinFuture<'a, 'b, Key, Val, We, B> {
         JoinFuture::Created {
             shard,
             hash,
             key,
-            qey,
         }
     }
 
@@ -348,7 +344,7 @@ impl<'a, 'b, Key, Qey, Val, We, B> JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
     }
 }
 
-impl<'a, 'b, Key, Qey, Val, We, B> Drop for JoinFuture<'a, 'b, Key, Qey, Val, We, B> {
+impl<'a, 'b, Key, Val, We, B> Drop for JoinFuture<'a, 'b, Key, Val, We, B> {
     fn drop(&mut self) {
         if matches!(
             self,
@@ -366,13 +362,12 @@ impl<
         'a,
         'b,
         Key: Eq + Hash + Clone,
-        Qey: Eq + Hash + Clone,
         Val: Clone,
-        We: Weighter<Key, Qey, Val>,
+        We: Weighter<Key, Val>,
         B: BuildHasher,
-    > Future for JoinFuture<'a, 'b, Key, Qey, Val, We, B>
+    > Future for JoinFuture<'a, 'b, Key, Val, We, B>
 {
-    type Output = Result<Val, PlaceholderGuard<'a, Key, Qey, Val, We, B>>;
+    type Output = Result<Val, PlaceholderGuard<'a, Key, Val, We, B>>;
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
@@ -383,10 +378,9 @@ impl<
                 shard,
                 hash,
                 key,
-                qey,
             } => {
                 let mut shard_guard = shard.write();
-                match shard_guard.get_value_or_placeholder(*hash, Key::clone(key), Qey::clone(qey))
+                match shard_guard.get_value_or_placeholder(*hash, Key::clone(key))
                 {
                     Ok(v) => {
                         *self = Self::Done;

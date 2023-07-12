@@ -13,12 +13,9 @@
 //! Both `sync` (thread-safe) and `unsync` (non thread-safe) implementations are provided. The latter
 //! offers slightly better performance when thread safety is not required.
 //!
-//! # Two keys or QK keys
+//! # Equivalent keys
 //!
-//! In addition to the standard `key->value` cache, a "two keys" cache `(key, qey)->value` is also
-//! available for cases where you want a cache keyed by a tuple like `(K, Q)`. But due to limitations
-//! of the `Borrow` trait you cannot access such keys without building the tuple and thus potentially
-//! cloning `K` and/or `Q`.
+//! TODO
 //!
 //! # User defined weight
 //!
@@ -79,8 +76,8 @@ pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 /// #[derive(Clone)]
 /// struct StringWeighter;
 ///
-/// impl Weighter<u64, (), String> for StringWeighter {
-///     fn weight(&self, _key: &u64, _qey: &(), val: &String) -> NonZeroU32 {
+/// impl Weighter<u64, String> for StringWeighter {
+///     fn weight(&self, _key: &u64, val: &String) -> NonZeroU32 {
 ///         NonZeroU32::new(val.len().clamp(1, u32::MAX as usize) as u32).unwrap()
 ///     }
 /// }
@@ -88,23 +85,23 @@ pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 /// let cache = Cache::with_weighter(100, 100_000, StringWeighter);
 /// cache.insert(1, "1".to_string());
 /// ```
-pub trait Weighter<Key, Qey, Val> {
+pub trait Weighter<Key, Val> {
     /// Returns the weight of the cache item.
     /// Note that this it's undefined behavior for a cache item to change its weight.
     ///
     /// For performance reasons this function should be trivially cheap as
     /// it's called during the cache eviction routine.
     /// If weight is expensive to calculate, consider caching it alongside the value.
-    fn weight(&self, key: &Key, qey: &Qey, val: &Val) -> NonZeroU32;
+    fn weight(&self, key: &Key, val: &Val) -> NonZeroU32;
 }
 
 /// Each cache entry weights exactly `1` unit of weight.
 #[derive(Debug, Clone)]
 pub struct UnitWeighter;
 
-impl<Key, Qey, Val> Weighter<Key, Qey, Val> for UnitWeighter {
+impl<Key, Val> Weighter<Key, Val> for UnitWeighter {
     #[inline]
-    fn weight(&self, _key: &Key, _qey: &Qey, _val: &Val) -> NonZeroU32 {
+    fn weight(&self, _key: &Key, _val: &Val) -> NonZeroU32 {
         NonZeroU32::new(1).unwrap()
     }
 }
@@ -120,11 +117,11 @@ mod tests {
 
     #[test]
     fn test_new() {
-        sync::KQCache::<u64, u64, u64>::new(0);
-        sync::KQCache::<u64, u64, u64>::new(1);
-        sync::KQCache::<u64, u64, u64>::new(2);
-        sync::KQCache::<u64, u64, u64>::new(3);
-        sync::KQCache::<u64, u64, u64>::new(usize::MAX);
+        sync::Cache::<(u64, u64), u64>::new(0);
+        sync::Cache::<(u64, u64), u64>::new(1);
+        sync::Cache::<(u64, u64), u64>::new(2);
+        sync::Cache::<(u64, u64), u64>::new(3);
+        sync::Cache::<(u64, u64), u64>::new(usize::MAX);
         sync::Cache::<u64, u64>::new(0);
         sync::Cache::<u64, u64>::new(1);
         sync::Cache::<u64, u64>::new(2);
@@ -137,8 +134,8 @@ mod tests {
         #[derive(Clone)]
         struct StringWeighter;
 
-        impl Weighter<u64, (), String> for StringWeighter {
-            fn weight(&self, _key: &u64, _qey: &(), val: &String) -> NonZeroU32 {
+        impl Weighter<u64, String> for StringWeighter {
+            fn weight(&self, _key: &u64, val: &String) -> NonZeroU32 {
                 NonZeroU32::new(val.len().clamp(1, u32::MAX as usize) as u32).unwrap()
             }
         }
@@ -150,21 +147,21 @@ mod tests {
         assert_eq!(cache.get(&1000).unwrap(), "1000");
     }
 
-    #[test]
-    fn test_kq() {
-        let mut cache = unsync::KQCache::new(5);
-        cache.insert("square".to_string(), 2022, "blue".to_string());
-        cache.insert("square".to_string(), 2023, "black".to_string());
-        assert_eq!(cache.get("square", &2022).unwrap(), "blue");
-    }
+    // #[test]
+    // fn test_equivalent() {
+    //     let mut cache = unsync::Cache::new(5);
+    //     cache.insert("square".to_string(), 2022, "blue".to_string());
+    //     cache.insert("square".to_string(), 2023, "black".to_string());
+    //     assert_eq!(cache.get("square", &2022).unwrap(), "blue");
+    // }
 
-    #[test]
-    fn test_borrow_keys() {
-        let cache = sync::KQCache::<Vec<u8>, Vec<u8>, u64>::new(0);
-        cache.get(&b""[..], &b""[..]);
-        let cache = sync::KQCache::<String, String, u64>::new(0);
-        cache.get("", "");
-    }
+    // #[test]
+    // fn test_borrow_keys() {
+    //     let cache = sync::Cache::<Vec<u8>, Vec<u8>, u64>::new(0);
+    //     cache.get(&b""[..], &b""[..]);
+    //     let cache = sync::Cache::<(String, String), u64>::new(0);
+    //     cache.get(("", ""));
+    // }
 
     #[test]
     fn test_get_or_insert() {
@@ -172,7 +169,7 @@ mod tests {
         for _i in 0..2000 {
             dbg!(_i);
             let mut entered = AtomicUsize::default();
-            let cache = sync::KQCache::<u64, u64, u64>::new(100);
+            let cache = sync::Cache::<(u64, u64), u64>::new(100);
             const THREADS: usize = 100;
             let wg = std::sync::Barrier::new(THREADS);
             let solve_at = rand::thread_rng().gen_range(0..THREADS);
@@ -180,7 +177,7 @@ mod tests {
                 for _ in 0..THREADS {
                     s.spawn(|| {
                         wg.wait();
-                        let result = cache.get_or_insert_with(&1, &1, || {
+                        let result = cache.get_or_insert_with(&(1, 1), || {
                             let before = entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if before == solve_at {
                                 Ok(1)
@@ -202,7 +199,7 @@ mod tests {
         for _i in 0..2000 {
             dbg!(_i);
             let mut entered = AtomicUsize::default();
-            let cache = sync::KQCache::<u64, u64, u64>::new(100);
+            let cache = sync::Cache::<(u64, u64), u64>::new(100);
             const THREADS: usize = 100;
             let wg = std::sync::Barrier::new(THREADS);
             let solve_at = rand::thread_rng().gen_range(0..THREADS);
@@ -211,7 +208,7 @@ mod tests {
                     s.spawn(|| {
                         wg.wait();
                         loop {
-                            match cache.get_value_or_guard(&1, &1, Some(Duration::from_millis(1))) {
+                            match cache.get_value_or_guard(&(1, 1), Some(Duration::from_millis(1))) {
                                 GuardResult::Value(v) => assert_eq!(v, 1),
                                 GuardResult::Guard(g) => {
                                     let before =
@@ -237,7 +234,7 @@ mod tests {
         for _i in 0..5000 {
             dbg!(_i);
             let entered = Arc::new(AtomicUsize::default());
-            let cache = Arc::new(sync::KQCache::<u64, u64, u64>::new(100));
+            let cache = Arc::new(sync::Cache::<(u64, u64), u64>::new(100));
             const TASKS: usize = 100;
             let wg = Arc::new(tokio::sync::Barrier::new(TASKS));
             let solve_at = rand::thread_rng().gen_range(0..TASKS);
@@ -249,7 +246,7 @@ mod tests {
                 let task = tokio::spawn(async move {
                     wg.wait().await;
                     let result = cache
-                        .get_or_insert_async(&1, &1, async {
+                        .get_or_insert_async(&(1, 1), async {
                             let before = entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if before == solve_at {
                                 Ok(1)
@@ -265,7 +262,7 @@ mod tests {
             for task in tasks {
                 task.await.unwrap();
             }
-            assert_eq!(cache.get(&1, &1), Some(1));
+            assert_eq!(cache.get(&(1, 1)), Some(1));
             assert_eq!(
                 entered.load(std::sync::atomic::Ordering::Relaxed),
                 solve_at + 1
@@ -279,7 +276,7 @@ mod tests {
         for _i in 0..5000 {
             dbg!(_i);
             let entered = Arc::new(AtomicUsize::default());
-            let cache = Arc::new(sync::KQCache::<u64, u64, u64>::new(100));
+            let cache = Arc::new(sync::Cache::<(u64, u64), u64>::new(100));
             const TASKS: usize = 100;
             let wg = Arc::new(tokio::sync::Barrier::new(TASKS));
             let solve_at = rand::thread_rng().gen_range(0..TASKS);
@@ -293,7 +290,7 @@ mod tests {
                     loop {
                         match tokio::time::timeout(
                             Duration::from_millis(1),
-                            cache.get_value_or_guard_async(&1, &1),
+                            cache.get_value_or_guard_async(&(1, 1)),
                         )
                         .await
                         {
@@ -315,7 +312,7 @@ mod tests {
             for task in tasks {
                 task.await.unwrap();
             }
-            assert_eq!(cache.get(&1, &1), Some(1));
+            assert_eq!(cache.get(&(1, 1)), Some(1));
             assert_eq!(
                 entered.load(std::sync::atomic::Ordering::Relaxed),
                 solve_at + 1

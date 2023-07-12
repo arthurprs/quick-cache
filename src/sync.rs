@@ -2,7 +2,7 @@ use crate::{
     options::{Options, OptionsBuilder},
     placeholder::{GuardResult, JoinFuture, PlaceholderGuard},
     rw_lock::RwLock,
-    shard::{Entry, KQCacheShard},
+    shard::{Entry, CacheShard},
     DefaultHashBuilder, UnitWeighter, Weighter,
 };
 use std::{
@@ -12,12 +12,7 @@ use std::{
     time::Duration,
 };
 
-/// A concurrent two keys cache.
-///
-/// # Key and Qey
-/// The key qey pair exists for cases where you want a cache keyed by (K, Q).
-/// Other rust maps/caches are accessed via the Borrow trait,
-/// so they require the caller to build &(K, Q) which might involve cloning K and/or Q.
+/// A concurrent cache.
 ///
 /// # Value
 /// Cache values are cloned when fetched. Users should wrap their values with `Arc<_>`
@@ -27,15 +22,15 @@ use std::{
 /// # Thread Safety and Concurrency
 /// The cache instance can wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
-pub struct KQCache<Key, Qey, Val, We = UnitWeighter, B = DefaultHashBuilder> {
+pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder> {
     hash_builder: B,
     #[allow(clippy::type_complexity)]
-    shards: Box<[RwLock<KQCacheShard<Key, Qey, Val, We, B>>]>,
+    shards: Box<[RwLock<CacheShard<Key, Val, We, B>>]>,
     shards_mask: u64,
 }
 
-impl<Key: Eq + Hash, Qey: Eq + Hash, Val: Clone>
-    KQCache<Key, Qey, Val, UnitWeighter, DefaultHashBuilder>
+impl<Key: Eq + Hash, Val: Clone>
+    Cache<Key, Val, UnitWeighter, DefaultHashBuilder>
 {
     /// Creates a new cache with holds up to `items_capacity` items (approximately).
     pub fn new(items_capacity: usize) -> Self {
@@ -48,8 +43,8 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val: Clone>
     }
 }
 
-impl<Key: Eq + Hash, Qey: Eq + Hash, Val: Clone, We: Weighter<Key, Qey, Val> + Clone>
-    KQCache<Key, Qey, Val, We, DefaultHashBuilder>
+impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone>
+    Cache<Key, Val, We, DefaultHashBuilder>
 {
     pub fn with_weighter(
         estimated_items_capacity: usize,
@@ -67,11 +62,11 @@ impl<Key: Eq + Hash, Qey: Eq + Hash, Val: Clone, We: Weighter<Key, Qey, Val> + C
 
 impl<
         Key: Eq + Hash,
-        Qey: Eq + Hash,
+
         Val: Clone,
-        We: Weighter<Key, Qey, Val> + Clone,
+        We: Weighter<Key, Val> + Clone,
         B: BuildHasher + Clone,
-    > KQCache<Key, Qey, Val, We, B>
+    > Cache<Key, Val, We, B>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
     /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
@@ -98,9 +93,9 @@ impl<
     /// # Example
     ///
     /// ```rust
-    /// use quick_cache::{sync::KQCache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
+    /// use quick_cache::{sync::Cache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
     ///
-    /// KQCache::<String, u64, String>::with_options(
+    /// Cache::<(String, u64), String>::with_options(
     ///   OptionsBuilder::new()
     ///     .estimated_items_capacity(10000)
     ///     .weight_capacity(10000)
@@ -126,7 +121,7 @@ impl<
         }
         let shards = (0..num_shards)
             .map(|_| {
-                RwLock::new(KQCacheShard::new(
+                RwLock::new(CacheShard::new(
                     options.hot_allocation,
                     options.ghost_allocation,
                     shard_items_cap as usize,
@@ -182,20 +177,16 @@ impl<
 
     #[allow(clippy::type_complexity)]
     #[inline]
-    fn shard_for<Q: ?Sized, W: ?Sized>(
+    fn shard_for<Q: ?Sized>(
         &self,
         key: &Q,
-        qey: &W,
-    ) -> Option<(&RwLock<KQCacheShard<Key, Qey, Val, We, B>>, u64)>
+    ) -> Option<(&RwLock<CacheShard<Key, Val, We, B>>, u64)>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Qey: Borrow<W>,
-        W: Hash + Eq,
     {
         let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
-        qey.hash(&mut hasher);
         let hash = hasher.finish();
         // When choosing the shard, rotate the hash bits usize::BITS / 2 so that we
         // give preference to the bits in the middle of the hash.
@@ -215,92 +206,86 @@ impl<
         }
     }
 
-    /// Fetches an item from the cache whose keys are `key` + `qey`.
-    pub fn get<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> Option<Val>
+    /// Fetches an item from the cache whose key is `key`.
+    pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Qey: Borrow<W>,
-        W: Hash + Eq,
     {
-        let (shard, hash) = self.shard_for(key, qey)?;
-        shard.read().get(hash, key, qey).cloned()
+        let (shard, hash) = self.shard_for(key)?;
+        shard.read().get(hash, key).cloned()
     }
 
-    /// Peeks an item from the cache whose keys are `key` + `qey`.
+    /// Peeks an item from the cache whose key is `key`.
     /// Contrary to gets, peeks don't alter the key "hotness".
-    pub fn peek<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> Option<Val>
+    pub fn peek<Q: ?Sized>(&self, key: &Q) -> Option<Val>
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Qey: Borrow<W>,
-        W: Hash + Eq,
     {
-        let (shard, hash) = self.shard_for(key, qey)?;
-        shard.read().peek(hash, key, qey).cloned()
+        let (shard, hash) = self.shard_for(key)?;
+        shard.read().peek(hash, key).cloned()
     }
 
-    /// Remove an item from the cache whose key is `key` and qey is `qey`.
+    /// Remove an item from the cache whose key is `key`.
     /// Returns whether an entry was removed.
-    pub fn remove<Q: ?Sized, W: ?Sized>(&self, key: &Q, qey: &W) -> bool
+    pub fn remove<Q: ?Sized>(&self, key: &Q) -> bool
     where
         Key: Borrow<Q>,
         Q: Hash + Eq,
-        Qey: Borrow<W>,
-        W: Hash + Eq,
     {
-        if let Some((shard, hash)) = self.shard_for(key, qey) {
+        if let Some((shard, hash)) = self.shard_for(key) {
             // Any evictions will be dropped outside of the lock
-            let evicted = shard.write().remove(hash, key, qey);
+            let evicted = shard.write().remove(hash, key);
             matches!(evicted, Some(Entry::Resident(_)))
         } else {
             false
         }
     }
 
-    /// Inserts an item in the cache with key `key` and qey `qey`.
-    pub fn insert(&self, key: Key, qey: Qey, value: Val) {
-        if let Some((shard, hash)) = self.shard_for(&key, &qey) {
+    /// Inserts an item in the cache with key `key` .
+    pub fn insert(&self, key: Key, value: Val) {
+        if let Some((shard, hash)) = self.shard_for(&key) {
             // Any evictions will be dropped outside of the lock
-            let _evicted = shard.write().insert(hash, key, qey, value);
+            let _evicted = shard.write().insert(hash, key, value);
         }
     }
 
-    /// Gets an item from the cache with key `key` and qey `qey`.
+    /// Gets an item from the cache with key `key` .
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
-    /// While the returned guard is alive, other calls with the same key and qey using the
+    /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
     pub fn get_value_or_guard<'a>(
         &'a self,
         key: &Key,
-        qey: &Qey,
+
         timeout: Option<Duration>,
-    ) -> GuardResult<'a, Key, Qey, Val, We, B>
+    ) -> GuardResult<'a, Key, Val, We, B>
     where
         Key: Clone,
-        Qey: Clone,
+
     {
-        let (shard, hash) = self.shard_for(key, qey).unwrap();
-        if let Some(v) = shard.read().get(hash, key, qey) {
+        let (shard, hash) = self.shard_for(key).unwrap();
+        if let Some(v) = shard.read().get(hash, key) {
             return GuardResult::Value(v.clone());
         }
-        PlaceholderGuard::join(shard, hash, key.clone(), qey.clone(), timeout)
+        PlaceholderGuard::join(shard, hash, key.clone(), timeout)
     }
 
-    /// Gets or inserts an item in the cache with key `key` and qey `qey`.
+    /// Gets or inserts an item in the cache with key `key` .
     pub fn get_or_insert_with<E>(
         &self,
         key: &Key,
-        qey: &Qey,
+
         with: impl FnOnce() -> Result<Val, E>,
     ) -> Result<Val, E>
     where
         Key: Clone,
-        Qey: Clone,
+
     {
-        match self.get_value_or_guard(key, qey, None) {
+        match self.get_value_or_guard(key, None) {
             GuardResult::Value(v) => Ok(v),
             GuardResult::Guard(g) => {
                 let v = with()?;
@@ -311,40 +296,38 @@ impl<
         }
     }
 
-    /// Gets an item from the cache with key `key` and qey `qey`.
+    /// Gets an item from the cache with key `key` .
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
-    /// While the returned guard is alive, other calls with the same key and qey using the
+    /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
     pub async fn get_value_or_guard_async<'a, 'b>(
         &'a self,
         key: &'b Key,
-        qey: &'b Qey,
-    ) -> Result<Val, PlaceholderGuard<'a, Key, Qey, Val, We, B>>
+    ) -> Result<Val, PlaceholderGuard<'a, Key, Val, We, B>>
     where
         Key: Clone,
-        Qey: Clone,
     {
-        let (shard, hash) = self.shard_for(key, qey).unwrap();
-        if let Some(v) = shard.read().get(hash, key, qey) {
+        let (shard, hash) = self.shard_for(key).unwrap();
+        if let Some(v) = shard.read().get(hash, key) {
             return Ok(v.clone());
         }
-        JoinFuture::new(shard, hash, key, qey).await
+        JoinFuture::new(shard, hash, key).await
     }
 
-    /// Gets or inserts an item in the cache with key `key` and qey `qey`.
+    /// Gets or inserts an item in the cache with key `key` .
     pub async fn get_or_insert_async<'a, E>(
         &self,
         key: &Key,
-        qey: &Qey,
+
         with: impl Future<Output = Result<Val, E>>,
     ) -> Result<Val, E>
     where
         Key: Clone,
-        Qey: Clone,
+
     {
-        match self.get_value_or_guard_async(key, qey).await {
+        match self.get_value_or_guard_async(key).await {
             Ok(v) => Ok(v),
             Err(g) => {
                 let v = with.await?;
@@ -355,221 +338,12 @@ impl<
     }
 }
 
-impl<Key, Qey, Val, We, B> std::fmt::Debug for KQCache<Key, Qey, Val, We, B> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KQCache").finish_non_exhaustive()
-    }
-}
-
-/// A concurrent cache.
-///
-/// # Value
-/// Cache values are cloned when fetched. Users should wrap their values with `Arc<_>`
-/// if necessary to avoid expensive clone operations. If interior mutability is required
-/// `Arc<Mutex<_>>` or `Arc<RwLock<_>>` can also be used.
-///
-/// # Thread Safety and Concurrency
-/// The cache instance can wrapped with an `Arc` (or equivalent) and shared between threads.
-/// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
-pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder>(KQCache<Key, (), Val, We, B>);
-
-impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, UnitWeighter, DefaultHashBuilder> {
-    /// Creates a new cache with holds up to `items_capacity` items (approximately).
-    pub fn new(items_capacity: usize) -> Self {
-        Self(KQCache::new(items_capacity))
-    }
-}
-
-impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone>
-    Cache<Key, Val, We, DefaultHashBuilder>
-{
-    pub fn with_weighter(
-        estimated_items_capacity: usize,
-        weight_capacity: u64,
-        weighter: We,
-    ) -> Self {
-        Self::with(
-            estimated_items_capacity,
-            weight_capacity,
-            weighter,
-            DefaultHashBuilder::default(),
-        )
-    }
-}
-
-impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, (), Val> + Clone, B: BuildHasher + Clone>
-    Cache<Key, Val, We, B>
-{
-    /// Creates a new cache that can hold up to `weight_capacity` in weight.
-    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
-    /// roughly equivalent to `weight_capacity / average item weight`.
-    pub fn with(
-        estimated_items_capacity: usize,
-        weight_capacity: u64,
-        weighter: We,
-        hash_builder: B,
-    ) -> Self {
-        Self(KQCache::with(
-            estimated_items_capacity,
-            weight_capacity,
-            weighter,
-            hash_builder,
-        ))
-    }
-
-    /// Constructs a cache based on [OptionsBuilder].
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use quick_cache::{sync::Cache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
-    ///
-    /// Cache::<String, String>::with_options(
-    ///   OptionsBuilder::new()
-    ///     .estimated_items_capacity(10000)
-    ///     .weight_capacity(10000)
-    ///     .build()
-    ///     .unwrap(),
-    ///     UnitWeighter,
-    ///     DefaultHashBuilder::default(),
-    /// );
-    /// ```
-    pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
-        Self(KQCache::with_options(options, weighter, hash_builder))
-    }
-
-    /// Returns whether the cache is empty
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Returns the number of cached items
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Returns the total weight of cached items
-    pub fn weight(&self) -> u64 {
-        self.0.weight()
-    }
-
-    /// Returns the maximum weight of cached items
-    pub fn capacity(&self) -> u64 {
-        self.0.capacity()
-    }
-
-    /// Returns the number of misses
-    pub fn misses(&self) -> u64 {
-        self.0.misses()
-    }
-
-    /// Returns the number of hits
-    pub fn hits(&self) -> u64 {
-        self.0.hits()
-    }
-
-    /// Reserver additional space for `additional` entries.
-    /// Note that this is counted in entries, and is not weighted.
-    pub fn reserve(&mut self, additional: usize) {
-        self.0.reserve(additional)
-    }
-
-    /// Fetches an item from the cache.
-    pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<Val>
-    where
-        Key: Borrow<Q>,
-        Q: Eq + Hash,
-    {
-        self.0.get(key, &())
-    }
-
-    /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
-    pub fn peek<Q: ?Sized>(&self, key: &Q) -> Option<Val>
-    where
-        Key: Borrow<Q>,
-        Q: Eq + Hash,
-    {
-        self.0.peek(key, &())
-    }
-
-    /// Remove an item from the cache whose key is `key`.
-    /// Returns whether an entry was removed.
-    pub fn remove<Q: ?Sized>(&self, key: &Q) -> bool
-    where
-        Key: Borrow<Q>,
-        Q: Eq + Hash,
-    {
-        self.0.remove(key, &())
-    }
-
-    /// Inserts an item in the cache with key `key`.
-    pub fn insert(&self, key: Key, value: Val) {
-        self.0.insert(key, (), value);
-    }
-
-    /// Gets an item from the cache with key `key`.
-    /// If the corresponding value isn't present in the cache, this functions returns a guard
-    /// that can be used to insert the value once it's computed.
-    /// While the returned guard is alive, other calls with the same key using the
-    /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
-    /// is dropped or the value is inserted.
-    pub fn get_value_or_guard<'a>(
-        &'a self,
-        key: &Key,
-        timeout: Option<Duration>,
-    ) -> GuardResult<'a, Key, (), Val, We, B>
-    where
-        Key: Clone,
-    {
-        self.0.get_value_or_guard(key, &(), timeout)
-    }
-
-    /// Gets or inserts an item in the cache with key `key`.
-    pub fn get_or_insert_with<E>(
-        &self,
-        key: &Key,
-        with: impl FnOnce() -> Result<Val, E>,
-    ) -> Result<Val, E>
-    where
-        Key: Clone,
-    {
-        self.0.get_or_insert_with(key, &(), with)
-    }
-
-    /// Gets an item from the cache with key `key`.
-    /// If the corresponding value isn't present in the cache, this functions returns a guard
-    /// that can be used to insert the value once it's computed.
-    /// While the returned guard is alive, other calls with the same key using the
-    /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
-    /// is dropped or the value is inserted.
-    pub async fn get_value_or_guard_async<'a, 'b>(
-        &'a self,
-        key: &'b Key,
-    ) -> Result<Val, PlaceholderGuard<'a, Key, (), Val, We, B>>
-    where
-        Key: Clone,
-    {
-        self.0.get_value_or_guard_async(key, &()).await
-    }
-
-    /// Gets or inserts an item in the cache with key `key`.
-    pub async fn get_or_insert_async<'a, E>(
-        &self,
-        key: &Key,
-        with: impl Future<Output = Result<Val, E>>,
-    ) -> Result<Val, E>
-    where
-        Key: Clone,
-    {
-        self.0.get_or_insert_async(key, &(), with).await
-    }
-}
-
 impl<Key, Val, We, B> std::fmt::Debug for Cache<Key, Val, We, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cache").finish_non_exhaustive()
     }
 }
+
 
 #[cfg(test)]
 mod tests {

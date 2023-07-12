@@ -40,8 +40,8 @@ use quick_cache::{Weighter, sync::Cache};
 #[derive(Clone)]
 struct StringWeighter;
 
-impl Weighter<u64, (), String> for StringWeighter {
-    fn weight(&self, _key: &u64, _qey: &(), val: &String) -> NonZeroU32 {
+impl Weighter<u64, String> for StringWeighter {
+    fn weight(&self, _key: &u64, val: &String) -> NonZeroU32 {
         NonZeroU32::new(val.len().clamp(1, u32::MAX as usize) as u32).unwrap()
     }
 }
@@ -55,16 +55,15 @@ fn main() {
 }
 ```
 
-Two keys variant (KQCache), which allows the caller to avoid making expensive keys on gets.
+Using the `Equivalent`` trait for complex keys
 
 ```rust
-use quick_cache::sync::KQCache;
+use quick_cache::sync::Cache;
 
 fn main() {
-    let cache = KQCache::new(5);
+    let cache = Cache::new(5);
     // Normally the cache key would be the tuple (String, u32), which could force
     // the caller to clone/allocate the string in order to form the tuple key.
-    // That is not the case with the KQCache.
     cache.insert("square".to_string(), 2022, "blue");
     cache.insert("square".to_string(), 2023, "black");
     assert_eq!(cache.get("square", &2022).unwrap(), "blue");

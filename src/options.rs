@@ -109,7 +109,7 @@ impl OptionsBuilder {
         self
     }
 
-    /// Builds an `Option` struct which can be used in `Cache::with_options` and `KQCache::with_options` constructors.
+    /// Builds an `Option` struct which can be used in the `Cache::with_options` constructor.
     pub fn build(&self) -> Result<Options, Error> {
         let shards = self
             .shards
