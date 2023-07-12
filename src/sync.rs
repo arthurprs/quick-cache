@@ -2,11 +2,10 @@ use crate::{
     options::{Options, OptionsBuilder},
     placeholder::{GuardResult, JoinFuture, PlaceholderGuard},
     rw_lock::RwLock,
-    shard::{Entry, CacheShard},
-    DefaultHashBuilder, UnitWeighter, Weighter,
+    shard::{CacheShard, Entry},
+    DefaultHashBuilder, Equivalent, UnitWeighter, Weighter,
 };
 use std::{
-    borrow::Borrow,
     future::Future,
     hash::{BuildHasher, Hash, Hasher},
     time::Duration,
@@ -29,9 +28,7 @@ pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder> {
     shards_mask: u64,
 }
 
-impl<Key: Eq + Hash, Val: Clone>
-    Cache<Key, Val, UnitWeighter, DefaultHashBuilder>
-{
+impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, UnitWeighter, DefaultHashBuilder> {
     /// Creates a new cache with holds up to `items_capacity` items (approximately).
     pub fn new(items_capacity: usize) -> Self {
         Self::with(
@@ -60,13 +57,8 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone>
     }
 }
 
-impl<
-        Key: Eq + Hash,
-
-        Val: Clone,
-        We: Weighter<Key, Val> + Clone,
-        B: BuildHasher + Clone,
-    > Cache<Key, Val, We, B>
+impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher + Clone>
+    Cache<Key, Val, We, B>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
     /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
@@ -177,13 +169,9 @@ impl<
 
     #[allow(clippy::type_complexity)]
     #[inline]
-    fn shard_for<Q: ?Sized>(
-        &self,
-        key: &Q,
-    ) -> Option<(&RwLock<CacheShard<Key, Val, We, B>>, u64)>
+    fn shard_for<Q: ?Sized>(&self, key: &Q) -> Option<(&RwLock<CacheShard<Key, Val, We, B>>, u64)>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         let mut hasher = self.hash_builder.build_hasher();
         key.hash(&mut hasher);
@@ -209,8 +197,7 @@ impl<
     /// Fetches an item from the cache whose key is `key`.
     pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<Val>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         let (shard, hash) = self.shard_for(key)?;
         shard.read().get(hash, key).cloned()
@@ -220,8 +207,7 @@ impl<
     /// Contrary to gets, peeks don't alter the key "hotness".
     pub fn peek<Q: ?Sized>(&self, key: &Q) -> Option<Val>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         let (shard, hash) = self.shard_for(key)?;
         shard.read().peek(hash, key).cloned()
@@ -231,8 +217,7 @@ impl<
     /// Returns whether an entry was removed.
     pub fn remove<Q: ?Sized>(&self, key: &Q) -> bool
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         if let Some((shard, hash)) = self.shard_for(key) {
             // Any evictions will be dropped outside of the lock
@@ -260,12 +245,10 @@ impl<
     pub fn get_value_or_guard<'a>(
         &'a self,
         key: &Key,
-
         timeout: Option<Duration>,
     ) -> GuardResult<'a, Key, Val, We, B>
     where
         Key: Clone,
-
     {
         let (shard, hash) = self.shard_for(key).unwrap();
         if let Some(v) = shard.read().get(hash, key) {
@@ -278,12 +261,10 @@ impl<
     pub fn get_or_insert_with<E>(
         &self,
         key: &Key,
-
         with: impl FnOnce() -> Result<Val, E>,
     ) -> Result<Val, E>
     where
         Key: Clone,
-
     {
         match self.get_value_or_guard(key, None) {
             GuardResult::Value(v) => Ok(v),
@@ -320,12 +301,10 @@ impl<
     pub async fn get_or_insert_async<'a, E>(
         &self,
         key: &Key,
-
         with: impl Future<Output = Result<Val, E>>,
     ) -> Result<Val, E>
     where
         Key: Clone,
-
     {
         match self.get_value_or_guard_async(key).await {
             Ok(v) => Ok(v),
@@ -343,7 +322,6 @@ impl<Key, Val, We, B> std::fmt::Debug for Cache<Key, Val, We, B> {
         f.debug_struct("Cache").finish_non_exhaustive()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

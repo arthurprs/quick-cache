@@ -17,6 +17,7 @@ default = ["ahash", "parking_lot"]
 
 [dependencies]
 ahash = { optional = true, version = "0.8" }
+equivalent = "1.0.1"
 hashbrown = { version = "0.13", default-features = false, features = ["raw", "inline-more"] }
 parking_lot = { optional = true, version = "0.12" }
 

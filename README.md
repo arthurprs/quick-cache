@@ -58,15 +58,39 @@ fn main() {
 Using the `Equivalent`` trait for complex keys
 
 ```rust
-use quick_cache::sync::Cache;
+use std::hash::Hash;
+use quick_cache::{Equivalent, sync::Cache};
+
+#[derive(Debug, Hash)]
+pub struct Pair<A, B>(pub A, pub B);
+
+impl<A, B, C, D> PartialEq<(A, B)> for Pair<C, D>
+where
+    C: PartialEq<A>,
+    D: PartialEq<B>,
+{
+    fn eq(&self, rhs: &(A, B)) -> bool {
+        self.0 == rhs.0 && self.1 == rhs.1
+    }
+}
+
+impl<A, B, X> Equivalent<X> for Pair<A, B>
+where
+    Pair<A, B>: PartialEq<X>,
+    A: Hash + Eq,
+    B: Hash + Eq,
+{
+    fn equivalent(&self, other: &X) -> bool {
+        *self == *other
+    }
+}
 
 fn main() {
     let cache = Cache::new(5);
+    cache.insert(("square".to_string(), 2022), "blue");
     // Normally the cache key would be the tuple (String, u32), which could force
     // the caller to clone/allocate the string in order to form the tuple key.
-    cache.insert("square".to_string(), 2022, "blue");
-    cache.insert("square".to_string(), 2023, "black");
-    assert_eq!(cache.get("square", &2022).unwrap(), "blue");
+    assert_eq!(cache.get(&Pair("square", 2022)).unwrap(), "blue");
 }
 ```
 

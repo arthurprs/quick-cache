@@ -167,13 +167,8 @@ impl<'a, Key, Val, We, B> PlaceholderGuard<'a, Key, Val, We, B> {
     }
 }
 
-impl<
-        'a,
-        Key: Eq + Hash,
-        Val: Clone,
-        We: Weighter<Key, Val>,
-        B: BuildHasher,
-    > PlaceholderGuard<'a, Key, Val, We, B>
+impl<'a, Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val>, B: BuildHasher>
+    PlaceholderGuard<'a, Key, Val, We, B>
 {
     pub fn join(
         shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
@@ -239,13 +234,8 @@ impl<
     }
 }
 
-impl<
-        'a,
-        Key: Eq + Hash,
-        Val: Clone,
-        We: Weighter<Key, Val>,
-        B: BuildHasher,
-    > PlaceholderGuard<'a, Key, Val, We, B>
+impl<'a, Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val>, B: BuildHasher>
+    PlaceholderGuard<'a, Key, Val, We, B>
 {
     pub fn insert(mut self, value: Val) {
         let referenced;
@@ -301,7 +291,6 @@ pub enum JoinFuture<'a, 'b, Key, Val, We, B> {
         shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
         hash: u64,
         key: &'b Key,
-
     },
     Pending {
         shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
@@ -316,13 +305,8 @@ impl<'a, 'b, Key, Val, We, B> JoinFuture<'a, 'b, Key, Val, We, B> {
         shard: &'a RwLock<CacheShard<Key, Val, We, B>>,
         hash: u64,
         key: &'b Key,
-
     ) -> JoinFuture<'a, 'b, Key, Val, We, B> {
-        JoinFuture::Created {
-            shard,
-            hash,
-            key,
-        }
+        JoinFuture::Created { shard, hash, key }
     }
 
     #[cold]
@@ -358,14 +342,8 @@ impl<'a, 'b, Key, Val, We, B> Drop for JoinFuture<'a, 'b, Key, Val, We, B> {
     }
 }
 
-impl<
-        'a,
-        'b,
-        Key: Eq + Hash + Clone,
-        Val: Clone,
-        We: Weighter<Key, Val>,
-        B: BuildHasher,
-    > Future for JoinFuture<'a, 'b, Key, Val, We, B>
+impl<'a, 'b, Key: Eq + Hash + Clone, Val: Clone, We: Weighter<Key, Val>, B: BuildHasher> Future
+    for JoinFuture<'a, 'b, Key, Val, We, B>
 {
     type Output = Result<Val, PlaceholderGuard<'a, Key, Val, We, B>>;
 
@@ -374,14 +352,9 @@ impl<
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Self::Output> {
         let shard_guard = match &*self {
-            JoinFuture::Created {
-                shard,
-                hash,
-                key,
-            } => {
+            JoinFuture::Created { shard, hash, key } => {
                 let mut shard_guard = shard.write();
-                match shard_guard.get_value_or_placeholder(*hash, Key::clone(key))
-                {
+                match shard_guard.get_value_or_placeholder(*hash, Key::clone(key)) {
                     Ok(v) => {
                         *self = Self::Done;
                         return Poll::Ready(Ok(v));

@@ -15,7 +15,10 @@
 //!
 //! # Equivalent keys
 //!
-//! TODO
+//! The cache uses the [`Equivalent`](https://docs.rs/equivalent/1.0.1/equivalent/trait.Equivalent.html) trait
+//! for gets/removals. It can helps work around the `Borrow` limitations.
+//! For example, if the cache key is a tuple `(K, Q)`, you wouldn't be access to access such keys without
+//! building a `&(K, Q)` and thus potentially cloning `K` and/or `Q`.
 //!
 //! # User defined weight
 //!
@@ -56,6 +59,7 @@ mod shard;
 pub mod sync;
 /// Non-concurrent cache variants.
 pub mod unsync;
+pub use equivalent::Equivalent;
 
 pub use options::{Options, OptionsBuilder};
 pub use placeholder::{GuardResult, PlaceholderGuard};
@@ -109,6 +113,7 @@ impl<Key, Val> Weighter<Key, Val> for UnitWeighter {
 #[cfg(test)]
 mod tests {
     use std::{
+        hash::Hash,
         sync::{atomic::AtomicUsize, Arc},
         time::Duration,
     };
@@ -147,21 +152,45 @@ mod tests {
         assert_eq!(cache.get(&1000).unwrap(), "1000");
     }
 
-    // #[test]
-    // fn test_equivalent() {
-    //     let mut cache = unsync::Cache::new(5);
-    //     cache.insert("square".to_string(), 2022, "blue".to_string());
-    //     cache.insert("square".to_string(), 2023, "black".to_string());
-    //     assert_eq!(cache.get("square", &2022).unwrap(), "blue");
-    // }
+    #[derive(Debug, Hash)]
+    pub struct Pair<A, B>(pub A, pub B);
 
-    // #[test]
-    // fn test_borrow_keys() {
-    //     let cache = sync::Cache::<Vec<u8>, Vec<u8>, u64>::new(0);
-    //     cache.get(&b""[..], &b""[..]);
-    //     let cache = sync::Cache::<(String, String), u64>::new(0);
-    //     cache.get(("", ""));
-    // }
+    impl<A, B, C, D> PartialEq<(A, B)> for Pair<C, D>
+    where
+        C: PartialEq<A>,
+        D: PartialEq<B>,
+    {
+        fn eq(&self, rhs: &(A, B)) -> bool {
+            self.0 == rhs.0 && self.1 == rhs.1
+        }
+    }
+
+    impl<A, B, X> Equivalent<X> for Pair<A, B>
+    where
+        Pair<A, B>: PartialEq<X>,
+        A: Hash + Eq,
+        B: Hash + Eq,
+    {
+        fn equivalent(&self, other: &X) -> bool {
+            *self == *other
+        }
+    }
+
+    #[test]
+    fn test_equivalent() {
+        let mut cache = unsync::Cache::new(5);
+        cache.insert(("square".to_string(), 2022), "blue".to_string());
+        cache.insert(("square".to_string(), 2023), "black".to_string());
+        assert_eq!(cache.get(&Pair("square", 2022)).unwrap(), "blue");
+    }
+
+    #[test]
+    fn test_borrow_keys() {
+        let cache = sync::Cache::<(Vec<u8>, Vec<u8>), u64>::new(0);
+        cache.get(&Pair(&b""[..], &b""[..]));
+        let cache = sync::Cache::<(String, String), u64>::new(0);
+        cache.get(&Pair("", ""));
+    }
 
     #[test]
     fn test_get_or_insert() {
@@ -208,7 +237,8 @@ mod tests {
                     s.spawn(|| {
                         wg.wait();
                         loop {
-                            match cache.get_value_or_guard(&(1, 1), Some(Duration::from_millis(1))) {
+                            match cache.get_value_or_guard(&(1, 1), Some(Duration::from_millis(1)))
+                            {
                                 GuardResult::Value(v) => assert_eq!(v, 1),
                                 GuardResult::Guard(g) => {
                                     let before =

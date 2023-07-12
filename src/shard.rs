@@ -1,5 +1,4 @@
 use std::{
-    borrow::Borrow,
     hash::{BuildHasher, Hash, Hasher},
     mem,
     sync::{
@@ -13,6 +12,7 @@ use hashbrown::raw::RawTable;
 use crate::{
     linked_slab::{LinkedSlab, Token},
     placeholder::{new_shared_placeholder, SharedPlaceholder},
+    Equivalent,
 };
 
 /// Superset of Weighter (weights 1u32..=u32::MAX) that returns the same weight as u64.
@@ -234,8 +234,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
     #[inline]
     fn hash_static<Q: ?Sized>(hasher: &B, key: &Q) -> u64
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         let mut hasher = hasher.build_hasher();
         key.hash(&mut hasher);
@@ -245,8 +244,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
     #[inline]
     pub fn hash<Q: ?Sized>(&self, key: &Q) -> u64
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         Self::hash_static(&self.hash_builder, key)
     }
@@ -254,8 +252,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
     #[inline]
     fn search<Q: ?Sized>(&self, hash: u64, k: &Q) -> Option<Token>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         // Safety for `RawTable::iter_hash` and `Bucket::as_ref`:
         // * Their outputs do not outlive their HashBrown:
@@ -271,7 +268,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
                 match entry {
                     Entry::Resident(Resident { key, .. })
                     | Entry::Placeholder(Placeholder { key, .. })
-                        if key.borrow() == k =>
+                        if k.equivalent(key) =>
                     {
                         return Some(idx);
                     }
@@ -288,21 +285,19 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
     #[inline]
     fn search_resident<Q: ?Sized>(&self, hash: u64, k: &Q) -> Option<Token>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         self.map
             .get(hash, |&idx| {
                 let (entry, _) = self.entries.get(idx).unwrap();
-                matches!(entry, Entry::Resident(Resident { key,.. }) if key.borrow() == k )
+                matches!(entry, Entry::Resident(Resident { key,.. }) if k.equivalent(key) )
             })
             .copied()
     }
 
     pub fn get<Q: ?Sized>(&self, hash: u64, key: &Q) -> Option<&Val>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         if let Some(idx) = self.search_resident(hash, key) {
             let Some((Entry::Resident(resident), _)) = self.entries.get(idx) else { unreachable!() };
@@ -316,8 +311,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
 
     pub fn get_mut<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<&mut Val>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         if let Some(idx) = self.search_resident(hash, key) {
             let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else { unreachable!() };
@@ -331,8 +325,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
 
     pub fn peek<Q: ?Sized>(&self, hash: u64, key: &Q) -> Option<&Val>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         let idx = self.search_resident(hash, key)?;
         let Some((Entry::Resident(resident), _)) = self.entries.get(idx) else { unreachable!() };
@@ -341,8 +334,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
 
     pub fn peek_mut<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<&mut Val>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         let idx = self.search_resident(hash, key)?;
         let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else { unreachable!() };
@@ -351,8 +343,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
 
     pub fn remove<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<Entry<Key, Val>>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         let idx = self.search(hash, key)?;
         self.map_remove(hash, idx);
@@ -380,7 +371,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
                 &mut self.ghost_head
             }
             Entry::Placeholder(_) => {
-                // TODO: this is probably undesirable as it could leak to two placeholders for the same key.
+                // TODO: this is probably undesirable as it could lead to two placeholders for the same key.
                 return Some(entry);
             }
         };
@@ -513,7 +504,6 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
         &mut self,
         idx: Token,
         key: Key,
-
         value: Val,
         weight: u64,
     ) -> Entry<Key, Val> {
@@ -645,7 +635,6 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
         };
         *entry = Entry::Resident(Resident {
             key,
-
             value,
             state,
             referenced: referenced.into(),
@@ -707,7 +696,6 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
         let idx = self.entries.insert(
             Entry::Resident(Resident {
                 key,
-
                 value,
                 state,
                 referenced: Default::default(),
@@ -747,7 +735,6 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
                     let shared = new_shared_placeholder(hash, idx);
                     *entry = Entry::Placeholder(Placeholder {
                         key,
-
                         hot: true,
                         shared: shared.clone(),
                     });
@@ -765,7 +752,6 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
             let idx_ = self.entries.insert(
                 Entry::Placeholder(Placeholder {
                     key,
-
                     hot: false,
                     shared: shared.clone(),
                 }),

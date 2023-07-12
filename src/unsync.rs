@@ -1,12 +1,9 @@
 use crate::{
     options::*,
-    shard::{Entry, CacheShard},
-    DefaultHashBuilder, UnitWeighter, Weighter,
+    shard::{CacheShard, Entry},
+    DefaultHashBuilder, Equivalent, UnitWeighter, Weighter,
 };
-use std::{
-    borrow::Borrow,
-    hash::{BuildHasher, Hash},
-};
+use std::hash::{BuildHasher, Hash};
 
 pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder> {
     shard: CacheShard<Key, Val, We, B>,
@@ -126,52 +123,42 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher> Cache<Key, Val
     }
 
     /// Fetches an item from the cache. Callers should prefer `get_mut` whenever possible as it's more efficient.
-    pub fn get<Q: ?Sized, W: ?Sized>(&self, key: &Q) -> Option<&Val>
+    pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<&Val>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
-        W: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         self.shard.get(self.shard.hash(key), key)
     }
 
     /// Fetches an item from the cache.
-    pub fn get_mut<Q: ?Sized, W: ?Sized>(&mut self, key: &Q) -> Option<&mut Val>
+    pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&mut Val>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
-        W: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         self.shard.get_mut(self.shard.hash(key), key)
     }
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
-    pub fn peek<Q: ?Sized, W: ?Sized>(&self, key: &Q) -> Option<&Val>
+    pub fn peek<Q: ?Sized>(&self, key: &Q) -> Option<&Val>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
-        W: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         self.shard.peek(self.shard.hash(key), key)
     }
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
-    pub fn peek_mut<Q: ?Sized, W: ?Sized>(&mut self, key: &Q) -> Option<&mut Val>
+    pub fn peek_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&mut Val>
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
-        W: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         self.shard.peek_mut(self.shard.hash(key), key)
     }
 
     /// Remove an item from the cache whose key is `key`.
     /// Returns whether an entry was removed.
-    pub fn remove<Q: ?Sized, W: ?Sized>(&mut self, key: &Q) -> bool
+    pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> bool
     where
-        Key: Borrow<Q>,
-        Q: Hash + Eq,
-        W: Hash + Eq,
+        Q: Hash + Equivalent<Key>,
     {
         matches!(
             self.shard.remove(self.shard.hash(key), key),
