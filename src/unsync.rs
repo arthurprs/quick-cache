@@ -1,6 +1,6 @@
 use crate::{
     options::*,
-    shard::{CacheShard, Entry},
+    shard::{CacheShard, Entry, InsertStrategy},
     DefaultHashBuilder, Equivalent, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
@@ -166,9 +166,27 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher> Cache<Key, Val
         )
     }
 
+    /// Replaces an item in the cache, but only if it already exists.
+    /// If `soft` is set, the replace operation won't affect the "hotness" of the key,
+    /// even if the value is replaced.
+    ///
+    /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
+    pub fn replace(&mut self, key: Key, value: Val, soft: bool) -> Result<(), (Key, Val)> {
+        self.shard
+            .insert(
+                self.shard.hash(&key),
+                key,
+                value,
+                InsertStrategy::Replace { soft },
+            )
+            .map(|_| ())
+    }
+
     /// Inserts an item in the cache with key `key`.
     pub fn insert(&mut self, key: Key, value: Val) {
-        self.shard.insert(self.shard.hash(&key), key, value);
+        let _ = self
+            .shard
+            .insert(self.shard.hash(&key), key, value, InsertStrategy::Insert);
     }
 }
 

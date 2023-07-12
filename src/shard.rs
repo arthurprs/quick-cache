@@ -31,6 +31,11 @@ where
     }
 }
 
+pub enum InsertStrategy {
+    Insert,
+    Replace { soft: bool },
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ResidentState {
     Hot,
@@ -506,7 +511,8 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
         key: Key,
         value: Val,
         weight: u64,
-    ) -> Entry<Key, Val> {
+        strategy: InsertStrategy,
+    ) -> Result<Entry<Key, Val>, (Key, Val)> {
         let (entry, _) = self.entries.get_mut(idx).unwrap();
         let mut evicted;
         match entry {
@@ -519,13 +525,21 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
                     self.weight_cold -= evicted_weight;
                     self.weight_cold += weight;
                 }
+                // re-insert counts as a hit unless it's a soft replace
+                let referenced = *resident.referenced.get_mut()
+                    || !matches!(strategy, InsertStrategy::Replace { soft: true });
                 let new_resident = Resident {
                     key,
                     value,
                     state: resident.state,
-                    referenced: AtomicBool::new(true), // re-insert counts as a hit
+                    referenced: AtomicBool::new(referenced),
                 };
                 evicted = Entry::Resident(mem::replace(resident, new_resident));
+            }
+            Entry::Placeholder(..) | Entry::Ghost(..)
+                if matches!(strategy, InsertStrategy::Replace { .. }) =>
+            {
+                return Err((key, value));
             }
             Entry::Placeholder(..) | Entry::Ghost(..) => {
                 evicted = mem::replace(
@@ -558,7 +572,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
         while self.weight_hot + self.weight_cold > self.weight_capacity {
             evicted = Entry::Resident(self.advance_cold());
         }
-        evicted
+        Ok(evicted)
     }
 
     #[inline]
@@ -657,15 +671,25 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
         Ok(evicted)
     }
 
-    pub fn insert(&mut self, hash: u64, key: Key, value: Val) -> Option<Entry<Key, Val>> {
+    pub fn insert(
+        &mut self,
+        hash: u64,
+        key: Key,
+        value: Val,
+        strategy: InsertStrategy,
+    ) -> Result<Option<Entry<Key, Val>>, (Key, Val)> {
         let weight = self.weighter.weight(&key, &value);
         if weight > self.weight_capacity {
             // don't admit if it won't fit within the budget
-            return None;
+            return Err((key, value));
         }
 
         if let Some(idx) = self.search(hash, &key) {
-            return Some(self.insert_existing(idx, key, value, weight));
+            return self
+                .insert_existing(idx, key, value, weight, strategy)
+                .map(Some);
+        } else if matches!(strategy, InsertStrategy::Replace { .. }) {
+            return Err((key, value));
         }
 
         let mut evicted;
@@ -707,7 +731,7 @@ impl<Key: Eq + Hash, Val, We: InternalWeighter<Key, Val>, B: BuildHasher>
         }
         // insert the new key in the map
         self.map_insert(hash, idx);
-        evicted
+        Ok(evicted)
     }
 
     pub fn get_value_or_placeholder(

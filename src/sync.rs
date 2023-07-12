@@ -2,7 +2,7 @@ use crate::{
     options::{Options, OptionsBuilder},
     placeholder::{GuardResult, JoinFuture, PlaceholderGuard},
     rw_lock::RwLock,
-    shard::{CacheShard, Entry},
+    shard::{CacheShard, Entry, InsertStrategy},
     DefaultHashBuilder, Equivalent, UnitWeighter, Weighter,
 };
 use std::{
@@ -219,21 +219,33 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
     where
         Q: Hash + Equivalent<Key>,
     {
-        if let Some((shard, hash)) = self.shard_for(key) {
-            // Any evictions will be dropped outside of the lock
-            let evicted = shard.write().remove(hash, key);
-            matches!(evicted, Some(Entry::Resident(_)))
-        } else {
-            false
-        }
+        let (shard, hash) = self.shard_for(key).unwrap();
+        // Any evictions will be dropped outside of the lock
+        let evicted = shard.write().remove(hash, key);
+        matches!(evicted, Some(Entry::Resident(_)))
+    }
+
+    /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists.
+    /// If `soft` is set, the replace operation won't affect the "hotness" of the entry,
+    /// even if the value is replaced.
+    ///
+    /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
+    pub fn replace(&self, key: Key, value: Val, soft: bool) -> Result<(), (Key, Val)> {
+        let (shard, hash) = self.shard_for(&key).unwrap();
+        let result = shard
+            .write()
+            .insert(hash, key, value, InsertStrategy::Replace { soft });
+        // Any evictions will be dropped outside of the lock
+        result.map(|_| ())
     }
 
     /// Inserts an item in the cache with key `key` .
     pub fn insert(&self, key: Key, value: Val) {
-        if let Some((shard, hash)) = self.shard_for(&key) {
-            // Any evictions will be dropped outside of the lock
-            let _evicted = shard.write().insert(hash, key, value);
-        }
+        let (shard, hash) = self.shard_for(&key).unwrap();
+        // Any evictions will be dropped outside of the lock
+        let _evicted = shard
+            .write()
+            .insert(hash, key, value, InsertStrategy::Insert);
     }
 
     /// Gets an item from the cache with key `key` .
