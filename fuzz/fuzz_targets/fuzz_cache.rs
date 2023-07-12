@@ -31,8 +31,8 @@ fuzz_target!(|ops: Vec<u16>| {
         .unwrap();
     let cache = Cache::with_options(options, MyWeighter, DefaultHashBuilder::default());
     for op in &ops {
-        if cache.get(op, op).is_none() {
-            cache.insert(*op, *op, ());
+        if cache.get(op).is_none() {
+            cache.insert(*op, ());
             cache.validate();
         }
     }
