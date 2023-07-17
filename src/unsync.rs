@@ -1,7 +1,7 @@
 use crate::{
     options::*,
     shard::{CacheShard, InsertStrategy},
-    DefaultHashBuilder, DefaultUnsyncLifecycle, Equivalent, Lifecycle, UnitWeighter, Weighter,
+    DefaultHashBuilder, Equivalent, Lifecycle, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
 
@@ -10,7 +10,7 @@ pub struct Cache<
     Val,
     We = UnitWeighter,
     B = DefaultHashBuilder,
-    L = DefaultUnsyncLifecycle<Key, Val>,
+    L = DefaultLifecycle<Key, Val>,
 > {
     shard: CacheShard<Key, Val, We, B, L>,
 }
@@ -74,7 +74,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// # Example
     ///
     /// ```rust
-    /// use quick_cache::{unsync::Cache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
+    /// use quick_cache::{unsync::{Cache, DefaultLifecycle}, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
     ///
     /// Cache::<(String, u64), String>::with_options(
     ///   OptionsBuilder::new()
@@ -84,6 +84,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     ///     .unwrap(),
     ///     UnitWeighter,
     ///     DefaultHashBuilder::default(),
+    ///     DefaultLifecycle::default(),
     /// );
     /// ```
     pub fn with_options(options: Options, weighter: We, hash_builder: B, lifecycle: L) -> Self {
@@ -218,4 +219,37 @@ impl<Key, Val, We, B, L> std::fmt::Debug for Cache<Key, Val, We, B, L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cache").finish_non_exhaustive()
     }
+}
+
+/// Default `Lifecycle` for the unsync cache.
+pub struct DefaultLifecycle<Key, Val>(std::marker::PhantomData<(Key, Val)>);
+
+impl<Key, Val> std::fmt::Debug for DefaultLifecycle<Key, Val> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DefaultLifecycle").finish()
+    }
+}
+
+impl<Key, Val> Default for DefaultLifecycle<Key, Val> {
+    #[inline]
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<Key, Val> Clone for DefaultLifecycle<Key, Val> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
+    type RequestState = ();
+
+    #[inline]
+    fn begin_request(&self) -> Self::RequestState {}
+
+    #[inline]
+    fn on_evict(&self, _state: &mut Self::RequestState, _key: Key, _val: Val) {}
 }

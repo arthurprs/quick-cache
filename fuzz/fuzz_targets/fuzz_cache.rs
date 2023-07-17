@@ -1,7 +1,8 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use quick_cache::{
-    sync::Cache, DefaultHashBuilder, DefaultSyncLifecycle, OptionsBuilder, Weighter,
+    sync::{Cache, DefaultLifecycle},
+    DefaultHashBuilder, OptionsBuilder, Weighter,
 };
 use std::num::NonZeroU32;
 
@@ -35,7 +36,7 @@ fuzz_target!(|ops: Vec<u16>| {
         options,
         MyWeighter,
         DefaultHashBuilder::default(),
-        DefaultSyncLifecycle::default(),
+        DefaultLifecycle::default(),
     );
     for op in &ops {
         if cache.get(op).is_none() {

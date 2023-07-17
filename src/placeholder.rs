@@ -19,6 +19,8 @@ use crate::{
 
 pub type SharedPlaceholder<Val> = Arc<Placeholder<Val>>;
 
+#[allow(unknown_lints)] // arc_with_non_send_sync only present in 1.72 onwards
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn new_shared_placeholder<Val>(hash: u64, idx: Token) -> SharedPlaceholder<Val> {
     Arc::new(Placeholder {
         hash,

@@ -16,7 +16,7 @@ pub struct Options {
 /// # Example
 ///
 /// ```rust
-/// use quick_cache::{sync::Cache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
+/// use quick_cache::{sync::{Cache, DefaultLifecycle}, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
 ///
 /// Cache::<String, String>::with_options(
 ///   OptionsBuilder::new()
@@ -26,6 +26,7 @@ pub struct Options {
 ///     .unwrap(),
 ///     UnitWeighter,
 ///     DefaultHashBuilder::default(),
+///     DefaultLifecycle::default(),
 /// );
 /// ```
 #[derive(Debug, Clone, Default)]

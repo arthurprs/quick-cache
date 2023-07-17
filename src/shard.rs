@@ -535,6 +535,7 @@ impl<
         self.ghost_head = next;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_existing(
         &mut self,
         lcs: &mut L::RequestState,
