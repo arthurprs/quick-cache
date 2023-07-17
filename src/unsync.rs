@@ -1,27 +1,34 @@
 use crate::{
     options::*,
-    shard::{CacheShard, Entry, InsertStrategy},
-    DefaultHashBuilder, Equivalent, UnitWeighter, Weighter,
+    shard::{CacheShard, InsertStrategy},
+    DefaultHashBuilder, DefaultUnsyncLifecycle, Equivalent, Lifecycle, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
 
-pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder> {
-    shard: CacheShard<Key, Val, We, B>,
+pub struct Cache<
+    Key,
+    Val,
+    We = UnitWeighter,
+    B = DefaultHashBuilder,
+    L = DefaultUnsyncLifecycle<Key, Val>,
+> {
+    shard: CacheShard<Key, Val, We, B, L>,
 }
 
-impl<Key: Eq + Hash, Val> Cache<Key, Val, UnitWeighter, DefaultHashBuilder> {
+impl<Key: Eq + Hash, Val> Cache<Key, Val> {
     /// Creates a new cache with holds up to `items_capacity` items (approximately).
     pub fn new(items_capacity: usize) -> Self {
         Self::with(
             items_capacity,
             items_capacity as u64,
-            UnitWeighter,
-            DefaultHashBuilder::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
         )
     }
 }
 
-impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>> Cache<Key, Val, We, DefaultHashBuilder> {
+impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>> Cache<Key, Val, We> {
     pub fn with_weighter(
         estimated_items_capacity: usize,
         weight_capacity: u64,
@@ -31,12 +38,15 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>> Cache<Key, Val, We, DefaultHas
             estimated_items_capacity,
             weight_capacity,
             weighter,
-            DefaultHashBuilder::default(),
+            Default::default(),
+            Default::default(),
         )
     }
 }
 
-impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher> Cache<Key, Val, We, B> {
+impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<Key, Val>>
+    Cache<Key, Val, We, B, L>
+{
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
     /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
     /// roughly equivalent to `weight_capacity / average item weight`.
@@ -45,6 +55,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher> Cache<Key, Val
         weight_capacity: u64,
         weighter: We,
         hash_builder: B,
+        lifecycle: L,
     ) -> Self {
         Self::with_options(
             OptionsBuilder::new()
@@ -54,6 +65,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher> Cache<Key, Val
                 .unwrap(),
             weighter,
             hash_builder,
+            lifecycle,
         )
     }
 
@@ -74,7 +86,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher> Cache<Key, Val
     ///     DefaultHashBuilder::default(),
     /// );
     /// ```
-    pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
+    pub fn with_options(options: Options, weighter: We, hash_builder: B, lifecycle: L) -> Self {
         let shard = CacheShard::new(
             options.hot_allocation,
             options.ghost_allocation,
@@ -82,6 +94,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher> Cache<Key, Val
             options.weight_capacity,
             weighter,
             hash_builder,
+            lifecycle,
         );
         Self { shard }
     }
@@ -160,10 +173,10 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher> Cache<Key, Val
     where
         Q: Hash + Equivalent<Key>,
     {
-        matches!(
-            self.shard.remove(self.shard.hash(key), key),
-            Some(Entry::Resident(_))
-        )
+        let mut lcs = self.shard.lifecycle.begin_request();
+        let removed = self.shard.remove(&mut lcs, self.shard.hash(key), key);
+        self.shard.lifecycle.end_request(lcs);
+        removed
     }
 
     /// Replaces an item in the cache, but only if it already exists.
@@ -172,25 +185,36 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher> Cache<Key, Val
     ///
     /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
     pub fn replace(&mut self, key: Key, value: Val, soft: bool) -> Result<(), (Key, Val)> {
-        self.shard
+        let mut lcs = self.shard.lifecycle.begin_request();
+        let result = self
+            .shard
             .insert(
+                &mut lcs,
                 self.shard.hash(&key),
                 key,
                 value,
                 InsertStrategy::Replace { soft },
             )
-            .map(|_| ())
+            .map(|_| ());
+        self.shard.lifecycle.end_request(lcs);
+        result
     }
 
     /// Inserts an item in the cache with key `key`.
     pub fn insert(&mut self, key: Key, value: Val) {
-        let _ = self
-            .shard
-            .insert(self.shard.hash(&key), key, value, InsertStrategy::Insert);
+        let mut lcs = self.shard.lifecycle.begin_request();
+        let _ = self.shard.insert(
+            &mut lcs,
+            self.shard.hash(&key),
+            key,
+            value,
+            InsertStrategy::Insert,
+        );
+        self.shard.lifecycle.end_request(lcs);
     }
 }
 
-impl<Key, Val, We, B> std::fmt::Debug for Cache<Key, Val, We, B> {
+impl<Key, Val, We, B, L> std::fmt::Debug for Cache<Key, Val, We, B, L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cache").finish_non_exhaustive()
     }

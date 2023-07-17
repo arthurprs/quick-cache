@@ -100,13 +100,108 @@ pub trait Weighter<Key, Val> {
 }
 
 /// Each cache entry weights exactly `1` unit of weight.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UnitWeighter;
 
 impl<Key, Val> Weighter<Key, Val> for UnitWeighter {
     #[inline]
     fn weight(&self, _key: &Key, _val: &Val) -> NonZeroU32 {
         NonZeroU32::new(1).unwrap()
+    }
+}
+
+/// Hooks into the lifetime of the cache items.
+///
+/// The functions should be small and very fast, otherwise the cache performance might be negatively affected.
+pub trait Lifecycle<Key, Val> {
+    type RequestState;
+
+    /// Called before the request starts, e.g.: remove, insert.
+    fn begin_request(&self) -> Self::RequestState;
+
+    /// Called when a cache item changes hotness (including when it enters the cache).
+    #[allow(unused_variables)]
+    #[inline]
+    fn on_change_state(&self, state: &mut Self::RequestState, key: &Key, val: &Val, hot: bool) {}
+
+    /// Called when an item is evicted.
+    fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val);
+
+    /// Called after a request finishes, e.g.: remove, insert.
+    #[allow(unused_variables)]
+    #[inline]
+    fn end_request(&self, state: Self::RequestState) {}
+}
+
+/// Default `Lifecycle` for the unsync cache.
+pub struct DefaultUnsyncLifecycle<Key, Val>(std::marker::PhantomData<(Key, Val)>);
+
+impl<Key, Val> std::fmt::Debug for DefaultUnsyncLifecycle<Key, Val> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DefaultUnsyncLifecycle").finish()
+    }
+}
+
+impl<Key, Val> Default for DefaultUnsyncLifecycle<Key, Val> {
+    #[inline]
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<Key, Val> Clone for DefaultUnsyncLifecycle<Key, Val> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<Key, Val> Lifecycle<Key, Val> for DefaultUnsyncLifecycle<Key, Val> {
+    type RequestState = ();
+
+    #[inline]
+    fn begin_request(&self) -> Self::RequestState {}
+
+    #[inline]
+    fn on_evict(&self, _state: &mut Self::RequestState, _key: Key, _val: Val) {}
+}
+
+/// Default `Lifecycle` for the sync cache.
+///
+/// Temporally stashes one evicted item for dropping outside the cache locks.
+pub struct DefaultSyncLifecycle<Key, Val>(std::marker::PhantomData<(Key, Val)>);
+
+impl<Key, Val> std::fmt::Debug for DefaultSyncLifecycle<Key, Val> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DefaultSyncLifecycle").finish()
+    }
+}
+
+impl<Key, Val> Default for DefaultSyncLifecycle<Key, Val> {
+    #[inline]
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<Key, Val> Clone for DefaultSyncLifecycle<Key, Val> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<Key, Val> Lifecycle<Key, Val> for DefaultSyncLifecycle<Key, Val> {
+    type RequestState = Option<(Key, Val)>;
+
+    #[inline]
+    fn begin_request(&self) -> Self::RequestState {
+        None
+    }
+
+    #[inline]
+    fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val) {
+        *state = Some((key, val));
     }
 }
 

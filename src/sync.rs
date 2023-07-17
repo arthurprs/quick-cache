@@ -2,8 +2,8 @@ use crate::{
     options::{Options, OptionsBuilder},
     placeholder::{GuardResult, JoinFuture, PlaceholderGuard},
     rw_lock::RwLock,
-    shard::{CacheShard, Entry, InsertStrategy},
-    DefaultHashBuilder, Equivalent, UnitWeighter, Weighter,
+    shard::{CacheShard, InsertStrategy},
+    DefaultHashBuilder, DefaultSyncLifecycle, Equivalent, Lifecycle, UnitWeighter, Weighter,
 };
 use std::{
     future::Future,
@@ -21,28 +21,34 @@ use std::{
 /// # Thread Safety and Concurrency
 /// The cache instance can wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
-pub struct Cache<Key, Val, We = UnitWeighter, B = DefaultHashBuilder> {
+pub struct Cache<
+    Key,
+    Val,
+    We = UnitWeighter,
+    B = DefaultHashBuilder,
+    L = DefaultSyncLifecycle<Key, Val>,
+> {
     hash_builder: B,
     #[allow(clippy::type_complexity)]
-    shards: Box<[RwLock<CacheShard<Key, Val, We, B>>]>,
+    shards: Box<[RwLock<CacheShard<Key, Val, We, B, L>>]>,
     shards_mask: u64,
+    lifecycle: L,
 }
 
-impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val, UnitWeighter, DefaultHashBuilder> {
+impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val> {
     /// Creates a new cache with holds up to `items_capacity` items (approximately).
     pub fn new(items_capacity: usize) -> Self {
         Self::with(
             items_capacity,
             items_capacity as u64,
-            UnitWeighter,
-            DefaultHashBuilder::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
         )
     }
 }
 
-impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone>
-    Cache<Key, Val, We, DefaultHashBuilder>
-{
+impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone> Cache<Key, Val, We> {
     pub fn with_weighter(
         estimated_items_capacity: usize,
         weight_capacity: u64,
@@ -52,13 +58,19 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone>
             estimated_items_capacity,
             weight_capacity,
             weighter,
-            DefaultHashBuilder::default(),
+            Default::default(),
+            Default::default(),
         )
     }
 }
 
-impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher + Clone>
-    Cache<Key, Val, We, B>
+impl<
+        Key: Eq + Hash,
+        Val: Clone,
+        We: Weighter<Key, Val> + Clone,
+        B: BuildHasher + Clone,
+        L: Lifecycle<Key, Val> + Clone,
+    > Cache<Key, Val, We, B, L>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
     /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
@@ -68,6 +80,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
         weight_capacity: u64,
         weighter: We,
         hash_builder: B,
+        lifecycle: L,
     ) -> Self {
         Self::with_options(
             OptionsBuilder::new()
@@ -77,6 +90,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
                 .unwrap(),
             weighter,
             hash_builder,
+            lifecycle,
         )
     }
 
@@ -85,7 +99,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
     /// # Example
     ///
     /// ```rust
-    /// use quick_cache::{sync::Cache, OptionsBuilder, UnitWeighter, DefaultHashBuilder};
+    /// use quick_cache::{sync::Cache, OptionsBuilder, UnitWeighter, DefaultHashBuilder, DefaultSyncLifecycle};
     ///
     /// Cache::<(String, u64), String>::with_options(
     ///   OptionsBuilder::new()
@@ -95,9 +109,10 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
     ///     .unwrap(),
     ///     UnitWeighter,
     ///     DefaultHashBuilder::default(),
+    ///     DefaultSyncLifecycle::default(),
     /// );
     /// ```
-    pub fn with_options(options: Options, weighter: We, hash_builder: B) -> Self {
+    pub fn with_options(options: Options, weighter: We, hash_builder: B, lifecycle: L) -> Self {
         let mut num_shards = options.shards.next_power_of_two() as u64;
         let estimated_items_capacity = options.estimated_items_capacity as u64;
         let weight_capacity = options.weight_capacity;
@@ -120,6 +135,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
                     shard_weight_cap,
                     weighter.clone(),
                     hash_builder.clone(),
+                    lifecycle.clone(),
                 ))
             })
             .collect::<Vec<_>>();
@@ -127,6 +143,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
             shards: shards.into_boxed_slice(),
             hash_builder,
             shards_mask: num_shards - 1,
+            lifecycle,
         }
     }
 
@@ -169,7 +186,10 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
 
     #[allow(clippy::type_complexity)]
     #[inline]
-    fn shard_for<Q: ?Sized>(&self, key: &Q) -> Option<(&RwLock<CacheShard<Key, Val, We, B>>, u64)>
+    fn shard_for<Q: ?Sized>(
+        &self,
+        key: &Q,
+    ) -> Option<(&RwLock<CacheShard<Key, Val, We, B, L>>, u64)>
     where
         Q: Hash + Equivalent<Key>,
     {
@@ -219,10 +239,11 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
     where
         Q: Hash + Equivalent<Key>,
     {
+        let mut lcs = self.lifecycle.begin_request();
         let (shard, hash) = self.shard_for(key).unwrap();
-        // Any evictions will be dropped outside of the lock
-        let evicted = shard.write().remove(hash, key);
-        matches!(evicted, Some(Entry::Resident(_)))
+        let removed = shard.write().remove(&mut lcs, hash, key);
+        self.lifecycle.end_request(lcs);
+        removed
     }
 
     /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists.
@@ -231,21 +252,24 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
     ///
     /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
     pub fn replace(&self, key: Key, value: Val, soft: bool) -> Result<(), (Key, Val)> {
+        let mut lcs = self.lifecycle.begin_request();
         let (shard, hash) = self.shard_for(&key).unwrap();
-        let result = shard
-            .write()
-            .insert(hash, key, value, InsertStrategy::Replace { soft });
-        // Any evictions will be dropped outside of the lock
+        let result =
+            shard
+                .write()
+                .insert(&mut lcs, hash, key, value, InsertStrategy::Replace { soft });
+        self.lifecycle.end_request(lcs);
         result.map(|_| ())
     }
 
     /// Inserts an item in the cache with key `key` .
     pub fn insert(&self, key: Key, value: Val) {
+        let mut lcs = self.lifecycle.begin_request();
         let (shard, hash) = self.shard_for(&key).unwrap();
-        // Any evictions will be dropped outside of the lock
         let _evicted = shard
             .write()
-            .insert(hash, key, value, InsertStrategy::Insert);
+            .insert(&mut lcs, hash, key, value, InsertStrategy::Insert);
+        self.lifecycle.end_request(lcs);
     }
 
     /// Gets an item from the cache with key `key` .
@@ -258,7 +282,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
         &'a self,
         key: &Key,
         timeout: Option<Duration>,
-    ) -> GuardResult<'a, Key, Val, We, B>
+    ) -> GuardResult<'a, Key, Val, We, B, L>
     where
         Key: Clone,
     {
@@ -266,7 +290,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
         if let Some(v) = shard.read().get(hash, key) {
             return GuardResult::Value(v.clone());
         }
-        PlaceholderGuard::join(shard, hash, key.clone(), timeout)
+        PlaceholderGuard::join(&self.lifecycle, shard, hash, key.clone(), timeout)
     }
 
     /// Gets or inserts an item in the cache with key `key` .
@@ -298,7 +322,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
     pub async fn get_value_or_guard_async<'a, 'b>(
         &'a self,
         key: &'b Key,
-    ) -> Result<Val, PlaceholderGuard<'a, Key, Val, We, B>>
+    ) -> Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>
     where
         Key: Clone,
     {
@@ -306,7 +330,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
         if let Some(v) = shard.read().get(hash, key) {
             return Ok(v.clone());
         }
-        JoinFuture::new(shard, hash, key).await
+        JoinFuture::new(&self.lifecycle, shard, hash, key).await
     }
 
     /// Gets or inserts an item in the cache with key `key` .
@@ -329,7 +353,7 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone, B: BuildHasher 
     }
 }
 
-impl<Key, Val, We, B> std::fmt::Debug for Cache<Key, Val, We, B> {
+impl<Key, Val, We, B, L> std::fmt::Debug for Cache<Key, Val, We, B, L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cache").finish_non_exhaustive()
     }

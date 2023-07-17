@@ -1,6 +1,8 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use quick_cache::{sync::Cache, DefaultHashBuilder, OptionsBuilder, Weighter};
+use quick_cache::{
+    sync::Cache, DefaultHashBuilder, DefaultSyncLifecycle, OptionsBuilder, Weighter,
+};
 use std::num::NonZeroU32;
 
 #[derive(Clone)]
@@ -29,7 +31,12 @@ fuzz_target!(|ops: Vec<u16>| {
         .shards(shards)
         .build()
         .unwrap();
-    let cache = Cache::with_options(options, MyWeighter, DefaultHashBuilder::default());
+    let cache = Cache::with_options(
+        options,
+        MyWeighter,
+        DefaultHashBuilder::default(),
+        DefaultSyncLifecycle::default(),
+    );
     for op in &ops {
         if cache.get(op).is_none() {
             cache.insert(*op, ());
