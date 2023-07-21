@@ -127,7 +127,12 @@ pub trait Lifecycle<Key, Val> {
     /// Called when an item is evicted.
     fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val);
 
-    /// Called after a request finishes, e.g.: remove, insert.
+    /// Called after a request finishes, e.g.: insert, replace.
+    ///
+    /// Notes:
+    /// This will _not_ be called when using `_with_lifecycle` apis, which will return the RequestState instead.
+    /// This will _not_ be called if the request errored (e.g. a replace didn't find a value to replace).
+    /// If needed, Drop for RequestState can be used to detect these cases.
     #[allow(unused_variables)]
     #[inline]
     fn end_request(&self, state: Self::RequestState) {}
@@ -267,7 +272,7 @@ mod tests {
                                     let before =
                                         entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     if before == solve_at {
-                                        g.insert(1);
+                                        g.insert(1).unwrap();
                                     }
                                 }
                                 GuardResult::Timeout => continue,
@@ -352,7 +357,7 @@ mod tests {
                                 let before =
                                     entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 if before == solve_at {
-                                    g.insert(1);
+                                    g.insert(1).unwrap();
                                 }
                             }
                             Err(_) => continue,

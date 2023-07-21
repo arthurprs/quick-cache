@@ -362,19 +362,18 @@ impl<
         Some(&mut resident.value)
     }
 
-    pub fn remove<Q: ?Sized>(&mut self, lcs: &mut L::RequestState, hash: u64, key: &Q) -> bool
+    pub fn remove<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<(Key, Val)>
     where
         Q: Hash + Equivalent<Key>,
     {
-        let Some(idx) = self.search(hash, key) else {
-            return false;
-        };
+        let idx = self.search(hash, key)?;
         self.map_remove(hash, idx);
+        let mut result = None;
         let (entry, next) = self.entries.remove(idx).unwrap();
         let list_head = match entry {
             Entry::Resident(r) => {
                 let weight = self.weighter.weight(&r.key, &r.value);
-                self.lifecycle.on_evict(lcs, r.key, r.value);
+                result = Some((r.key, r.value));
                 if r.state == ResidentState::Hot {
                     self.num_hot -= 1;
                     self.weight_hot -= weight;
@@ -396,13 +395,13 @@ impl<
             }
             Entry::Placeholder(_) => {
                 // TODO: this is probably undesirable as it could lead to two placeholders for the same key.
-                return false;
+                return None;
             }
         };
         if *list_head == Some(idx) {
             *list_head = next;
         }
-        true
+        result
     }
 
     /// Advance cold ring, promoting to hot and demoting as needed.
@@ -553,7 +552,9 @@ impl<
             match entry {
                 Entry::Resident(_) => {
                     // but also make sure to remove the existing entry
-                    self.remove(lcs, hash, &key);
+                    if let Some((ek, ev)) = self.remove(hash, &key) {
+                        self.lifecycle.on_evict(lcs, ek, ev);
+                    }
                 }
                 Entry::Placeholder(_) | Entry::Ghost(_) => (),
             }

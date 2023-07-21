@@ -46,7 +46,7 @@ impl<T> LinkedSlab<T> {
         let idx = (token.get() - 1) as usize;
         if idx < self.entries.len() {
             let entry = &mut self.entries[idx];
-            assert!(entry.item.is_none());
+            debug_assert!(entry.item.is_none());
             entry.item = Some(item);
             self.next_free = entry.next;
         } else {

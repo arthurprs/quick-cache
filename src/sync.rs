@@ -234,14 +234,14 @@ impl<
     }
 
     /// Remove an item from the cache whose key is `key`.
-    /// Returns whether an entry was removed.
-    pub fn remove<Q: ?Sized>(&self, key: &Q) -> bool
+    /// Returns the removed entry, if any.
+    pub fn remove<Q: ?Sized>(&self, key: &Q) -> Option<(Key, Val)>
     where
         Q: Hash + Equivalent<Key>,
     {
-        let mut lcs = self.lifecycle.begin_request();
+        let lcs = self.lifecycle.begin_request();
         let (shard, hash) = self.shard_for(key).unwrap();
-        let removed = shard.write().remove(&mut lcs, hash, key);
+        let removed = shard.write().remove(hash, key);
         self.lifecycle.end_request(lcs);
         removed
     }
@@ -252,24 +252,46 @@ impl<
     ///
     /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
     pub fn replace(&self, key: Key, value: Val, soft: bool) -> Result<(), (Key, Val)> {
-        let mut lcs = self.lifecycle.begin_request();
-        let (shard, hash) = self.shard_for(&key).unwrap();
-        let result =
-            shard
-                .write()
-                .insert(&mut lcs, hash, key, value, InsertStrategy::Replace { soft });
+        let lcs = self.replace_with_lifecycle(key, value, soft)?;
         self.lifecycle.end_request(lcs);
-        result.map(|_| ())
+        Ok(())
     }
 
-    /// Inserts an item in the cache with key `key` .
-    pub fn insert(&self, key: Key, value: Val) {
+    /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists.
+    /// If `soft` is set, the replace operation won't affect the "hotness" of the entry,
+    /// even if the value is replaced.
+    ///
+    /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
+    pub fn replace_with_lifecycle(
+        &self,
+        key: Key,
+        value: Val,
+        soft: bool,
+    ) -> Result<L::RequestState, (Key, Val)> {
         let mut lcs = self.lifecycle.begin_request();
         let (shard, hash) = self.shard_for(&key).unwrap();
-        let _evicted = shard
+        shard
+            .write()
+            .insert(&mut lcs, hash, key, value, InsertStrategy::Replace { soft })?;
+        Ok(lcs)
+    }
+
+    /// Inserts an item in the cache with key `key`.
+    pub fn insert(&self, key: Key, value: Val) {
+        let lcs = self.insert_with_lifecycle(key, value);
+        self.lifecycle.end_request(lcs);
+    }
+
+    /// Inserts an item in the cache with key `key`.
+    pub fn insert_with_lifecycle(&self, key: Key, value: Val) -> L::RequestState {
+        let mut lcs = self.lifecycle.begin_request();
+        let (shard, hash) = self.shard_for(&key).unwrap();
+        let result = shard
             .write()
             .insert(&mut lcs, hash, key, value, InsertStrategy::Insert);
-        self.lifecycle.end_request(lcs);
+        // result cannot err with the Insert strategy
+        debug_assert!(result.is_ok());
+        lcs
     }
 
     /// Gets an item from the cache with key `key` .
@@ -306,7 +328,7 @@ impl<
             GuardResult::Value(v) => Ok(v),
             GuardResult::Guard(g) => {
                 let v = with()?;
-                g.insert(v.clone());
+                let _ = g.insert(v.clone());
                 Ok(v)
             }
             GuardResult::Timeout => unreachable!(),
@@ -346,7 +368,7 @@ impl<
             Ok(v) => Ok(v),
             Err(g) => {
                 let v = with.await?;
-                g.insert(v.clone());
+                let _ = g.insert(v.clone());
                 Ok(v)
             }
         }

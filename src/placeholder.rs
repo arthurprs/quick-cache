@@ -260,7 +260,24 @@ impl<
         L: Lifecycle<Key, Val>,
     > PlaceholderGuard<'a, Key, Val, We, B, L>
 {
-    pub fn insert(mut self, value: Val) {
+    /// Inserts the value into the placeholder
+    ///
+    /// Returns Err if the placeholder isn't in the cache anymore.
+    /// A placeholder can be removed as a result of a `remove` call
+    /// or a non-placeholder `insert` with the same key.
+    pub fn insert(self, value: Val) -> Result<(), Val> {
+        let lifecycle = self.lifecycle;
+        let lcs = self.insert_with_lifecycle(value)?;
+        lifecycle.end_request(lcs);
+        Ok(())
+    }
+
+    /// Inserts the value into the placeholder
+    ///
+    /// Returns Err if the placeholder isn't in the cache anymore.
+    /// A placeholder can be removed as a result of a `remove` call
+    /// or a non-placeholder `insert` with the same key.
+    pub fn insert_with_lifecycle(mut self, value: Val) -> Result<L::RequestState, Val> {
         let referenced;
         {
             let mut state = self.shared.state.write();
@@ -272,12 +289,11 @@ impl<
         }
 
         let mut lcs = self.lifecycle.begin_request();
-        let _result =
-            self.shard
-                .write()
-                .replace_placeholder(&mut lcs, &self.shared, referenced, value);
-        self.lifecycle.end_request(lcs);
+        self.shard
+            .write()
+            .replace_placeholder(&mut lcs, &self.shared, referenced, value)?;
         self.inserted = true;
+        Ok(lcs)
     }
 }
 
