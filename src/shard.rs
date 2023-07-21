@@ -244,6 +244,26 @@ impl<
         self.misses.load(atomic::Ordering::Relaxed)
     }
 
+    pub fn clear(&mut self) {
+        let _ = self.drain();
+    }
+
+    pub fn drain(&mut self) -> impl Iterator<Item = (Key, Val)> + '_ {
+        self.cold_head = None;
+        self.hot_head = None;
+        self.ghost_head = None;
+        self.num_hot = 0;
+        self.num_cold = 0;
+        self.num_non_resident = 0;
+        self.weight_hot = 0;
+        self.weight_cold = 0;
+        self.map.clear();
+        self.entries.drain().filter_map(|i| match i {
+            Entry::Resident(r) => Some((r.key, r.value)),
+            Entry::Placeholder(_) | Entry::Ghost(_) => None,
+        })
+    }
+
     #[inline]
     fn hash_static<Q: ?Sized>(hasher: &B, key: &Q) -> u64
     where
@@ -324,7 +344,7 @@ impl<
         None
     }
 
-    pub fn get_mut<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<&mut Val>
+    pub fn get_mut<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
     where
         Q: Hash + Equivalent<Key>,
     {
@@ -334,7 +354,19 @@ impl<
             };
             *resident.referenced.get_mut() = true;
             *self.hits.get_mut() += 1;
-            return Some(&mut resident.value);
+
+            let weight = if resident.state == ResidentState::Hot {
+                &mut self.weight_hot
+            } else {
+                &mut self.weight_cold
+            };
+            *weight -= self.weighter.weight(&resident.key, &resident.value);
+            return Some(RefMut {
+                key: &resident.key,
+                value: &mut resident.value,
+                weight,
+                weighter: &self.weighter,
+            });
         }
         *self.misses.get_mut() += 1;
         None
@@ -351,7 +383,7 @@ impl<
         Some(&resident.value)
     }
 
-    pub fn peek_mut<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<&mut Val>
+    pub fn peek_mut<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
     where
         Q: Hash + Equivalent<Key>,
     {
@@ -359,7 +391,18 @@ impl<
         let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
             unreachable!()
         };
-        Some(&mut resident.value)
+        let weight = if resident.state == ResidentState::Hot {
+            &mut self.weight_hot
+        } else {
+            &mut self.weight_cold
+        };
+        *weight -= self.weighter.weight(&resident.key, &resident.value);
+        Some(RefMut {
+            key: &resident.key,
+            value: &mut resident.value,
+            weight,
+            weighter: &self.weighter,
+        })
     }
 
     pub fn remove<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<(Key, Val)>
@@ -846,5 +889,36 @@ impl<
             self.map_insert(hash, idx);
             Err((shared, true))
         }
+    }
+}
+
+/// Structure wrapping a mutable reference to a cached item.
+pub struct RefMut<'cache, Key, Val, We: InternalWeighter<Key, Val>> {
+    key: &'cache Key,
+    value: &'cache mut Val,
+    weight: &'cache mut u64,
+    weighter: &'cache We,
+}
+
+impl<'cache, Key, Val, We: InternalWeighter<Key, Val>> std::ops::Deref
+    for RefMut<'cache, Key, Val, We>
+{
+    type Target = Val;
+
+    fn deref(&self) -> &Self::Target {
+        self.value
+    }
+}
+impl<'cache, Key, Val, We: InternalWeighter<Key, Val>> std::ops::DerefMut
+    for RefMut<'cache, Key, Val, We>
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value
+    }
+}
+
+impl<'cache, Key, Val, We: InternalWeighter<Key, Val>> Drop for RefMut<'cache, Key, Val, We> {
+    fn drop(&mut self) {
+        *self.weight += self.weighter.weight(self.key, self.value);
     }
 }

@@ -1,7 +1,7 @@
 use crate::{
     options::*,
     shard::{CacheShard, InsertStrategy},
-    DefaultHashBuilder, Equivalent, Lifecycle, UnitWeighter, Weighter,
+    DefaultHashBuilder, Equivalent, Lifecycle, RefMut, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
 
@@ -145,7 +145,9 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     }
 
     /// Fetches an item from the cache.
-    pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&mut Val>
+    ///
+    /// Note: Leaking the returned RefMut might cause undefined behavior.
+    pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
     where
         Q: Hash + Equivalent<Key>,
     {
@@ -161,7 +163,9 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     }
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
-    pub fn peek_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&mut Val>
+    ///
+    /// Note: Leaking the returned RefMut might cause undefined behavior.
+    pub fn peek_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
     where
         Q: Hash + Equivalent<Key>,
     {
@@ -229,6 +233,16 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
         lcs
+    }
+
+    /// Clear all items from the cache
+    pub fn clear(&mut self) {
+        self.shard.clear();
+    }
+
+    /// Drain all items from the cache
+    pub fn drain(&mut self) -> impl Iterator<Item = (Key, Val)> + '_ {
+        self.shard.drain()
     }
 }
 

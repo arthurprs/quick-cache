@@ -61,6 +61,7 @@ pub use equivalent::Equivalent;
 
 pub use options::{Options, OptionsBuilder};
 pub use placeholder::{GuardResult, PlaceholderGuard};
+pub use shard::RefMut;
 
 #[cfg(feature = "ahash")]
 pub type DefaultHashBuilder = ahash::RandomState;

@@ -154,4 +154,10 @@ impl<T> LinkedSlab<T> {
     pub fn next_free(&self) -> Token {
         self.next_free
     }
+
+    /// Drains all items from the slab
+    pub fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
+        self.next_free = Token::new(1).unwrap();
+        self.entries.drain(..).flat_map(|i| i.item)
+    }
 }
