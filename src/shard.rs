@@ -15,7 +15,7 @@ use crate::{
     Equivalent, Lifecycle,
 };
 
-/// Superset of Weighter (weights 1u32..=u32::MAX) that returns the same weight as u64.
+/// Superset of Weighter (weights 0u32..=u32::MAX) that returns the same weight as u64.
 /// Since each shard can only hold up to u32::MAX - 1 items its internal weight cannot overflow.
 pub trait InternalWeighter<Key, Val> {
     fn weight(&self, key: &Key, val: &Val) -> u64;
@@ -27,7 +27,7 @@ where
 {
     #[inline]
     fn weight(&self, key: &Key, val: &Val) -> u64 {
-        crate::Weighter::weight(self, key, val).get() as u64
+        crate::Weighter::weight(self, key, val) as u64
     }
 }
 
@@ -426,8 +426,6 @@ impl<
                 *resident.referenced.get_mut() = false;
                 if resident.state == ResidentState::ColdInTest {
                     resident.state = ResidentState::Hot;
-                    self.lifecycle
-                        .on_change_state(lcs, &resident.key, &resident.value, true);
                     let weight = self.weighter.weight(&resident.key, &resident.value);
                     self.weight_hot += weight;
                     self.weight_cold -= weight;
@@ -454,12 +452,26 @@ impl<
             }
 
             let weight = self.weighter.weight(&resident.key, &resident.value);
+            if weight == 0 {
+                if self.weight_cold == 0 {
+                    self.advance_hot(lcs);
+                } else {
+                    self.cold_head = Some(next);
+                }
+                continue;
+            }
+            self.weight_cold -= weight;
+            self.lifecycle
+                .before_evict(lcs, &resident.key, &mut resident.value);
+            if self.weighter.weight(&resident.key, &resident.value) == 0 {
+                self.cold_head = Some(next);
+                return;
+            }
             let hash = Self::hash_static(&self.hash_builder, &resident.key);
             let Entry::Resident(resident) = mem::replace(entry, Entry::Ghost(hash)) else {
                 unreachable!()
             };
             self.num_cold -= 1;
-            self.weight_cold -= weight;
 
             // Register a non-resident entry if ColdInTest
             if resident.state == ResidentState::ColdInTest {
@@ -487,7 +499,7 @@ impl<
     /// Returns the Token of the new cold entry.
     /// Panics if there are no hot entries.
     #[inline]
-    fn advance_hot(&mut self, lcs: &mut L::RequestState) -> Token {
+    fn advance_hot(&mut self, _lcs: &mut L::RequestState) -> Token {
         debug_assert_ne!(self.num_hot, 0);
         loop {
             let idx = self.hot_head.unwrap();
@@ -503,8 +515,6 @@ impl<
             } else {
                 resident.state = ResidentState::ColdDemoted;
             }
-            self.lifecycle
-                .on_change_state(lcs, &resident.key, &resident.value, false);
             let weight = self.weighter.weight(&resident.key, &resident.value);
             self.weight_hot -= weight;
             self.weight_cold += weight;
@@ -534,37 +544,31 @@ impl<
         self.ghost_head = next;
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn insert_existing(
         &mut self,
         lcs: &mut L::RequestState,
-        hash: u64,
         idx: Token,
         key: Key,
         value: Val,
         weight: u64,
         strategy: InsertStrategy,
     ) -> Result<(), (Key, Val)> {
+        // caller must have already handled overweight items
+        debug_assert!(weight <= self.weight_capacity);
         let (entry, _) = self.entries.get_mut(idx).unwrap();
-
-        if weight > self.weight_capacity {
-            // don't admit if it won't fit within the budget
-            match entry {
-                Entry::Resident(_) => {
-                    // but also make sure to remove the existing entry
-                    if let Some((ek, ev)) = self.remove(hash, &key) {
-                        self.lifecycle.on_evict(lcs, ek, ev);
-                    }
-                }
-                Entry::Placeholder(_) | Entry::Ghost(_) => (),
-            }
-            self.lifecycle.on_evict(lcs, key, value);
-            return Ok(());
-        }
-
         match entry {
             Entry::Resident(resident) => {
-                let evicted_weight = self.weighter.weight(&resident.key, &resident.value);
+                // re-insert counts as a hit unless it's a soft replace
+                let referenced = *resident.referenced.get_mut()
+                    || !matches!(strategy, InsertStrategy::Replace { soft: true });
+                let mut non_resident = Resident {
+                    key,
+                    value,
+                    state: resident.state,
+                    referenced: AtomicBool::new(referenced),
+                };
+                mem::swap(resident, &mut non_resident);
+                let evicted_weight = self.weighter.weight(&non_resident.key, &non_resident.value);
                 if resident.state == ResidentState::Hot {
                     self.weight_hot -= evicted_weight;
                     self.weight_hot += weight;
@@ -572,23 +576,8 @@ impl<
                     self.weight_cold -= evicted_weight;
                     self.weight_cold += weight;
                 }
-                // re-insert counts as a hit unless it's a soft replace
-                let referenced = *resident.referenced.get_mut()
-                    || !matches!(strategy, InsertStrategy::Replace { soft: true });
-                let new_resident = Resident {
-                    key,
-                    value,
-                    state: resident.state,
-                    referenced: AtomicBool::new(referenced),
-                };
-                let evicted = mem::replace(resident, new_resident);
-                self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
-                self.lifecycle.on_change_state(
-                    lcs,
-                    &resident.key,
-                    &resident.value,
-                    matches!(resident.state, ResidentState::Hot),
-                );
+                self.lifecycle
+                    .on_evict(lcs, non_resident.key, non_resident.value);
             }
             Entry::Placeholder(..) | Entry::Ghost(..)
                 if matches!(strategy, InsertStrategy::Replace { .. }) =>
@@ -596,7 +585,6 @@ impl<
                 return Err((key, value));
             }
             Entry::Placeholder(..) | Entry::Ghost(..) => {
-                self.lifecycle.on_change_state(lcs, &key, &value, true);
                 let evicted = mem::replace(
                     entry,
                     Entry::Resident(Resident {
@@ -704,7 +692,6 @@ impl<
 
         let enter_hot =
             placeholder_hot || self.weight_hot + self.weight_cold + weight <= self.weight_capacity;
-        self.lifecycle.on_change_state(lcs, &key, &value, enter_hot);
         let (state, list_head) = if enter_hot {
             self.num_hot += 1;
             self.weight_hot += weight;
@@ -742,20 +729,30 @@ impl<
         lcs: &mut L::RequestState,
         hash: u64,
         key: Key,
-        value: Val,
+        mut value: Val,
         strategy: InsertStrategy,
     ) -> Result<(), (Key, Val)> {
-        let weight = self.weighter.weight(&key, &value);
-        if let Some(idx) = self.search(hash, &key) {
-            return self.insert_existing(lcs, hash, idx, key, value, weight, strategy);
-        } else if matches!(strategy, InsertStrategy::Replace { .. }) {
-            return Err((key, value));
+        let mut weight = self.weighter.weight(&key, &value);
+        // don't admit if it won't fit within the budget
+        if weight > self.weight_capacity {
+            self.lifecycle.before_evict(lcs, &key, &mut value);
+            weight = self.weighter.weight(&key, &value);
+            if weight > self.weight_capacity {
+                // Make sure to remove any existing entry
+                if let Some((ek, ev)) = self.remove(hash, &key) {
+                    self.lifecycle.on_evict(lcs, ek, ev);
+                } else if matches!(strategy, InsertStrategy::Replace { .. }) {
+                    return Err((key, value));
+                }
+                self.lifecycle.on_evict(lcs, key, value);
+                return Ok(());
+            }
         }
 
-        if weight > self.weight_capacity {
-            // don't admit if it won't fit within the budget
-            self.lifecycle.on_evict(lcs, key, value);
-            return Ok(());
+        if let Some(idx) = self.search(hash, &key) {
+            return self.insert_existing(lcs, idx, key, value, weight, strategy);
+        } else if matches!(strategy, InsertStrategy::Replace { .. }) {
+            return Err((key, value));
         }
 
         let enter_hot = if self.weight_hot + self.weight_cold + weight > self.weight_capacity {
@@ -772,7 +769,6 @@ impl<
             self.weight_hot + weight <= self.weight_target_hot
         };
 
-        self.lifecycle.on_change_state(lcs, &key, &value, enter_hot);
         let (state, list_head) = if enter_hot {
             self.num_hot += 1;
             self.weight_hot += weight;

@@ -41,8 +41,9 @@ use quick_cache::{Weighter, sync::Cache};
 struct StringWeighter;
 
 impl Weighter<u64, String> for StringWeighter {
-    fn weight(&self, _key: &u64, val: &String) -> NonZeroU32 {
-        NonZeroU32::new(val.len().clamp(1, u32::MAX as usize) as u32).unwrap()
+    fn weight(&self, _key: &u64, val: &String) -> u32 {
+        // Be cautions out about zero weights!
+        val.len().clamp(1, u32::MAX as usize) as u32
     }
 }
 

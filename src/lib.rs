@@ -42,8 +42,6 @@
 //! a crate feature with the same name. If the `parking_lot` feature is disabled the crate defaults to the std lib
 //! implementation instead.
 
-use std::num::NonZeroU32;
-
 #[cfg(not(fuzzing))]
 mod linked_slab;
 #[cfg(fuzzing)]
@@ -75,14 +73,14 @@ pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 ///
 /// ```
 /// use quick_cache::{sync::Cache, Weighter};
-/// use std::num::NonZeroU32;
 ///
 /// #[derive(Clone)]
 /// struct StringWeighter;
 ///
 /// impl Weighter<u64, String> for StringWeighter {
-///     fn weight(&self, _key: &u64, val: &String) -> NonZeroU32 {
-///         NonZeroU32::new(val.len().clamp(1, u32::MAX as usize) as u32).unwrap()
+///     fn weight(&self, _key: &u64, val: &String) -> u32 {
+///         // Be cautions out about zero weights!
+///         val.len().clamp(1, u32::MAX as usize) as u32
 ///     }
 /// }
 ///
@@ -91,12 +89,17 @@ pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 /// ```
 pub trait Weighter<Key, Val> {
     /// Returns the weight of the cache item.
-    /// Note that this it's undefined behavior for a cache item to change its weight.
     ///
     /// For performance reasons this function should be trivially cheap as
     /// it's called during the cache eviction routine.
     /// If weight is expensive to calculate, consider caching it alongside the value.
-    fn weight(&self, key: &Key, val: &Val) -> NonZeroU32;
+    ///
+    /// Zero (0) weight items are allowed and will be ignored when looking for eviction
+    /// candidates. Such items can only be manually removed or overwritten.
+    ///
+    /// Note that this it's undefined behavior for a cache item to change its weight.
+    /// The only exception to this is when Lifecycle::before_evict is called.
+    fn weight(&self, key: &Key, val: &Val) -> u32;
 }
 
 /// Each cache entry weights exactly `1` unit of weight.
@@ -105,8 +108,8 @@ pub struct UnitWeighter;
 
 impl<Key, Val> Weighter<Key, Val> for UnitWeighter {
     #[inline]
-    fn weight(&self, _key: &Key, _val: &Val) -> NonZeroU32 {
-        NonZeroU32::new(1).unwrap()
+    fn weight(&self, _key: &Key, _val: &Val) -> u32 {
+        1
     }
 }
 
@@ -119,10 +122,10 @@ pub trait Lifecycle<Key, Val> {
     /// Called before the request starts, e.g.: remove, insert.
     fn begin_request(&self) -> Self::RequestState;
 
-    /// Called when a cache item changes hotness (including when it enters the cache).
+    /// Called when a cache item is about to be evicted. This is the only time the item can change its weight.
     #[allow(unused_variables)]
     #[inline]
-    fn on_change_state(&self, state: &mut Self::RequestState, key: &Key, val: &Val, hot: bool) {}
+    fn before_evict(&self, state: &mut Self::RequestState, key: &Key, val: &mut Val) {}
 
     /// Called when an item is evicted.
     fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val);
@@ -168,8 +171,8 @@ mod tests {
         struct StringWeighter;
 
         impl Weighter<u64, String> for StringWeighter {
-            fn weight(&self, _key: &u64, val: &String) -> NonZeroU32 {
-                NonZeroU32::new(val.len().clamp(1, u32::MAX as usize) as u32).unwrap()
+            fn weight(&self, _key: &u64, val: &String) -> u32 {
+                val.len().clamp(1, u32::MAX as usize) as u32
             }
         }
 

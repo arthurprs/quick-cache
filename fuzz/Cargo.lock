@@ -160,6 +160,7 @@ dependencies = [
 name = "quick_cache-fuzz"
 version = "0.0.0"
 dependencies = [
+ "ahash",
  "arbitrary",
  "libfuzzer-sys",
  "quick_cache",

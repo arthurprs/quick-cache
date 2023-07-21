@@ -9,6 +9,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
+ahash = "0.8"
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 
