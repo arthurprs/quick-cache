@@ -112,9 +112,7 @@ impl OptionsBuilder {
 
     /// Builds an `Option` struct which can be used in the `Cache::with_options` constructor.
     pub fn build(&self) -> Result<Options, Error> {
-        let shards = self
-            .shards
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get() * 4));
+        let shards = self.shards.unwrap_or_else(|| available_parallelism() * 4);
         let hot_allocation = self.hot_allocation.unwrap_or(DEFAULT_HOT_ALLOCATION);
         let ghost_allocation = self.ghost_allocation.unwrap_or(DEFAULT_GHOST_ALLOCATION);
         let weight_capacity = self
@@ -131,4 +129,18 @@ impl OptionsBuilder {
             weight_capacity,
         })
     }
+}
+
+/// Memoized wrapper for `std::thread::available_parallelism`, which can be incredibly slow.
+fn available_parallelism() -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static AVAILABLE_PARALLELISM: AtomicUsize = AtomicUsize::new(0);
+    let mut ap = AVAILABLE_PARALLELISM.load(Ordering::Relaxed);
+    if ap == 0 {
+        ap = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        AVAILABLE_PARALLELISM.store(ap, Ordering::Relaxed);
+    }
+    ap
 }
