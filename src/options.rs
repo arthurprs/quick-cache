@@ -50,6 +50,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl OptionsBuilder {
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -61,6 +62,7 @@ impl OptionsBuilder {
     /// Note that this number isn't enforced and will be adjusted internally to
     /// the next power of two. Too small shards (depending on estimated capacity)
     /// may also cause the actual shard count to decrease.
+    #[inline]
     pub fn shards(&mut self, shards: usize) -> &mut Self {
         self.shards = Some(shards);
         self
@@ -68,12 +70,14 @@ impl OptionsBuilder {
 
     /// The estimated number of items the cache is expected to hold,
     /// roughly equivalent to `weight_capacity / average item weight`.
+    #[inline]
     pub fn estimated_items_capacity(&mut self, estimated_items_capacity: usize) -> &mut Self {
         self.estimated_items_capacity = Some(estimated_items_capacity);
         self
     }
 
     /// The max weight that the cache can hold.
+    #[inline]
     pub fn weight_capacity(&mut self, weight_capacity: u64) -> &mut Self {
         self.weight_capacity = Some(weight_capacity);
         self
@@ -85,6 +89,7 @@ impl OptionsBuilder {
     /// (usually on the higher side).
     ///
     /// Defaults to: `0.99` (99%).
+    #[inline]
     pub fn hot_allocation(&mut self, hot_allocation: f64) -> &mut Self {
         assert!(
             hot_allocation.clamp(0.0, 1.0) == hot_allocation,
@@ -101,6 +106,7 @@ impl OptionsBuilder {
     /// the ghost keys considering the `estimated_items_capacity`.
     ///
     /// Defaults to: `0.5` (50%).
+    #[inline]
     pub fn ghost_allocation(&mut self, ghost_allocation: f64) -> &mut Self {
         assert!(
             ghost_allocation.clamp(0.0, 1.0) == ghost_allocation,
@@ -111,6 +117,7 @@ impl OptionsBuilder {
     }
 
     /// Builds an `Option` struct which can be used in the `Cache::with_options` constructor.
+    #[inline]
     pub fn build(&self) -> Result<Options, Error> {
         let shards = self.shards.unwrap_or_else(|| available_parallelism() * 4);
         let hot_allocation = self.hot_allocation.unwrap_or(DEFAULT_HOT_ALLOCATION);
