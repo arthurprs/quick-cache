@@ -327,12 +327,12 @@ impl<'a, Key, Val, We, B, L> std::fmt::Debug for PlaceholderGuard<'a, Key, Val, 
 }
 
 /// Future that results in an Ok(Value) or Err(Guard)
-pub enum JoinFuture<'a, 'b, Key, Val, We, B, L> {
+pub enum JoinFuture<'a, 'b, Q: ?Sized, Key, Val, We, B, L> {
     Created {
         lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L>>,
         hash: u64,
-        key: &'b Key,
+        key: &'b Q,
     },
     Pending {
         lifecycle: &'a L,
@@ -343,13 +343,13 @@ pub enum JoinFuture<'a, 'b, Key, Val, We, B, L> {
     Done,
 }
 
-impl<'a, 'b, Key, Val, We, B, L> JoinFuture<'a, 'b, Key, Val, We, B, L> {
+impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
     pub fn new(
         lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L>>,
         hash: u64,
-        key: &'b Key,
-    ) -> JoinFuture<'a, 'b, Key, Val, We, B, L> {
+        key: &'b Q,
+    ) -> JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
         JoinFuture::Created {
             lifecycle,
             shard,
@@ -385,7 +385,7 @@ impl<'a, 'b, Key, Val, We, B, L> JoinFuture<'a, 'b, Key, Val, We, B, L> {
     }
 }
 
-impl<'a, 'b, Key, Val, We, B, L> Drop for JoinFuture<'a, 'b, Key, Val, We, B, L> {
+impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> Drop for JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
     fn drop(&mut self) {
         if matches!(
             self,
@@ -402,12 +402,13 @@ impl<'a, 'b, Key, Val, We, B, L> Drop for JoinFuture<'a, 'b, Key, Val, We, B, L>
 impl<
         'a,
         'b,
-        Key: Eq + Hash + Clone,
+        Key: Eq + Hash,
+        Q: ToOwned<Owned = Key> + ?Sized,
         Val: Clone,
         We: Weighter<Key, Val>,
         B: BuildHasher,
         L: Lifecycle<Key, Val>,
-    > Future for JoinFuture<'a, 'b, Key, Val, We, B, L>
+    > Future for JoinFuture<'a, 'b, Q, Key, Val, We, B, L>
 {
     type Output = Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>;
 
@@ -423,7 +424,7 @@ impl<
                 key,
             } => {
                 let mut shard_guard = shard.write();
-                match shard_guard.get_value_or_placeholder(*hash, Key::clone(key)) {
+                match shard_guard.get_value_or_placeholder(*hash, (*key).to_owned()) {
                     Ok(v) => {
                         *self = Self::Done;
                         return Poll::Ready(Ok(v));
