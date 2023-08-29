@@ -316,7 +316,7 @@ impl<
     }
 
     /// Gets or inserts an item in the cache with key `key` .
-    pub fn get_or_insert_with<E, Q>(
+    pub fn get_or_insert_with<Q, E>(
         &self,
         key: &Q,
         with: impl FnOnce() -> Result<Val, E>,
@@ -356,7 +356,7 @@ impl<
     }
 
     /// Gets or inserts an item in the cache with key `key` .
-    pub async fn get_or_insert_async<'a, E, Q>(
+    pub async fn get_or_insert_async<'a, Q, E>(
         &self,
         key: &Q,
         with: impl Future<Output = Result<Val, E>>,
