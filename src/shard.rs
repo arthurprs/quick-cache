@@ -264,6 +264,13 @@ impl<
         })
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&'_ Key, &'_ Val)> + '_ {
+        self.entries.iter().filter_map(|i| match i {
+            Entry::Resident(r) => Some((&r.key, &r.value)),
+            Entry::Placeholder(_) | Entry::Ghost(_) => None,
+        })
+    }
+
     #[inline]
     fn hash_static<Q: ?Sized>(hasher: &B, key: &Q) -> u64
     where

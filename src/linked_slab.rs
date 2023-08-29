@@ -155,9 +155,16 @@ impl<T> LinkedSlab<T> {
         self.next_free
     }
 
-    /// Drains all items from the slab
+    /// Drains all items from the slab.
+    ///
+    /// The slab will be emptied even if the returned iterator isn't fully consumed.
     pub fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
         self.next_free = Token::new(1).unwrap();
         self.entries.drain(..).flat_map(|i| i.item)
+    }
+
+    /// Iterator for the items in the slab
+    pub fn iter(&self) -> impl Iterator<Item = &'_ T> + '_ {
+        self.entries.iter().flat_map(|i| i.item.as_ref())
     }
 }

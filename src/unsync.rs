@@ -240,8 +240,17 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.clear();
     }
 
+    /// Iterator for the items in the cache
+    pub fn iter(&self) -> impl Iterator<Item = (&'_ Key, &'_ Val)> + '_ {
+        // TODO: add a concrete type, impl trait in the public api is really bad.
+        self.shard.iter()
+    }
+
     /// Drain all items from the cache
+    ///
+    /// The cache will be emptied even if the returned iterator isn't fully consumed.
     pub fn drain(&mut self) -> impl Iterator<Item = (Key, Val)> + '_ {
+        // TODO: add a concrete type, impl trait in the public api is really bad.
         self.shard.drain()
     }
 }
