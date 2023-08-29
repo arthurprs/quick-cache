@@ -300,29 +300,29 @@ impl<
     /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
-    pub fn get_value_or_guard<'a>(
+    pub fn get_value_or_guard<'a, Q>(
         &'a self,
-        key: &Key,
+        key: &Q,
         timeout: Option<Duration>,
     ) -> GuardResult<'a, Key, Val, We, B, L>
     where
-        Key: Clone,
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         let (shard, hash) = self.shard_for(key).unwrap();
         if let Some(v) = shard.read().get(hash, key) {
             return GuardResult::Value(v.clone());
         }
-        PlaceholderGuard::join(&self.lifecycle, shard, hash, key.clone(), timeout)
+        PlaceholderGuard::join(&self.lifecycle, shard, hash, key.to_owned(), timeout)
     }
 
     /// Gets or inserts an item in the cache with key `key` .
-    pub fn get_or_insert_with<E>(
+    pub fn get_or_insert_with<E, Q>(
         &self,
-        key: &Key,
+        key: &Q,
         with: impl FnOnce() -> Result<Val, E>,
     ) -> Result<Val, E>
     where
-        Key: Clone,
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         match self.get_value_or_guard(key, None) {
             GuardResult::Value(v) => Ok(v),
@@ -341,12 +341,12 @@ impl<
     /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
-    pub async fn get_value_or_guard_async<'a, 'b>(
+    pub async fn get_value_or_guard_async<'a, 'b, Q>(
         &'a self,
-        key: &'b Key,
+        key: &'b Q,
     ) -> Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>
     where
-        Key: Clone,
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         let (shard, hash) = self.shard_for(key).unwrap();
         if let Some(v) = shard.read().get(hash, key) {
@@ -356,13 +356,13 @@ impl<
     }
 
     /// Gets or inserts an item in the cache with key `key` .
-    pub async fn get_or_insert_async<'a, E>(
+    pub async fn get_or_insert_async<'a, E, Q>(
         &self,
-        key: &Key,
+        key: &Q,
         with: impl Future<Output = Result<Val, E>>,
     ) -> Result<Val, E>
     where
-        Key: Clone,
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         match self.get_value_or_guard_async(key).await {
             Ok(v) => Ok(v),
