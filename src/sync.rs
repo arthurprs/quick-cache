@@ -294,6 +294,13 @@ impl<
         lcs
     }
 
+    /// Clear all items from the cache
+    pub fn clear(&self) {
+        for s in self.shards.iter() {
+            s.write().clear();
+        }
+    }
+
     /// Gets an item from the cache with key `key` .
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
