@@ -39,14 +39,12 @@ pub enum InsertStrategy {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ResidentState {
     Hot,
-    ColdInTest,
-    ColdDemoted,
+    Cold,
 }
 
 #[derive(Debug)]
 pub struct Resident<Key, Val> {
     key: Key,
-
     value: Val,
     state: ResidentState,
     referenced: AtomicBool,
@@ -55,7 +53,6 @@ pub struct Resident<Key, Val> {
 #[derive(Debug)]
 pub struct Placeholder<Key, Val> {
     key: Key,
-
     hot: bool,
     shared: SharedPlaceholder<Val>,
 }
@@ -86,7 +83,7 @@ pub struct CacheShard<Key, Val, We, B, L> {
     map: RawTable<Token>,
     /// Slab holding entries
     entries: LinkedSlab<Entry<Key, Val>>,
-    /// Head of cold list, containing ColdInTest and ColdDemoted entries.
+    /// Head of cold list, containing Cold entries.
     cold_head: Option<Token>,
     /// Head of hot list, containing Hot entries.
     hot_head: Option<Token>,
@@ -168,12 +165,7 @@ impl<
         let mut weight_cold = 0;
         for e in self.entries.iter_entries() {
             match e {
-                Entry::Resident(r)
-                    if matches!(
-                        r.state,
-                        ResidentState::ColdDemoted | ResidentState::ColdInTest
-                    ) =>
-                {
+                Entry::Resident(r) if r.state == ResidentState::Cold => {
                     num_cold += 1;
                     weight_cold += self.weighter.weight(&r.key, &r.value);
                 }
@@ -429,10 +421,7 @@ impl<
                     self.weight_hot -= weight;
                     &mut self.hot_head
                 } else {
-                    debug_assert!(matches!(
-                        r.state,
-                        ResidentState::ColdDemoted | ResidentState::ColdInTest
-                    ));
+                    debug_assert!(r.state == ResidentState::Cold);
                     self.num_cold -= 1;
                     self.weight_cold -= weight;
                     &mut self.cold_head
@@ -455,60 +444,50 @@ impl<
     }
 
     /// Advance cold ring, promoting to hot and demoting as needed.
-    /// Returns the evicted entry.
     /// Panics if the cache is empty.
     fn advance_cold(&mut self, lcs: &mut L::RequestState) {
         loop {
             let idx = if let Some(idx) = self.cold_head {
                 idx
             } else {
-                self.advance_hot(lcs)
+                self.advance_hot(lcs);
+                return;
             };
             let (entry, next) = self.entries.get_mut(idx).unwrap();
             let Entry::Resident(resident) = entry else {
                 unreachable!()
             };
-            debug_assert!(matches!(
-                resident.state,
-                ResidentState::ColdDemoted | ResidentState::ColdInTest
-            ));
+            debug_assert!(resident.state == ResidentState::Cold);
             if *resident.referenced.get_mut() {
                 *resident.referenced.get_mut() = false;
-                if resident.state == ResidentState::ColdInTest {
-                    resident.state = ResidentState::Hot;
-                    let weight = self.weighter.weight(&resident.key, &resident.value);
-                    self.weight_hot += weight;
-                    self.weight_cold -= weight;
-                    self.num_hot += 1;
-                    self.num_cold -= 1;
-                    Self::relink(
-                        &mut self.entries,
-                        idx,
-                        &mut self.cold_head,
-                        &mut self.hot_head,
-                    );
-                    // demote hot entries as we go, by advancing both lists together
-                    // we keep a similar recency in both lists.
-                    while self.weight_hot > self.weight_target_hot {
-                        self.advance_hot(lcs);
-                    }
-                } else {
-                    // ColdDemoted
-                    debug_assert_eq!(resident.state, ResidentState::ColdDemoted);
-                    resident.state = ResidentState::ColdInTest;
-                    self.cold_head = Some(next);
+                resident.state = ResidentState::Hot;
+                let weight = self.weighter.weight(&resident.key, &resident.value);
+                self.weight_hot += weight;
+                self.weight_cold -= weight;
+                self.num_hot += 1;
+                self.num_cold -= 1;
+                Self::relink(
+                    &mut self.entries,
+                    idx,
+                    &mut self.cold_head,
+                    &mut self.hot_head,
+                );
+                // evict from hot if overweight
+                while self.weight_hot > self.weight_target_hot {
+                    self.advance_hot(lcs);
                 }
-                continue;
+                return;
             }
 
             let weight = self.weighter.weight(&resident.key, &resident.value);
             if weight == 0 {
                 if self.weight_cold == 0 {
                     self.advance_hot(lcs);
+                    return;
                 } else {
                     self.cold_head = Some(next);
+                    continue;
                 }
-                continue;
             }
             self.weight_cold -= weight;
             self.lifecycle
@@ -522,34 +501,26 @@ impl<
                 unreachable!()
             };
             self.num_cold -= 1;
-
-            // Register a non-resident entry if ColdInTest
-            if resident.state == ResidentState::ColdInTest {
-                self.num_non_resident += 1;
-                Self::relink(
-                    &mut self.entries,
-                    idx,
-                    &mut self.cold_head,
-                    &mut self.ghost_head,
-                );
-                if self.num_non_resident > self.capacity_non_resident {
-                    self.advance_ghost();
-                }
-            } else {
-                self.map_remove(hash, idx);
-                let (_, next) = self.entries.remove(idx).unwrap();
-                self.cold_head = next;
+            self.num_non_resident += 1;
+            Self::relink(
+                &mut self.entries,
+                idx,
+                &mut self.cold_head,
+                &mut self.ghost_head,
+            );
+            // evict from ghost if oversized
+            if self.num_non_resident > self.capacity_non_resident {
+                self.advance_ghost();
             }
             self.lifecycle.on_evict(lcs, resident.key, resident.value);
             return;
         }
     }
 
-    /// Advance hot ring demoting entries to cold.
-    /// Returns the Token of the new cold entry.
+    /// Advance hot ring evicting entries.
     /// Panics if there are no hot entries.
     #[inline]
-    fn advance_hot(&mut self, _lcs: &mut L::RequestState) -> Token {
+    fn advance_hot(&mut self, lcs: &mut L::RequestState) {
         debug_assert_ne!(self.num_hot, 0);
         loop {
             let idx = self.hot_head.unwrap();
@@ -562,21 +533,22 @@ impl<
                 *resident.referenced.get_mut() = false;
                 self.hot_head = Some(next);
                 continue;
-            } else {
-                resident.state = ResidentState::ColdDemoted;
             }
             let weight = self.weighter.weight(&resident.key, &resident.value);
             self.weight_hot -= weight;
-            self.weight_cold += weight;
-            self.num_hot -= 1;
-            self.num_cold += 1;
-            Self::relink(
-                &mut self.entries,
-                idx,
-                &mut self.hot_head,
-                &mut self.cold_head,
-            );
-            return idx;
+            self.lifecycle
+                .before_evict(lcs, &resident.key, &mut resident.value);
+            let weight = self.weighter.weight(&resident.key, &resident.value);
+            if weight == 0 {
+                self.hot_head = Some(next);
+            } else {
+                self.num_hot -= 1;
+                let hash = Self::hash_static(&self.hash_builder, &resident.key);
+                self.map_remove(hash, idx);
+                let (_, next) = self.entries.remove(idx).unwrap();
+                self.hot_head = next;
+            }
+            return;
         }
     }
 
@@ -749,7 +721,7 @@ impl<
         } else {
             self.num_cold += 1;
             self.weight_cold += weight;
-            (ResidentState::ColdInTest, &mut self.cold_head)
+            (ResidentState::Cold, &mut self.cold_head)
         };
         *entry = Entry::Resident(Resident {
             key,
@@ -826,7 +798,7 @@ impl<
         } else {
             self.num_cold += 1;
             self.weight_cold += weight;
-            (ResidentState::ColdInTest, &mut self.cold_head)
+            (ResidentState::Cold, &mut self.cold_head)
         };
         let idx = self.entries.insert(
             Entry::Resident(Resident {
