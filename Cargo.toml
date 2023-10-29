@@ -14,12 +14,14 @@ rust-version = "1.63"
 
 [features]
 default = ["ahash", "parking_lot"]
+shuttle = ["dep:shuttle"]
 
 [dependencies]
 ahash = { optional = true, version = "0.8" }
 equivalent = "1.0.1"
 hashbrown = { version = "0.14", default-features = false, features = ["raw", "inline-more"] }
 parking_lot = { optional = true, version = "0.12" }
+shuttle = { version = "0.6", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"

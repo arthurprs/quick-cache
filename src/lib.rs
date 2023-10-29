@@ -51,13 +51,18 @@ mod options;
 #[cfg(fuzzing)]
 pub mod options;
 mod placeholder;
+#[cfg(not(feature = "shuttle"))]
 mod rw_lock;
 mod shard;
+mod shim;
 /// Concurrent cache variants that can be used from multiple threads.
 pub mod sync;
 /// Non-concurrent cache variants.
 pub mod unsync;
 pub use equivalent::Equivalent;
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests;
 
 pub use options::{Options, OptionsBuilder};
 pub use placeholder::{GuardResult, PlaceholderGuard};

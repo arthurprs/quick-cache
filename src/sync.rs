@@ -1,14 +1,15 @@
-use crate::{
-    options::{Options, OptionsBuilder},
-    placeholder::{GuardResult, JoinFuture, PlaceholderGuard},
-    rw_lock::RwLock,
-    shard::{CacheShard, InsertStrategy},
-    DefaultHashBuilder, Equivalent, Lifecycle, UnitWeighter, Weighter,
-};
 use std::{
     future::Future,
     hash::{BuildHasher, Hash, Hasher},
     time::Duration,
+};
+
+use crate::{
+    options::{Options, OptionsBuilder},
+    placeholder::{GuardResult, JoinFuture, PlaceholderGuard},
+    shard::{CacheShard, InsertStrategy},
+    shim::rw_lock::RwLock,
+    DefaultHashBuilder, Equivalent, Lifecycle, UnitWeighter, Weighter,
 };
 
 /// A concurrent cache.

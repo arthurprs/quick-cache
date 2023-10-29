@@ -1,10 +1,6 @@
 use std::{
     hash::{BuildHasher, Hash, Hasher},
     mem,
-    sync::{
-        atomic::{self, AtomicBool, AtomicU64},
-        Arc,
-    },
 };
 
 use hashbrown::raw::RawTable;
@@ -12,6 +8,10 @@ use hashbrown::raw::RawTable;
 use crate::{
     linked_slab::{LinkedSlab, Token},
     placeholder::{new_shared_placeholder, SharedPlaceholder},
+    shim::sync::{
+        atomic::{self, AtomicBool, AtomicU64},
+        Arc,
+    },
     Equivalent, Lifecycle,
 };
 
