@@ -56,7 +56,7 @@ fn main() {
 }
 ```
 
-Using the `Equivalent`` trait for complex keys
+Using the `Equivalent` trait for complex keys
 
 ```rust
 use std::hash::Hash;
