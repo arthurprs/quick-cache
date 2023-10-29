@@ -1,19 +1,21 @@
 use std::{
     future::Future,
     hash::{BuildHasher, Hash},
-    sync::{
-        atomic::{self, AtomicBool},
-        Arc,
-    },
     task::Poll,
-    thread,
     time::{Duration, Instant},
 };
 
 use crate::{
     linked_slab::Token,
-    rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard},
     shard::CacheShard,
+    shim::{
+        rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+        sync::{
+            atomic::{self, AtomicBool},
+            Arc,
+        },
+        thread,
+    },
     Lifecycle, Weighter,
 };
 

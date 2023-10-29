@@ -21,6 +21,21 @@ jobs:
           override: true
       - run: cargo test
 
+  shuttle-tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: styfle/cancel-workflow-action@0.10.0
+        with:
+          access_token: ${{ github.token }}
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - run: cargo test --features shuttle shuttle
+
   fuzz-tests:
     name: Fuzz tests
     runs-on: ubuntu-latest
