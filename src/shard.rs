@@ -446,6 +446,8 @@ impl<
     /// Advance cold ring, promoting to hot and demoting as needed.
     /// Panics if the cache is empty.
     fn advance_cold(&mut self, lcs: &mut L::RequestState) {
+        debug_assert_ne!(self.num_cold + self.num_hot, 0);
+        debug_assert_ne!(self.weight_cold + self.weight_hot, 0);
         loop {
             let idx = if let Some(idx) = self.cold_head {
                 idx
@@ -522,6 +524,7 @@ impl<
     #[inline]
     fn advance_hot(&mut self, lcs: &mut L::RequestState) {
         debug_assert_ne!(self.num_hot, 0);
+        debug_assert_ne!(self.weight_hot, 0);
         loop {
             let idx = self.hot_head.unwrap();
             let (entry, next) = self.entries.get_mut(idx).unwrap();
@@ -535,18 +538,25 @@ impl<
                 continue;
             }
             let weight = self.weighter.weight(&resident.key, &resident.value);
+            if weight == 0 {
+                self.hot_head = Some(next);
+                continue;
+            }
             self.weight_hot -= weight;
             self.lifecycle
                 .before_evict(lcs, &resident.key, &mut resident.value);
-            let weight = self.weighter.weight(&resident.key, &resident.value);
-            if weight == 0 {
+            if self.weighter.weight(&resident.key, &resident.value) == 0 {
                 self.hot_head = Some(next);
             } else {
                 self.num_hot -= 1;
                 let hash = Self::hash_static(&self.hash_builder, &resident.key);
-                self.map_remove(hash, idx);
-                let (_, next) = self.entries.remove(idx).unwrap();
+                let (entry, next) = self.entries.remove(idx).unwrap();
                 self.hot_head = next;
+                self.map_remove(hash, idx);
+                let Entry::Resident(resident) = entry else {
+                    unreachable!()
+                };
+                self.lifecycle.on_evict(lcs, resident.key, resident.value);
             }
             return;
         }
