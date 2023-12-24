@@ -9,11 +9,14 @@ use crate::{
     linked_slab::{LinkedSlab, Token},
     placeholder::{new_shared_placeholder, SharedPlaceholder},
     shim::sync::{
-        atomic::{self, AtomicBool, AtomicU64},
+        atomic::{self, AtomicBool},
         Arc,
     },
     Equivalent, Lifecycle,
 };
+
+#[cfg(feature = "stats")]
+use crate::shim::sync::atomic::AtomicU64;
 
 /// Superset of Weighter (weights 0u32..=u32::MAX) that returns the same weight as u64.
 /// Since each shard can only hold up to u32::MAX - 1 items its internal weight cannot overflow.
@@ -87,31 +90,45 @@ pub struct CacheShard<Key, Val, We, B, L> {
     num_cold: usize,
     num_non_resident: usize,
     capacity_non_resident: usize,
+    #[cfg(feature = "stats")]
     hits: AtomicU64,
+    #[cfg(feature = "stats")]
     misses: AtomicU64,
     weighter: We,
     pub(crate) lifecycle: L,
 }
 
 macro_rules! record_hit {
-    ($self: expr) => {{
-        $self.hits.fetch_add(1, atomic::Ordering::Relaxed);
-    }};
+    ($self: expr) => {
+        #[cfg(features = "stats")]
+        {
+            $self.hits.fetch_add(1, atomic::Ordering::Relaxed);
+        }
+    };
 }
 macro_rules! record_hit_mut {
-    ($self: expr) => {{
-        *$self.hits.get_mut() += 1;
-    }};
+    ($self: expr) => {
+        #[cfg(features = "stats")]
+        {
+            *$self.hits.get_mut() += 1;
+        }
+    };
 }
 macro_rules! record_miss {
-    ($self: expr) => {{
-        $self.misses.fetch_add(1, atomic::Ordering::Relaxed);
-    }};
+    ($self: expr) => {
+        #[cfg(features = "stats")]
+        {
+            $self.misses.fetch_add(1, atomic::Ordering::Relaxed);
+        }
+    };
 }
 macro_rules! record_miss_mut {
-    ($self: expr) => {{
-        *$self.misses.get_mut() += 1;
-    }};
+    ($self: expr) => {
+        #[cfg(features = "stats")]
+        {
+            *$self.misses.get_mut() += 1;
+        }
+    };
 }
 
 impl<Key, Val, We, B, L> CacheShard<Key, Val, We, B, L> {
@@ -150,7 +167,9 @@ impl<
             map: RawTable::with_capacity(0),
             entries: LinkedSlab::with_capacity(0),
             weight_capacity,
+            #[cfg(feature = "stats")]
             hits: Default::default(),
+            #[cfg(feature = "stats")]
             misses: Default::default(),
             cold_head: None,
             hot_head: None,
@@ -240,10 +259,12 @@ impl<
         self.weight_capacity
     }
 
+    #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.hits.load(atomic::Ordering::Relaxed)
     }
 
+    #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.misses.load(atomic::Ordering::Relaxed)
     }

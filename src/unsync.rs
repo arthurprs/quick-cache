@@ -121,11 +121,13 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     }
 
     /// Returns the number of misses
+    #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.shard.misses()
     }
 
     /// Returns the number of hits
+    #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.shard.hits()
     }

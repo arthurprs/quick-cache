@@ -50,6 +50,11 @@
 //! By default the crate uses [parking_lot](https://crates.io/crates/parking_lot), which is enabled (by default) via
 //! a crate feature with the same name. If the `parking_lot` feature is disabled the crate defaults to the std lib
 //! implementation instead.
+//!
+//! # Hits and Misses counters
+//!
+//! If the `stats` feature (disabled by default) is enabled, the `Cache` structs expose the `hits` and `misses` functions.
+//! These functions return the total number of misses and hits observed by the cache.
 
 #[cfg(not(fuzzing))]
 mod linked_slab;

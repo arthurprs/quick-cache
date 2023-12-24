@@ -176,11 +176,13 @@ impl<
     }
 
     /// Returns the number of misses
+    #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.shards.iter().map(|s| s.read().misses()).sum()
     }
 
     /// Returns the number of hits
+    #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.shards.iter().map(|s| s.read().hits()).sum()
     }
