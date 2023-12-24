@@ -4,9 +4,10 @@
 //!
 //! # Eviction policy
 //!
-//! The current eviction policy is a modified version of the Clock-PRO algorithm. It's "scan resistent"
-//! and provides high hit rates, significantly better than a LRU eviction policy and comparable to
-//! other state-of-the art algorithms like W-TinyLFU.
+//! The current eviction policy is a modified version of the Clock-PRO algorithm, very similar to the
+//! later published S3-FIFO algorithm. It's "scan resistent" and provides high hit rates,
+//! significantly better than a LRU eviction policy and comparable to other state-of-the art algorithms
+//! like W-TinyLFU.
 //!
 //! # Thread safety and Concurrency
 //!
@@ -29,6 +30,19 @@
 //! By using the `get_or_insert` or `get_value_or_guard` family of functions (both sync and async variants
 //! are available, they can be mix and matched) the user can coordinate the insertion of entries, so only
 //! one value is "computed" and inserted after a cache miss.
+//!
+//! # Lifecycle hooks
+//!
+//! A user can optionally provide a custom `Lifecycle` implementation to hook into the lifecycle of cache entries.
+//!
+//! Example use cases:
+//! * send evicted items to a channel, achieving the equivalent to an eviction listener feature.
+//! * zero out item weights so they are left in the cache instead of evicted.
+//!
+//! # Stats
+//!
+//! By enabling the `stats` feature the cache will track the number of hits and misses.
+//!
 //!
 //! # Hasher
 //!
