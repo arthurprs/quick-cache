@@ -192,10 +192,10 @@ impl<
         timeout: Option<Duration>,
     ) -> GuardResult<'a, Key, Val, We, B, L> {
         let mut shard_guard = shard.write();
-        let shared = match shard_guard.get_value_or_placeholder(hash, key) {
+        let shared = match shard_guard.upsert_placeholder(hash, key) {
             Ok(v) => return GuardResult::Value(v),
             Err((shared, true)) => {
-                return GuardResult::Guard(Self::start_loading(lifecycle, shard, shared))
+                return GuardResult::Guard(Self::start_loading(lifecycle, shard, shared));
             }
             Err((shared, false)) => shared,
         };
@@ -426,7 +426,7 @@ impl<
                 key,
             } => {
                 let mut shard_guard = shard.write();
-                match shard_guard.get_value_or_placeholder(*hash, (*key).to_owned()) {
+                match shard_guard.upsert_placeholder(*hash, (*key).to_owned()) {
                     Ok(v) => {
                         *self = Self::Done;
                         return Poll::Ready(Ok(v));

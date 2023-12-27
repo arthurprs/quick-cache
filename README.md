@@ -168,7 +168,8 @@ Benchmarks performed with [mokabench](https://github.com/moka-rs/mokabench) in a
 
 ## References
 
-* [CLOCK-Pro: An Effective Improvement of the CLOCK Replacement. (PDF)](https://www.usenix.org/legacy/events/usenix05/tech/general/full_papers/jiang/jiang.pdf)
+* [CLOCK-Pro: An Effective Improvement of the CLOCK Replacement (pdf)](https://www.usenix.org/legacy/events/usenix05/tech/general/full_papers/jiang/jiang.pdf)
+* [FIFO queues are all you need for cache eviction (pdf)](https://dl.acm.org/doi/10.1145/3600006.3613147)
 * [Caffeine (source code)](https://github.com/ben-manes/caffeine)
 * [Cache2k (source code)](https://github.com/cache2k/cache2k)
 
