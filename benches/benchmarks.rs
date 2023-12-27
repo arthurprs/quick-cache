@@ -4,8 +4,35 @@ use rand::prelude::*;
 use rand::rngs::SmallRng;
 use rand_distr::Zipf;
 
-pub fn criterion_benchmark(c: &mut Criterion) {
-    const N_SAMPLES: usize = 10_000;
+pub fn r_benchmark(c: &mut Criterion) {
+    const N_SAMPLES: usize = 1_000;
+    for population in [10_000, 1_000_000] {
+        for s in [0.5, 0.75] {
+            let mut g = c.benchmark_group(format!("Reads N={} S={}", population, s));
+            g.throughput(criterion::Throughput::Elements(N_SAMPLES as u64));
+            g.bench_function(format!("qc {}", population), |b| {
+                let cache = Cache::new(population);
+                let mut samples = (0usize..population).collect::<Vec<_>>();
+                let mut rng = SmallRng::seed_from_u64(1);
+                samples.shuffle(&mut rng);
+                samples.truncate((population as f64 * s) as usize);
+                for p in samples {
+                    cache.insert(p, p);
+                }
+                b.iter(|| {
+                    let mut count = 0usize;
+                    for i in 0..N_SAMPLES {
+                        count += cache.get(&i).is_some() as usize;
+                    }
+                    count
+                });
+            });
+        }
+    }
+}
+
+pub fn rw_benchmark(c: &mut Criterion) {
+    const N_SAMPLES: usize = 1_000;
     for population in [10_000, 1_000_000] {
         for s in [0.5, 0.75] {
             let mut g = c.benchmark_group(format!("Zipf N={} S={}", population, s));
@@ -47,5 +74,5 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, criterion_benchmark);
+criterion_group!(benches, r_benchmark, rw_benchmark);
 criterion_main!(benches);
