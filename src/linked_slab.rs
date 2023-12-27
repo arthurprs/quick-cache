@@ -36,6 +36,25 @@ impl<T> LinkedSlab<T> {
         self.entries.iter().filter_map(|e| e.item.as_ref())
     }
 
+    #[cfg(fuzzing)]
+    pub fn validate(&self) {
+        let mut freelist = std::collections::HashSet::new();
+        let mut next_free = self.next_free;
+        while next_free.get() as usize - 1 != self.entries.len() {
+            freelist.insert(next_free.get() as usize);
+            let e = &self.entries[next_free.get() as usize - 1];
+            assert!(e.item.is_none(), "{next_free} is in freelist but has item");
+            next_free = e.next;
+        }
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.item.is_some() {
+                assert!(!freelist.contains(&(i + 1)));
+                assert!(!freelist.contains(&(e.prev.get() as usize)));
+                assert!(!freelist.contains(&(e.next.get() as usize)));
+            }
+        }
+    }
+
     /// Inserts a new entry in the list, link it before `head`.
     /// If `head` is not set the item will belong to a list only containing itself.
     ///
@@ -43,12 +62,14 @@ impl<T> LinkedSlab<T> {
     /// Panics if number of items exceed `u32::MAX - 1`.
     pub fn insert(&mut self, item: T, head: Option<Token>) -> Token {
         let token = self.next_free;
+        // eprintln!("linkedslab::insert token {token} head {head:?}");
         let idx = (token.get() - 1) as usize;
         if idx < self.entries.len() {
             let entry = &mut self.entries[idx];
+            self.next_free = entry.next;
+            (entry.prev, entry.next) = (token, token);
             debug_assert!(entry.item.is_none());
             entry.item = Some(item);
-            self.next_free = entry.next;
         } else {
             self.next_free = Token::new(token.get().wrapping_add(1)).expect("Capacity overflow");
             self.entries.push(Entry {
@@ -89,6 +110,7 @@ impl<T> LinkedSlab<T> {
     /// Panics on out of bounds access.
     /// Panics (in debug mode) if linking an absent entry.
     pub fn link(&mut self, idx: Token, target_head: Option<Token>) {
+        // eprintln!("linkedslab::link {idx} head {target_head:?}");
         let (prev, next) = if let Some(target_head) = target_head {
             let head = &mut self.entries[(target_head.get() - 1) as usize];
             debug_assert!(head.item.is_some());
@@ -101,6 +123,8 @@ impl<T> LinkedSlab<T> {
                 let before_head_idx = head.prev;
                 head.prev = idx;
                 let before_head = &mut self.entries[(before_head_idx.get() - 1) as usize];
+                debug_assert!(before_head.item.is_some());
+                debug_assert_eq!(before_head.next, target_head);
                 before_head.next = idx;
                 (before_head_idx, target_head)
             }
@@ -110,6 +134,8 @@ impl<T> LinkedSlab<T> {
 
         let entry = &mut self.entries[(idx.get() - 1) as usize];
         debug_assert!(entry.item.is_some());
+        assert_eq!(entry.next, idx);
+        assert_eq!(entry.prev, idx);
         (entry.prev, entry.next) = (prev, next);
     }
 
@@ -120,7 +146,8 @@ impl<T> LinkedSlab<T> {
     /// Panics on out of bounds access.
     /// Panics (in debug mode) if unlinking an absent entry.
     pub fn unlink(&mut self, idx: Token) -> Option<Token> {
-        let entry = &self.entries[(idx.get() - 1) as usize];
+        // eprintln!("linkedslab::unlink {idx}");
+        let entry = &mut self.entries[(idx.get() - 1) as usize];
         debug_assert!(entry.item.is_some());
         let (prev_idx, next_idx) = (entry.prev, entry.next);
         if next_idx == idx {
@@ -128,9 +155,14 @@ impl<T> LinkedSlab<T> {
             // single item list, nothing to do
             None
         } else {
+            (entry.prev, entry.next) = (idx, idx);
             let next = &mut self.entries[(next_idx.get() - 1) as usize];
+            debug_assert!(next.item.is_some());
+            debug_assert_eq!(next.prev, idx);
             next.prev = prev_idx;
             let prev = &mut self.entries[(prev_idx.get() - 1) as usize];
+            debug_assert!(prev.item.is_some());
+            debug_assert_eq!(prev.next, idx);
             prev.next = next_idx;
             Some(next_idx)
         }
@@ -142,6 +174,7 @@ impl<T> LinkedSlab<T> {
     /// # Panics
     /// Panics on out of bounds access.
     pub fn remove(&mut self, idx: Token) -> Option<(T, Option<Token>)> {
+        // eprintln!("linkedslab::remove {idx}");
         let next = self.unlink(idx);
         let entry = &mut self.entries[(idx.get() - 1) as usize];
         let old_item = entry.item.take()?;

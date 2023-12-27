@@ -1,6 +1,6 @@
 [package]
 name = "quick_cache"
-version = "0.5.0"
+version = "0.4.1"
 edition = "2021"
 description = "Lightweight and high performance concurrent cache"
 repository = "https://github.com/arthurprs/quick-cache"
@@ -15,7 +15,6 @@ rust-version = "1.63"
 [features]
 default = ["ahash", "parking_lot"]
 shuttle = ["dep:shuttle"]
-stats = []
 
 [dependencies]
 ahash = { optional = true, version = "0.8" }

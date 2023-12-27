@@ -1,6 +1,9 @@
 #![no_main]
+use std::time::Duration;
+
+use ahash::{HashMap, HashSet};
 use libfuzzer_sys::fuzz_target;
-use quick_cache::{sync::Cache, Lifecycle, OptionsBuilder, Weighter};
+use quick_cache::{sync::Cache, GuardResult, Lifecycle, OptionsBuilder, Weighter};
 
 #[derive(Clone)]
 struct MyWeighter;
@@ -14,11 +17,19 @@ impl Weighter<u16, (u16, u16)> for MyWeighter {
     }
 }
 
+fn is_valid(key: u16) -> bool {
+    key % 100 != 0
+}
+
 impl Lifecycle<u16, (u16, u16)> for MyLifecycle {
     type RequestState = Vec<(u16, (u16, u16))>;
 
     fn begin_request(&self) -> Self::RequestState {
         Default::default()
+    }
+
+    fn is_valid(&self, key: &u16, _val: &(u16, u16)) -> bool {
+        is_valid(*key)
     }
 
     fn before_evict(&self, _state: &mut Self::RequestState, _key: &u16, val: &mut (u16, u16)) {
@@ -54,16 +65,19 @@ fuzz_target!(|ops: Vec<u16>| {
         .build()
         .unwrap();
     let cache = Cache::with_options(options, MyWeighter, hasher, MyLifecycle);
+    let mut placeholders = HashMap::default();
     for (i, op) in ops.iter().enumerate() {
+        let v = *op;
         if i % 8 == 0 {
             // eprintln!("remove {op}");
             if let Some((rem_k, _)) = cache.remove(op) {
+                placeholders.remove(op);
                 assert_eq!(rem_k, *op);
             }
             assert!(cache.get(op).is_none());
         } else if i % 10 == 0 {
-            let v = i as u16;
             // eprintln!("replace {op} {v}");
+            placeholders.remove(op);
             if let Ok(evicted) = cache.replace_with_lifecycle(*op, (v, v), false) {
                 // if k is present it must have value v
                 let get = cache.get(op);
@@ -72,9 +86,20 @@ fuzz_target!(|ops: Vec<u16>| {
             } else {
                 assert!(cache.get(op).is_none());
             }
+        } else if i % 9 == 0 {
+            // eprintln!("get_value_or_guard {op} {v}");
+            match cache.get_value_or_guard(op, Some(Duration::default())) {
+                GuardResult::Value(gv) => {
+                    assert_eq!(gv.0, v);
+                }
+                GuardResult::Guard(g) => {
+                    placeholders.insert(*op, g);
+                }
+                GuardResult::Timeout => assert!(placeholders.contains_key(op)),
+            }
         } else {
-            let v = i as u16;
             // eprintln!("insert {op} {v}");
+            placeholders.remove(op);
             let evicted = cache.insert_with_lifecycle(*op, (v, v));
             // if k is present it must have value v
             let get = cache.get(op);
@@ -86,12 +111,12 @@ fuzz_target!(|ops: Vec<u16>| {
 });
 
 fn check_evicted(key: u16, get: Option<(u16, u16)>, evicted: Vec<(u16, (u16, u16))>) {
-    let mut evicted_hm = ahash::HashSet::default();
+    let mut evicted_hm = HashSet::default();
     evicted_hm.reserve(evicted.len());
-    for (k, (_, w)) in evicted {
-        // we can't evict a 0 weight item, unless it was for the same key
-        assert!(k == key || w != 0);
+    for (ek, (_, ew)) in evicted {
+        // we can't evict a 0 weight item, unless it was for the same key or is invalid
+        assert!(ew != 0 || ek == key || !is_valid(ek));
         // we can't evict something twice, except if the insert displaced an old old value but the new value also got evicted
-        assert!(evicted_hm.insert(k) || (k == key && get.is_none()));
+        assert!(evicted_hm.insert(ek) || (ek == key && get.is_none()));
     }
 }

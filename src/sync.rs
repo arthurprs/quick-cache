@@ -176,13 +176,11 @@ impl<
     }
 
     /// Returns the number of misses
-    #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.shards.iter().map(|s| s.read().misses()).sum()
     }
 
     /// Returns the number of hits
-    #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.shards.iter().map(|s| s.read().hits()).sum()
     }
@@ -242,10 +240,8 @@ impl<
     where
         Q: Hash + Equivalent<Key>,
     {
-        let lcs = self.lifecycle.begin_request();
         let (shard, hash) = self.shard_for(key).unwrap();
         let removed = shard.write().remove(hash, key);
-        self.lifecycle.end_request(lcs);
         removed
     }
 
@@ -305,11 +301,14 @@ impl<
     }
 
     /// Gets an item from the cache with key `key` .
+    ///
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
     /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
+    ///
+    /// A `None` `timeout` means to wait forever.
     pub fn get_value_or_guard<'a, Q>(
         &'a self,
         key: &Q,
@@ -325,7 +324,7 @@ impl<
         PlaceholderGuard::join(&self.lifecycle, shard, hash, key.to_owned(), timeout)
     }
 
-    /// Gets or inserts an item in the cache with key `key` .
+    /// Gets or inserts an item in the cache with key `key`.
     pub fn get_or_insert_with<Q, E>(
         &self,
         key: &Q,

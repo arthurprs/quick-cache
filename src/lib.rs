@@ -36,13 +36,9 @@
 //! A user can optionally provide a custom `Lifecycle` implementation to hook into the lifecycle of cache entries.
 //!
 //! Example use cases:
+//! * add a TTL (time-to-live) or TTI (time-to-idle) timestamp to entries.
 //! * send evicted items to a channel, achieving the equivalent to an eviction listener feature.
 //! * zero out item weights so they are left in the cache instead of evicted.
-//!
-//! # Stats
-//!
-//! By enabling the `stats` feature the cache will track the number of hits and misses.
-//!
 //!
 //! # Hasher
 //!
@@ -139,10 +135,22 @@ impl<Key, Val> Weighter<Key, Val> for UnitWeighter {
 pub trait Lifecycle<Key, Val> {
     type RequestState;
 
+    /// Returns whether the entry is still valid (e.g. has not expired).
+    /// An invalid entry won't be returned in `get*()/peek()` and will be evicted as soon as possible.
+    #[allow(unused_variables)]
+    #[inline]
+    fn is_valid(&self, key: &Key, val: &Val) -> bool {
+        true
+    }
+
     /// Called before the request starts, e.g.: remove, insert.
     fn begin_request(&self) -> Self::RequestState;
 
-    /// Called when a cache item is about to be evicted. This is the only time the item can change its weight.
+    /// Called when a cache item is about to be evicted.
+    /// Note that value replacement (e.g. insertions for the same key) won't call this method.
+    ///
+    /// This is the only time the item can change its weight. If the weight becomes 0 then the item
+    /// will be left in the cache, otherwise it'll still be removed.
     #[allow(unused_variables)]
     #[inline]
     fn before_evict(&self, state: &mut Self::RequestState, key: &Key, val: &mut Val) {}

@@ -9,14 +9,11 @@ use crate::{
     linked_slab::{LinkedSlab, Token},
     placeholder::{new_shared_placeholder, SharedPlaceholder},
     shim::sync::{
-        atomic::{self, AtomicBool},
+        atomic::{self, AtomicBool, AtomicU64},
         Arc,
     },
     Equivalent, Lifecycle,
 };
-
-#[cfg(feature = "stats")]
-use crate::shim::sync::atomic::AtomicU64;
 
 /// Superset of Weighter (weights 0u32..=u32::MAX) that returns the same weight as u64.
 /// Since each shard can only hold up to u32::MAX - 1 items its internal weight cannot overflow.
@@ -56,7 +53,7 @@ pub struct Resident<Key, Val> {
 #[derive(Debug)]
 pub struct Placeholder<Key, Val> {
     key: Key,
-    hot: bool,
+    hot: ResidentState,
     shared: SharedPlaceholder<Val>,
 }
 
@@ -64,16 +61,6 @@ enum Entry<Key, Val> {
     Resident(Resident<Key, Val>),
     Placeholder(Placeholder<Key, Val>),
     Ghost(u64),
-}
-
-impl<Key, Val> Entry<Key, Val> {
-    fn dbg(&self) -> &'static str {
-        match self {
-            Entry::Resident(_) => "Resident",
-            Entry::Placeholder(_) => "Placeholder",
-            Entry::Ghost(_) => "Ghost",
-        }
-    }
 }
 
 /// A bounded cache using a modified CLOCK-PRO eviction policy.
@@ -100,45 +87,31 @@ pub struct CacheShard<Key, Val, We, B, L> {
     num_cold: usize,
     num_non_resident: usize,
     capacity_non_resident: usize,
-    #[cfg(feature = "stats")]
     hits: AtomicU64,
-    #[cfg(feature = "stats")]
     misses: AtomicU64,
     weighter: We,
     pub(crate) lifecycle: L,
 }
 
 macro_rules! record_hit {
-    ($self: expr) => {
-        #[cfg(features = "stats")]
-        {
-            $self.hits.fetch_add(1, atomic::Ordering::Relaxed);
-        }
-    };
+    ($self: expr) => {{
+        $self.hits.fetch_add(1, atomic::Ordering::Relaxed);
+    }};
 }
 macro_rules! record_hit_mut {
-    ($self: expr) => {
-        #[cfg(features = "stats")]
-        {
-            *$self.hits.get_mut() += 1;
-        }
-    };
+    ($self: expr) => {{
+        *$self.hits.get_mut() += 1;
+    }};
 }
 macro_rules! record_miss {
-    ($self: expr) => {
-        #[cfg(features = "stats")]
-        {
-            $self.misses.fetch_add(1, atomic::Ordering::Relaxed);
-        }
-    };
+    ($self: expr) => {{
+        $self.misses.fetch_add(1, atomic::Ordering::Relaxed);
+    }};
 }
 macro_rules! record_miss_mut {
-    ($self: expr) => {
-        #[cfg(features = "stats")]
-        {
-            *$self.misses.get_mut() += 1;
-        }
-    };
+    ($self: expr) => {{
+        *$self.misses.get_mut() += 1;
+    }};
 }
 
 impl<Key, Val, We, B, L> CacheShard<Key, Val, We, B, L> {
@@ -177,9 +150,7 @@ impl<
             map: RawTable::with_capacity(0),
             entries: LinkedSlab::with_capacity(0),
             weight_capacity,
-            #[cfg(feature = "stats")]
             hits: Default::default(),
-            #[cfg(feature = "stats")]
             misses: Default::default(),
             cold_head: None,
             hot_head: None,
@@ -198,6 +169,7 @@ impl<
 
     #[cfg(fuzzing)]
     pub fn validate(&self) {
+        self.entries.validate();
         let mut num_hot = 0;
         let mut num_cold = 0;
         let mut num_non_resident = 0;
@@ -268,12 +240,10 @@ impl<
         self.weight_capacity
     }
 
-    #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.hits.load(atomic::Ordering::Relaxed)
     }
 
-    #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.misses.load(atomic::Ordering::Relaxed)
     }
@@ -364,7 +334,11 @@ impl<
         self.map
             .get(hash, |&idx| {
                 let (entry, _) = self.entries.get(idx).unwrap();
-                matches!(entry, Entry::Resident(Resident { key,.. }) if k.equivalent(key) )
+                matches!(
+                    entry,
+                    Entry::Resident(Resident { key, value, .. })
+                    if k.equivalent(key) && self.lifecycle.is_valid(key, value)
+                )
             })
             .copied()
     }
@@ -502,7 +476,8 @@ impl<
                 unreachable!()
             };
             debug_assert!(resident.state == ResidentState::Cold);
-            if *resident.referenced.get_mut() {
+            let is_valid = self.lifecycle.is_valid(&resident.key, &resident.value);
+            if is_valid && *resident.referenced.get_mut() {
                 *resident.referenced.get_mut() = false;
                 resident.state = ResidentState::Hot;
                 let weight = self.weighter.weight(&resident.key, &resident.value);
@@ -524,7 +499,7 @@ impl<
             }
 
             let weight = self.weighter.weight(&resident.key, &resident.value);
-            if weight == 0 {
+            if is_valid && weight == 0 {
                 if self.weight_cold == 0 {
                     self.advance_hot(lcs);
                     return;
@@ -536,27 +511,27 @@ impl<
             self.weight_cold -= weight;
             self.lifecycle
                 .before_evict(lcs, &resident.key, &mut resident.value);
-            if self.weighter.weight(&resident.key, &resident.value) == 0 {
+            if is_valid && self.weighter.weight(&resident.key, &resident.value) == 0 {
                 self.cold_head = Some(next);
                 return;
             }
             let hash = Self::hash_static(&self.hash_builder, &resident.key);
-            let Entry::Resident(resident) = mem::replace(entry, Entry::Ghost(hash)) else {
+            let Entry::Resident(evicted) = mem::replace(entry, Entry::Ghost(hash)) else {
                 unreachable!()
             };
-            self.num_cold -= 1;
-            self.num_non_resident += 1;
             Self::relink(
                 &mut self.entries,
                 idx,
                 &mut self.cold_head,
                 &mut self.ghost_head,
             );
+            self.num_cold -= 1;
+            self.num_non_resident += 1;
             // evict from ghost if oversized
             if self.num_non_resident > self.capacity_non_resident {
                 self.advance_ghost();
             }
-            self.lifecycle.on_evict(lcs, resident.key, resident.value);
+            self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
             return;
         }
     }
@@ -574,20 +549,21 @@ impl<
                 unreachable!()
             };
             debug_assert_eq!(resident.state, ResidentState::Hot);
-            if *resident.referenced.get_mut() {
+            let is_valid = self.lifecycle.is_valid(&resident.key, &resident.value);
+            if is_valid && *resident.referenced.get_mut() {
                 *resident.referenced.get_mut() = false;
                 self.hot_head = Some(next);
                 continue;
             }
             let weight = self.weighter.weight(&resident.key, &resident.value);
-            if weight == 0 {
+            if is_valid && weight == 0 {
                 self.hot_head = Some(next);
                 continue;
             }
             self.weight_hot -= weight;
             self.lifecycle
                 .before_evict(lcs, &resident.key, &mut resident.value);
-            if self.weighter.weight(&resident.key, &resident.value) == 0 {
+            if is_valid && self.weighter.weight(&resident.key, &resident.value) == 0 {
                 self.hot_head = Some(next);
             } else {
                 self.num_hot -= 1;
@@ -595,10 +571,10 @@ impl<
                 let (entry, next) = self.entries.remove(idx).unwrap();
                 self.hot_head = next;
                 self.map_remove(hash, idx);
-                let Entry::Resident(resident) = entry else {
+                let Entry::Resident(evicted) = entry else {
                     unreachable!()
                 };
-                self.lifecycle.on_evict(lcs, resident.key, resident.value);
+                self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
             }
             return;
         }
@@ -610,7 +586,7 @@ impl<
         let idx = self.ghost_head.unwrap();
         let (entry, _) = self.entries.get_mut(idx).unwrap();
         let Entry::Ghost(hash) = *entry else {
-            unreachable!("{}", entry.dbg())
+            unreachable!()
         };
         self.num_non_resident -= 1;
         self.map_remove(hash, idx);
@@ -630,55 +606,78 @@ impl<
         // caller must have already handled overweight items
         debug_assert!(weight <= self.weight_capacity);
         let (entry, _) = self.entries.get_mut(idx).unwrap();
+        let referenced;
+        let enter_state;
         match entry {
-            Entry::Resident(resident) => {
-                // re-insert counts as a hit unless it's a soft replace
-                let referenced = *resident.referenced.get_mut()
-                    || !matches!(strategy, InsertStrategy::Replace { soft: true });
-                let mut non_resident = Resident {
-                    key,
-                    value,
-                    state: resident.state,
-                    referenced: AtomicBool::new(referenced),
-                };
-                mem::swap(resident, &mut non_resident);
-                let evicted_weight = self.weighter.weight(&non_resident.key, &non_resident.value);
-                if resident.state == ResidentState::Hot {
-                    self.weight_hot -= evicted_weight;
-                    self.weight_hot += weight;
-                } else {
-                    self.weight_cold -= evicted_weight;
-                    self.weight_cold += weight;
-                }
-                self.lifecycle
-                    .on_evict(lcs, non_resident.key, non_resident.value);
-            }
-            Entry::Placeholder(..) | Entry::Ghost(..)
-                if matches!(strategy, InsertStrategy::Replace { .. }) =>
+            Entry::Resident(resident)
+                if self.lifecycle.is_valid(&resident.key, &resident.value) =>
             {
+                enter_state = resident.state;
+                referenced = *resident.referenced.get_mut()
+                    || matches!(strategy, InsertStrategy::Replace { soft: false });
+            }
+            _ if matches!(strategy, InsertStrategy::Replace { .. }) => {
                 return Err((key, value));
             }
-            Entry::Placeholder(..) | Entry::Ghost(..) => {
-                let evicted = mem::replace(
-                    entry,
-                    Entry::Resident(Resident {
-                        key,
-                        value,
-                        state: ResidentState::Hot,
-                        referenced: Default::default(),
-                    }),
-                );
-                self.num_hot += 1;
-                self.weight_hot += weight;
-                if matches!(evicted, Entry::Ghost(..)) {
-                    self.num_non_resident -= 1;
-                    Self::relink(
-                        &mut self.entries,
-                        idx,
-                        &mut self.ghost_head,
-                        &mut self.hot_head,
-                    );
+            Entry::Resident(resident) => {
+                enter_state = resident.state;
+                referenced = false;
+            }
+            Entry::Ghost(_) => {
+                referenced = false;
+                enter_state = ResidentState::Hot;
+            }
+            Entry::Placeholder(ph) => {
+                referenced = true;
+                enter_state = ph.hot;
+            }
+        }
+
+        let evicted = mem::replace(
+            entry,
+            Entry::Resident(Resident {
+                key,
+                value,
+                state: enter_state,
+                referenced: AtomicBool::new(referenced),
+            }),
+        );
+        match evicted {
+            Entry::Resident(evicted) => {
+                debug_assert_eq!(evicted.state, enter_state);
+                let evicted_weight = self.weighter.weight(&evicted.key, &evicted.value);
+                if enter_state == ResidentState::Hot {
+                    self.weight_hot += weight;
+                    self.weight_hot -= evicted_weight;
+                } else {
+                    self.weight_cold += weight;
+                    self.weight_cold -= evicted_weight;
                 }
+                self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
+            }
+            Entry::Ghost(_) => {
+                self.weight_hot += weight;
+                self.num_hot += 1;
+                self.num_non_resident -= 1;
+                Self::relink(
+                    &mut self.entries,
+                    idx,
+                    &mut self.ghost_head,
+                    &mut self.hot_head,
+                );
+            }
+            Entry::Placeholder(_) => {
+                let list_head = if enter_state == ResidentState::Hot {
+                    self.num_hot += 1;
+                    self.weight_hot += weight;
+                    &mut self.hot_head
+                } else {
+                    self.num_cold += 1;
+                    self.weight_cold += weight;
+                    &mut self.cold_head
+                };
+                self.entries.link(idx, *list_head);
+                list_head.get_or_insert(idx);
             }
         }
 
@@ -749,7 +748,7 @@ impl<
         let (entry, _) = self.entries.get_mut(placeholder.idx).unwrap();
         let Entry::Placeholder(Placeholder {
             key,
-            hot: placeholder_hot,
+            hot: mut placeholder_hot,
             ..
         }) = mem::replace(entry, Entry::Ghost(0))
         else {
@@ -764,28 +763,27 @@ impl<
             return Ok(());
         }
 
-        let enter_hot =
-            placeholder_hot || self.weight_hot + self.weight_cold + weight <= self.weight_capacity;
-        let (state, list_head) = if enter_hot {
-            self.num_hot += 1;
-            self.weight_hot += weight;
-            (ResidentState::Hot, &mut self.hot_head)
-        } else {
-            self.num_cold += 1;
-            self.weight_cold += weight;
-            (ResidentState::Cold, &mut self.cold_head)
-        };
+        if self.weight_hot + self.weight_cold + weight <= self.weight_capacity {
+            placeholder_hot = ResidentState::Hot;
+        }
         *entry = Entry::Resident(Resident {
             key,
             value,
-            state,
+            state: placeholder_hot,
             referenced: referenced.into(),
         });
 
+        let list_head = if placeholder_hot == ResidentState::Hot {
+            self.num_hot += 1;
+            self.weight_hot += weight;
+            &mut self.hot_head
+        } else {
+            self.num_cold += 1;
+            self.weight_cold += weight;
+            &mut self.cold_head
+        };
         self.entries.link(placeholder.idx, *list_head);
-        if list_head.is_none() {
-            *list_head = Some(placeholder.idx);
-        }
+        list_head.get_or_insert(placeholder.idx);
 
         // the replacement may have made the hot section/cache too big
         while self.weight_hot > self.weight_target_hot {
@@ -839,7 +837,7 @@ impl<
             }
             false
         } else {
-            // cache is filling up
+            // cache if filling, admit as hot if possible
             self.weight_hot + weight <= self.weight_target_hot
         };
 
@@ -861,65 +859,82 @@ impl<
             }),
             *list_head,
         );
-        if list_head.is_none() {
-            *list_head = Some(idx);
-        }
-        // insert the new key in the map
+        list_head.get_or_insert(idx);
         self.map_insert(hash, idx);
         Ok(())
     }
 
-    pub fn get_value_or_placeholder(
+    pub fn upsert_placeholder(
         &mut self,
+        lcs: &mut L::RequestState,
         hash: u64,
         key: Key,
     ) -> Result<Val, (SharedPlaceholder<Val>, bool)>
     where
         Val: Clone,
     {
+        let shared;
         if let Some(idx) = self.search(hash, &key) {
             let (entry, _) = self.entries.get_mut(idx).unwrap();
-            match entry {
-                Entry::Resident(resident) => {
-                    *resident.referenced.get_mut() = true;
-                    record_hit_mut!(self);
-                    Ok(resident.value.clone())
-                }
+            let list_head = match entry {
                 Entry::Placeholder(p) => {
                     record_hit_mut!(self);
-                    Err((p.shared.clone(), false))
+                    return Err((p.shared.clone(), false));
                 }
-                Entry::Ghost(..) => {
-                    record_miss_mut!(self);
-                    let shared = new_shared_placeholder(hash, idx);
-                    *entry = Entry::Placeholder(Placeholder {
-                        key,
-                        hot: true,
-                        shared: shared.clone(),
-                    });
-                    let next_ghost = self.entries.unlink(idx);
-                    if self.ghost_head == Some(idx) {
-                        self.ghost_head = next_ghost;
+                Entry::Resident(resident)
+                    if self.lifecycle.is_valid(&resident.key, &resident.value) =>
+                {
+                    *resident.referenced.get_mut() = true;
+                    record_hit_mut!(self);
+                    return Ok(resident.value.clone());
+                }
+                Entry::Resident(_) => {
+                    let Entry::Resident(evicted) = mem::replace(entry, Entry::Ghost(0)) else {
+                        unreachable!()
+                    };
+                    let weight = self.weighter.weight(&evicted.key, &evicted.value);
+                    self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
+                    if evicted.state == ResidentState::Hot {
+                        self.weight_hot -= weight;
+                        self.num_hot -= 1;
+                        &mut self.hot_head
+                    } else {
+                        self.weight_cold -= weight;
+                        self.num_cold -= 1;
+                        &mut self.cold_head
                     }
-                    Err((shared, true))
                 }
+                Entry::Ghost(_) => {
+                    self.num_non_resident -= 1;
+                    &mut self.ghost_head
+                }
+            };
+            shared = new_shared_placeholder(hash, idx);
+            *entry = Entry::Placeholder(Placeholder {
+                key,
+                hot: ResidentState::Hot,
+                shared: shared.clone(),
+            });
+            let next = self.entries.unlink(idx);
+            if *list_head == Some(idx) {
+                *list_head = next;
             }
         } else {
-            record_miss_mut!(self);
             let idx = self.entries.next_free();
-            let shared = new_shared_placeholder(hash, idx);
+            shared = new_shared_placeholder(hash, idx);
             let idx_ = self.entries.insert(
                 Entry::Placeholder(Placeholder {
                     key,
-                    hot: false,
+                    hot: ResidentState::Cold,
                     shared: shared.clone(),
                 }),
                 None,
             );
             debug_assert_eq!(idx, idx_);
             self.map_insert(hash, idx);
-            Err((shared, true))
         }
+        record_miss_mut!(self);
+        Err((shared, true))
     }
 }
 
