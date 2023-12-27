@@ -858,7 +858,6 @@ impl<
 
     pub fn upsert_placeholder(
         &mut self,
-        _lcs: &mut L::RequestState,
         hash: u64,
         key: Key,
     ) -> Result<Val, (SharedPlaceholder<Val>, bool)>
