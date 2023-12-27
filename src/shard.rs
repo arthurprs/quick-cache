@@ -336,8 +336,8 @@ impl<
                 let (entry, _) = self.entries.get(idx).unwrap();
                 matches!(
                     entry,
-                    Entry::Resident(Resident { key, value, .. })
-                    if k.equivalent(key) && self.lifecycle.is_valid(key, value)
+                    Entry::Resident(Resident { key, .. })
+                    if k.equivalent(key)
                 )
             })
             .copied()
@@ -475,9 +475,8 @@ impl<
             let Entry::Resident(resident) = entry else {
                 unreachable!()
             };
-            debug_assert!(resident.state == ResidentState::Cold);
-            let is_valid = self.lifecycle.is_valid(&resident.key, &resident.value);
-            if is_valid && *resident.referenced.get_mut() {
+            debug_assert_eq!(resident.state, ResidentState::Cold);
+            if *resident.referenced.get_mut() {
                 *resident.referenced.get_mut() = false;
                 resident.state = ResidentState::Hot;
                 let weight = self.weighter.weight(&resident.key, &resident.value);
@@ -499,7 +498,7 @@ impl<
             }
 
             let weight = self.weighter.weight(&resident.key, &resident.value);
-            if is_valid && weight == 0 {
+            if weight == 0 {
                 if self.weight_cold == 0 {
                     self.advance_hot(lcs);
                     return;
@@ -511,7 +510,7 @@ impl<
             self.weight_cold -= weight;
             self.lifecycle
                 .before_evict(lcs, &resident.key, &mut resident.value);
-            if is_valid && self.weighter.weight(&resident.key, &resident.value) == 0 {
+            if self.weighter.weight(&resident.key, &resident.value) == 0 {
                 self.cold_head = Some(next);
                 return;
             }
@@ -549,21 +548,20 @@ impl<
                 unreachable!()
             };
             debug_assert_eq!(resident.state, ResidentState::Hot);
-            let is_valid = self.lifecycle.is_valid(&resident.key, &resident.value);
-            if is_valid && *resident.referenced.get_mut() {
+            if *resident.referenced.get_mut() {
                 *resident.referenced.get_mut() = false;
                 self.hot_head = Some(next);
                 continue;
             }
             let weight = self.weighter.weight(&resident.key, &resident.value);
-            if is_valid && weight == 0 {
+            if weight == 0 {
                 self.hot_head = Some(next);
                 continue;
             }
             self.weight_hot -= weight;
             self.lifecycle
                 .before_evict(lcs, &resident.key, &mut resident.value);
-            if is_valid && self.weighter.weight(&resident.key, &resident.value) == 0 {
+            if self.weighter.weight(&resident.key, &resident.value) == 0 {
                 self.hot_head = Some(next);
             } else {
                 self.num_hot -= 1;
@@ -609,19 +607,13 @@ impl<
         let referenced;
         let enter_state;
         match entry {
-            Entry::Resident(resident)
-                if self.lifecycle.is_valid(&resident.key, &resident.value) =>
-            {
+            Entry::Resident(resident) => {
                 enter_state = resident.state;
                 referenced = *resident.referenced.get_mut()
                     || matches!(strategy, InsertStrategy::Replace { soft: false });
             }
             _ if matches!(strategy, InsertStrategy::Replace { .. }) => {
                 return Err((key, value));
-            }
-            Entry::Resident(resident) => {
-                enter_state = resident.state;
-                referenced = false;
             }
             Entry::Ghost(_) => {
                 referenced = false;
@@ -866,7 +858,7 @@ impl<
 
     pub fn upsert_placeholder(
         &mut self,
-        lcs: &mut L::RequestState,
+        _lcs: &mut L::RequestState,
         hash: u64,
         key: Key,
     ) -> Result<Val, (SharedPlaceholder<Val>, bool)>
@@ -877,32 +869,14 @@ impl<
         if let Some(idx) = self.search(hash, &key) {
             let (entry, _) = self.entries.get_mut(idx).unwrap();
             let list_head = match entry {
-                Entry::Placeholder(p) => {
-                    record_hit_mut!(self);
-                    return Err((p.shared.clone(), false));
-                }
-                Entry::Resident(resident)
-                    if self.lifecycle.is_valid(&resident.key, &resident.value) =>
-                {
+                Entry::Resident(resident) => {
                     *resident.referenced.get_mut() = true;
                     record_hit_mut!(self);
                     return Ok(resident.value.clone());
                 }
-                Entry::Resident(_) => {
-                    let Entry::Resident(evicted) = mem::replace(entry, Entry::Ghost(0)) else {
-                        unreachable!()
-                    };
-                    let weight = self.weighter.weight(&evicted.key, &evicted.value);
-                    self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
-                    if evicted.state == ResidentState::Hot {
-                        self.weight_hot -= weight;
-                        self.num_hot -= 1;
-                        &mut self.hot_head
-                    } else {
-                        self.weight_cold -= weight;
-                        self.num_cold -= 1;
-                        &mut self.cold_head
-                    }
+                Entry::Placeholder(p) => {
+                    record_hit_mut!(self);
+                    return Err((p.shared.clone(), false));
                 }
                 Entry::Ghost(_) => {
                     self.num_non_resident -= 1;

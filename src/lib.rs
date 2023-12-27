@@ -135,15 +135,7 @@ impl<Key, Val> Weighter<Key, Val> for UnitWeighter {
 pub trait Lifecycle<Key, Val> {
     type RequestState;
 
-    /// Returns whether the entry is still valid (e.g. has not expired).
-    /// An invalid entry won't be returned in `get*()/peek()` and will be evicted as soon as possible.
-    #[allow(unused_variables)]
-    #[inline]
-    fn is_valid(&self, key: &Key, val: &Val) -> bool {
-        true
-    }
-
-    /// Called before the request starts, e.g.: remove, insert.
+    /// Called before the insert request starts, e.g.: insert, replace.
     fn begin_request(&self) -> Self::RequestState;
 
     /// Called when a cache item is about to be evicted.

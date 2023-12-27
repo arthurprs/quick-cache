@@ -17,19 +17,11 @@ impl Weighter<u16, (u16, u16)> for MyWeighter {
     }
 }
 
-fn is_valid(key: u16) -> bool {
-    key % 100 != 0
-}
-
 impl Lifecycle<u16, (u16, u16)> for MyLifecycle {
     type RequestState = Vec<(u16, (u16, u16))>;
 
     fn begin_request(&self) -> Self::RequestState {
         Default::default()
-    }
-
-    fn is_valid(&self, key: &u16, _val: &(u16, u16)) -> bool {
-        is_valid(*key)
     }
 
     fn before_evict(&self, _state: &mut Self::RequestState, _key: &u16, val: &mut (u16, u16)) {
@@ -114,8 +106,8 @@ fn check_evicted(key: u16, get: Option<(u16, u16)>, evicted: Vec<(u16, (u16, u16
     let mut evicted_hm = HashSet::default();
     evicted_hm.reserve(evicted.len());
     for (ek, (_, ew)) in evicted {
-        // we can't evict a 0 weight item, unless it was for the same key or is invalid
-        assert!(ew != 0 || ek == key || !is_valid(ek));
+        // we can't evict a 0 weight item, unless it was for the same key
+        assert!(ew != 0 || ek == key);
         // we can't evict something twice, except if the insert displaced an old old value but the new value also got evicted
         assert!(evicted_hm.insert(ek) || (ek == key && get.is_none()));
     }
