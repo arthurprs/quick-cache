@@ -308,7 +308,7 @@ impl<
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
     ///
-    /// A `None` `timeout` means to wait forever.
+    /// A `None` `timeout` means waiting forever.
     pub fn get_value_or_guard<'a, Q>(
         &'a self,
         key: &Q,

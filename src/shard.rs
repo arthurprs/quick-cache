@@ -868,7 +868,7 @@ impl<
         let shared;
         if let Some(idx) = self.search(hash, &key) {
             let (entry, _) = self.entries.get_mut(idx).unwrap();
-            let list_head = match entry {
+            match entry {
                 Entry::Resident(resident) => {
                     *resident.referenced.get_mut() = true;
                     record_hit_mut!(self);
@@ -879,19 +879,17 @@ impl<
                     return Err((p.shared.clone(), false));
                 }
                 Entry::Ghost(_) => {
-                    self.num_non_resident -= 1;
-                    &mut self.ghost_head
+                    shared = new_shared_placeholder(hash, idx);
+                    *entry = Entry::Placeholder(Placeholder {
+                        key,
+                        hot: ResidentState::Hot,
+                        shared: shared.clone(),
+                    });
+                    let next = self.entries.unlink(idx);
+                    if self.ghost_head == Some(idx) {
+                        self.ghost_head = next;
+                    }
                 }
-            };
-            shared = new_shared_placeholder(hash, idx);
-            *entry = Entry::Placeholder(Placeholder {
-                key,
-                hot: ResidentState::Hot,
-                shared: shared.clone(),
-            });
-            let next = self.entries.unlink(idx);
-            if *list_head == Some(idx) {
-                *list_head = next;
             }
         } else {
             let idx = self.entries.next_free();
