@@ -193,9 +193,7 @@ impl<
     ) -> GuardResult<'a, Key, Val, We, B, L> {
         let mut shard_guard = shard.write();
         let shared = match shard_guard.upsert_placeholder(hash, key) {
-            Ok(v) => {
-                return GuardResult::Value(v);
-            }
+            Ok(v) => return GuardResult::Value(v),
             Err((shared, true)) => {
                 return GuardResult::Guard(Self::start_loading(lifecycle, shard, shared));
             }
