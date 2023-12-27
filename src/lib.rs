@@ -36,7 +36,6 @@
 //! A user can optionally provide a custom `Lifecycle` implementation to hook into the lifecycle of cache entries.
 //!
 //! Example use cases:
-//! * add a TTL (time-to-live) or TTI (time-to-idle) timestamp to entries.
 //! * send evicted items to a channel, achieving the equivalent to an eviction listener feature.
 //! * zero out item weights so they are left in the cache instead of evicted.
 //!
