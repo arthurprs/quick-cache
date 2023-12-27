@@ -2,6 +2,7 @@
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use quick_cache::{sync::Cache, GuardResult, Lifecycle, OptionsBuilder, Weighter};
 
@@ -37,14 +38,30 @@ impl Lifecycle<u16, (u16, u16)> for MyLifecycle {
     }
 }
 
-fuzz_target!(|ops: Vec<u16>| {
-    if ops.len() < 6 {
-        return;
-    }
+#[derive(Debug, Arbitrary)]
+enum Op {
+    Insert(u16, u16),
+    Replace(u16, u16),
+    Placeholder(u16),
+    Remove(u16),
+}
+
+#[derive(Debug, Arbitrary)]
+struct Input {
+    ops: [u8; 6],
+    operations: Vec<Op>,
+}
+
+fuzz_target!(|input: Input| {
+    run(input);
+});
+
+fn run(input: Input) {
+    let Input { ops, operations } = input;
     let hasher =
         ahash::RandomState::with_seeds(ops[0] as u64, ops[1] as u64, ops[2] as u64, ops[3] as u64);
     let estimated_items_capacity = ops[0] as usize;
-    let weight_capacity = ops[0] as u64 * ops[1] as u64 * ops[2].min(1000) as u64;
+    let weight_capacity = ops[0] as u64 * ops[1] as u64 * ops[2] as u64;
     let hot_allocation = ops[3] as f64 / (u16::MAX as f64);
     let ghost_allocation = ops[4] as f64 / (u16::MAX as f64);
     let shards = (ops[5] as usize) % 10;
@@ -57,50 +74,54 @@ fuzz_target!(|ops: Vec<u16>| {
         .build()
         .unwrap();
     let cache = Cache::with_options(options, MyWeighter, hasher, MyLifecycle);
-    let mut placeholders = HashMap::default();
-    for (i, op) in ops.iter().enumerate() {
-        let v = *op;
-        if i % 8 == 0 {
-            // eprintln!("remove {op}");
-            if let Some((rem_k, _)) = cache.remove(op) {
-                placeholders.remove(op);
-                assert_eq!(rem_k, *op);
-            }
-            assert!(cache.get(op).is_none());
-        } else if i % 10 == 0 {
-            // eprintln!("replace {op} {v}");
-            placeholders.remove(op);
-            if let Ok(evicted) = cache.replace_with_lifecycle(*op, (v, v), false) {
+    let mut placeholders: HashMap<u16, _> = HashMap::default();
+    for op in operations {
+        match op {
+            Op::Insert(k, v) => {
+                // eprintln!("insert {k} {v}");
+                placeholders.remove(&k);
+                let evicted = cache.insert_with_lifecycle(k, (v, v));
                 // if k is present it must have value v
-                let get = cache.get(op);
+                let get = cache.get(&k);
                 assert!(get.is_none() || get.unwrap().0 == v);
-                check_evicted(*op, get, evicted);
-            } else {
-                assert!(cache.get(op).is_none());
+                check_evicted(k, get, evicted);
             }
-        } else if i % 9 == 0 {
-            // eprintln!("get_value_or_guard {op} {v}");
-            match cache.get_value_or_guard(op, Some(Duration::default())) {
-                GuardResult::Value(gv) => {
-                    assert_eq!(gv.0, v);
+            Op::Replace(k, v) => {
+                // eprintln!("replace {k} {v}");
+                placeholders.remove(&k);
+                if let Ok(evicted) = cache.replace_with_lifecycle(k, (v, v), false) {
+                    // if k is present it must have value v
+                    let get = cache.get(&k);
+                    assert!(get.is_none() || get.unwrap().0 == v);
+                    check_evicted(k, get, evicted);
+                } else {
+                    assert!(cache.get(&k).is_none());
                 }
-                GuardResult::Guard(g) => {
-                    placeholders.insert(*op, g);
-                }
-                GuardResult::Timeout => assert!(placeholders.contains_key(op)),
             }
-        } else {
-            // eprintln!("insert {op} {v}");
-            placeholders.remove(op);
-            let evicted = cache.insert_with_lifecycle(*op, (v, v));
-            // if k is present it must have value v
-            let get = cache.get(op);
-            assert!(get.is_none() || get.unwrap().0 == v);
-            check_evicted(*op, get, evicted);
+            Op::Placeholder(k) => {
+                // eprintln!("get_value_or_guard {k} {v}");
+                match cache.get_value_or_guard(&k, Some(Duration::default())) {
+                    GuardResult::Value(_gv) => {
+                        // assert_eq!(gv.0, v);
+                    }
+                    GuardResult::Guard(g) => {
+                        placeholders.insert(k, g);
+                    }
+                    GuardResult::Timeout => assert!(placeholders.contains_key(&k)),
+                }
+            }
+            Op::Remove(k) => {
+                // eprintln!("remove {k}");
+                if let Some((rem_k, _)) = cache.remove(&k) {
+                    placeholders.remove(&k);
+                    assert_eq!(rem_k, k);
+                }
+                assert!(cache.get(&k).is_none());
+            }
         }
     }
     cache.validate();
-});
+}
 
 fn check_evicted(key: u16, get: Option<(u16, u16)>, evicted: Vec<(u16, (u16, u16))>) {
     let mut evicted_hm = HashSet::default();
