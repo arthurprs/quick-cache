@@ -36,7 +36,8 @@ jobs:
           override: true
       - run: cargo test
       - run: cargo test --no-default-features
-      - run: cargo test --all-features
+      # no run because of shuttle feature and non-shuttle tests
+      - run: cargo test --all-features --no-run
 
   shuttle-tests:
     name: Tests
