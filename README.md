@@ -1,5 +1,10 @@
 # Quick Cache
 
+
+[![Crates.io](https://img.shields.io/crates/v/quick_cache.svg)](https://crates.io/crates/quick_cache)
+[![Docs](https://docs.rs/quick_cache/badge.svg)](https://docs.rs/quick_cache/latest)
+[![CI](https://github.com/arthurprs/quick-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/arthurprs/quick-cache/actions/workflows/ci.yml)
+
 Lightweight and high performance concurrent cache optimized for low cache overhead.
 
 * Small overhead compared to a concurrent hash table
@@ -52,45 +57,32 @@ fn main() {
     cache.insert(1, "1".to_string());
     cache.insert(54, "54".to_string());
     cache.insert(1000, "1000".to_string());
-    assert_eq!(*cache.get(&"1000").unwrap(), "1000");
+    assert_eq!(cache.get(&1000).unwrap(), "1000");
 }
 ```
 
 Using the `Equivalent` trait for complex keys
 
 ```rust
-use std::hash::Hash;
-use quick_cache::{Equivalent, sync::Cache};
+use quick_cache::{sync::Cache, Equivalent};
 
 #[derive(Debug, Hash)]
 pub struct Pair<A, B>(pub A, pub B);
 
-impl<A, B, C, D> PartialEq<(A, B)> for Pair<C, D>
+impl<A, B, C, D> Equivalent<(C, D)> for Pair<A, B>
 where
-    C: PartialEq<A>,
-    D: PartialEq<B>,
+    A: PartialEq<C>,
+    B: PartialEq<D>,
 {
-    fn eq(&self, rhs: &(A, B)) -> bool {
+    fn equivalent(&self, rhs: &(C, D)) -> bool {
         self.0 == rhs.0 && self.1 == rhs.1
     }
 }
 
-impl<A, B, X> Equivalent<X> for Pair<A, B>
-where
-    Pair<A, B>: PartialEq<X>,
-    A: Hash + Eq,
-    B: Hash + Eq,
-{
-    fn equivalent(&self, other: &X) -> bool {
-        *self == *other
-    }
-}
-
 fn main() {
-    let cache = Cache::new(5);
-    cache.insert(("square".to_string(), 2022), "blue");
-    // Normally the cache key would be the tuple (String, u32), which could force
-    // the caller to clone/allocate the string in order to form the tuple key.
+    let cache: Cache<(String, i32), String> = Cache::new(5);
+    cache.insert(("square".to_string(), 2022), "blue".to_string());
+    cache.insert(("square".to_string(), 2023), "black".to_string());
     assert_eq!(cache.get(&Pair("square", 2022)).unwrap(), "blue");
 }
 ```
