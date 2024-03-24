@@ -14,7 +14,7 @@ Lightweight and high performance concurrent cache optimized for low cache overhe
 * Atomic operations with `get_or_insert` and `get_value_or_guard` functions
 * Atomic async operations with `get_or_insert_async` and `get_value_or_guard_async` functions
 * Doesn't use background threads
-* One trivially verifiable usage of unsafe
+* Only trivially verifiable usages of unsafe
 * Small dependency tree
 
 The implementation is optimized for use cases where the cache access times and overhead can add up to be a significant cost.

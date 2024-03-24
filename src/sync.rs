@@ -1,16 +1,18 @@
 use std::{
     future::Future,
-    hash::{BuildHasher, Hash, Hasher},
+    hash::{BuildHasher, Hash},
     time::Duration,
 };
 
 use crate::{
     options::{Options, OptionsBuilder},
-    placeholder::{GuardResult, JoinFuture, PlaceholderGuard},
     shard::{CacheShard, InsertStrategy},
     shim::rw_lock::RwLock,
+    sync_placeholder::SharedPlaceholder,
     DefaultHashBuilder, Equivalent, Lifecycle, UnitWeighter, Weighter,
 };
+
+pub use crate::sync_placeholder::{GuardResult, JoinFuture, PlaceholderGuard};
 
 /// A concurrent cache.
 ///
@@ -30,8 +32,7 @@ pub struct Cache<
     L = DefaultLifecycle<Key, Val>,
 > {
     hash_builder: B,
-    #[allow(clippy::type_complexity)]
-    shards: Box<[RwLock<CacheShard<Key, Val, We, B, L>>]>,
+    shards: Box<[RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>]>,
     shards_mask: u64,
     lifecycle: L,
 }
@@ -176,27 +177,29 @@ impl<
     }
 
     /// Returns the number of misses
+    #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.shards.iter().map(|s| s.read().misses()).sum()
     }
 
     /// Returns the number of hits
+    #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.shards.iter().map(|s| s.read().hits()).sum()
     }
 
-    #[allow(clippy::type_complexity)]
     #[inline]
-    fn shard_for<Q: ?Sized>(
+    fn shard_for<Q>(
         &self,
         key: &Q,
-    ) -> Option<(&RwLock<CacheShard<Key, Val, We, B, L>>, u64)>
+    ) -> Option<(
+        &RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
+        u64,
+    )>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        let hash = hasher.finish();
+        let hash = self.hash_builder.hash_one(key);
         // When choosing the shard, rotate the hash bits usize::BITS / 2 so that we
         // give preference to the bits in the middle of the hash.
         // Internally hashbrown uses the lower bits for start of probing + the 7 highest,
@@ -216,9 +219,9 @@ impl<
     }
 
     /// Fetches an item from the cache whose key is `key`.
-    pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<Val>
+    pub fn get<Q>(&self, key: &Q) -> Option<Val>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
         let (shard, hash) = self.shard_for(key)?;
         shard.read().get(hash, key).cloned()
@@ -226,9 +229,9 @@ impl<
 
     /// Peeks an item from the cache whose key is `key`.
     /// Contrary to gets, peeks don't alter the key "hotness".
-    pub fn peek<Q: ?Sized>(&self, key: &Q) -> Option<Val>
+    pub fn peek<Q>(&self, key: &Q) -> Option<Val>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
         let (shard, hash) = self.shard_for(key)?;
         shard.read().peek(hash, key).cloned()
@@ -236,9 +239,9 @@ impl<
 
     /// Remove an item from the cache whose key is `key`.
     /// Returns the removed entry, if any.
-    pub fn remove<Q: ?Sized>(&self, key: &Q) -> Option<(Key, Val)>
+    pub fn remove<Q>(&self, key: &Q) -> Option<(Key, Val)>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
         let (shard, hash) = self.shard_for(key).unwrap();
         let removed = shard.write().remove(hash, key);
@@ -321,10 +324,12 @@ impl<
         if let Some(v) = shard.read().get(hash, key) {
             return GuardResult::Value(v.clone());
         }
-        PlaceholderGuard::join(&self.lifecycle, shard, hash, key.to_owned(), timeout)
+        PlaceholderGuard::join(&self.lifecycle, shard, hash, key, timeout)
     }
 
     /// Gets or inserts an item in the cache with key `key`.
+    ///
+    /// See also `get_value_or_guard` and `get_value_or_guard_async`.
     pub fn get_or_insert_with<Q, E>(
         &self,
         key: &Q,
@@ -350,9 +355,9 @@ impl<
     /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
-    pub async fn get_value_or_guard_async<'a, 'b, Q>(
+    pub async fn get_value_or_guard_async<'a, Q>(
         &'a self,
-        key: &'b Q,
+        key: &Q,
     ) -> Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
@@ -364,7 +369,7 @@ impl<
         JoinFuture::new(&self.lifecycle, shard, hash, key).await
     }
 
-    /// Gets or inserts an item in the cache with key `key` .
+    /// Gets or inserts an item in the cache with key `key`.
     pub async fn get_or_insert_async<'a, Q, E>(
         &self,
         key: &Q,
