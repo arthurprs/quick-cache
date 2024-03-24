@@ -1,6 +1,7 @@
 use crate::{
+    linked_slab::Token,
     options::*,
-    shard::{CacheShard, InsertStrategy},
+    shard::{self, CacheShard, InsertStrategy},
     DefaultHashBuilder, Equivalent, Lifecycle, RefMut, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
@@ -12,7 +13,7 @@ pub struct Cache<
     B = DefaultHashBuilder,
     L = DefaultLifecycle<Key, Val>,
 > {
-    shard: CacheShard<Key, Val, We, B, L>,
+    shard: CacheShard<Key, Val, We, B, L, SharedPlaceholder>,
 }
 
 impl<Key: Eq + Hash, Val> Cache<Key, Val> {
@@ -121,11 +122,13 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     }
 
     /// Returns the number of misses
+    #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.shard.misses()
     }
 
     /// Returns the number of hits
+    #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.shard.hits()
     }
@@ -137,9 +140,9 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     }
 
     /// Fetches an item from the cache. Callers should prefer `get_mut` whenever possible as it's more efficient.
-    pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<&Val>
+    pub fn get<Q>(&self, key: &Q) -> Option<&Val>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
         self.shard.get(self.shard.hash(key), key)
     }
@@ -147,17 +150,17 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// Fetches an item from the cache.
     ///
     /// Note: Leaking the returned RefMut might cause undefined behavior.
-    pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
         self.shard.get_mut(self.shard.hash(key), key)
     }
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
-    pub fn peek<Q: ?Sized>(&self, key: &Q) -> Option<&Val>
+    pub fn peek<Q>(&self, key: &Q) -> Option<&Val>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
         self.shard.peek(self.shard.hash(key), key)
     }
@@ -165,18 +168,18 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
     ///
     /// Note: Leaking the returned RefMut might cause undefined behavior.
-    pub fn peek_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
+    pub fn peek_mut<Q>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
         self.shard.peek_mut(self.shard.hash(key), key)
     }
 
     /// Remove an item from the cache whose key is `key`.
     /// Returns the removed entry, if any.
-    pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> Option<(Key, Val)>
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<(Key, Val)>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
         self.shard.remove(self.shard.hash(key), key)
     }
@@ -212,6 +215,101 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             InsertStrategy::Replace { soft },
         )?;
         Ok(lcs)
+    }
+
+    /// Gets or inserts an item in the cache with key `key`.
+    /// Returns a reference to the inserted `value` if it was admitted to the cache.
+    ///
+    /// See also `get_ref_or_guard`.
+    pub fn get_or_insert_with<Q, E>(
+        &mut self,
+        key: &Q,
+        with: impl FnOnce() -> Result<Val, E>,
+    ) -> Result<Option<&Val>, E>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
+        let idx = match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+            Ok((idx, _)) => idx,
+            Err((plh, _)) => {
+                let v = with()?;
+                let mut lcs = self.shard.lifecycle.begin_request();
+                let _ = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
+                plh.idx
+            }
+        };
+        Ok(self.shard.peek_token(idx))
+    }
+
+    /// Gets or inserts an item in the cache with key `key`.
+    /// Returns a mutable reference to the inserted `value` if it was admitted to the cache.
+    ///
+    /// See also `get_mut_or_guard`.
+    pub fn get_mut_or_insert_with<'a, Q, E>(
+        &'a mut self,
+        key: &Q,
+        with: impl FnOnce() -> Result<Val, E>,
+    ) -> Result<Option<RefMut<'a, Key, Val, We>>, E>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
+        let idx = match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+            Ok((idx, _)) => idx,
+            Err((plh, _)) => {
+                let v = with()?;
+                let mut lcs = self.shard.lifecycle.begin_request();
+                let _ = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
+                plh.idx
+            }
+        };
+        Ok(self.shard.peek_token_mut(idx))
+    }
+
+    /// Gets an item from the cache with key `key` .
+    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// that can be used to insert the value once it's computed.
+    pub fn get_ref_or_guard<'a, Q>(
+        &'a mut self,
+        key: &Q,
+    ) -> Result<&Val, Guard<'a, Key, Val, We, B, L>>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
+        // TODO: this could be using a simpler entry API
+        match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+            Ok((_, v)) => unsafe {
+                // Rustc gets insanely confused about returning from mut borrows
+                // Safety: v has the same lifetime as self
+                let v: *const Val = v;
+                Ok(&*v)
+            },
+            Err((placeholder, _)) => Err(Guard {
+                cache: self,
+                placeholder,
+                inserted: false,
+            }),
+        }
+    }
+
+    /// Gets an item from the cache with key `key` .
+    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// that can be used to insert the value once it's computed.
+    pub fn get_mut_or_guard<'a, Q>(
+        &'a mut self,
+        key: &Q,
+    ) -> Result<Option<RefMut<'a, Key, Val, We>>, Guard<'a, Key, Val, We, B, L>>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
+        // TODO: this could be using a simpler entry API
+        match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+            Ok((idx, _)) => Ok(self.shard.peek_token_mut(idx)),
+            Err((placeholder, _)) => Err(Guard {
+                cache: self,
+                placeholder,
+                inserted: false,
+            }),
+        }
     }
 
     /// Inserts an item in the cache with key `key`.
@@ -292,4 +390,80 @@ impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
 
     #[inline]
     fn on_evict(&self, _state: &mut Self::RequestState, _key: Key, _val: Val) {}
+}
+
+#[derive(Debug, Clone)]
+struct SharedPlaceholder {
+    hash: u64,
+    idx: Token,
+}
+
+pub struct Guard<'a, Key, Val, We, B, L> {
+    cache: &'a mut Cache<Key, Val, We, B, L>,
+    placeholder: SharedPlaceholder,
+    inserted: bool,
+}
+
+impl<'a, Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<Key, Val>>
+    Guard<'a, Key, Val, We, B, L>
+{
+    /// Inserts the value into the placeholder
+    pub fn insert(self, value: Val) {
+        self.insert_internal(value, false);
+    }
+
+    /// Inserts the value into the placeholder
+    pub fn insert_with_lifecycle(self, value: Val) -> L::RequestState {
+        self.insert_internal(value, true).unwrap()
+    }
+
+    fn insert_internal(mut self, value: Val, return_lcs: bool) -> Option<L::RequestState> {
+        let mut lcs = self.cache.shard.lifecycle.begin_request();
+        let replaced = self
+            .cache
+            .shard
+            .replace_placeholder(&mut lcs, &self.placeholder, false, value)
+            .is_err();
+        debug_assert!(replaced, "unsync replace_placeholder can't fail");
+        self.inserted = true;
+        if return_lcs {
+            Some(lcs)
+        } else {
+            self.cache.shard.lifecycle.end_request(lcs);
+            None
+        }
+    }
+}
+
+impl<'a, Key, Val, We, B, L> Drop for Guard<'a, Key, Val, We, B, L> {
+    fn drop(&mut self) {
+        #[cold]
+        fn drop_slow<Key, Val, We, B, L>(this: &mut Guard<'_, Key, Val, We, B, L>) {
+            this.cache.shard.remove_placeholder(&this.placeholder);
+        }
+        if !self.inserted {
+            drop_slow(self);
+        }
+    }
+}
+
+impl shard::SharedPlaceholder for SharedPlaceholder {
+    fn new(hash: u64, idx: Token) -> Self {
+        Self { hash, idx }
+    }
+
+    #[inline]
+    fn same_as(&self, _other: &Self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn hash(&self) -> u64 {
+        self.hash
+    }
+
+    #[inline]
+    fn idx(&self) -> Token {
+        self.idx
+    }
 }

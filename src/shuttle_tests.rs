@@ -3,7 +3,7 @@ use crate::{
         sync::{self, atomic, Arc},
         thread,
     },
-    GuardResult,
+    sync::GuardResult,
 };
 use std::{future::Future, task::Poll, time::Duration};
 

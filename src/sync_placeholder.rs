@@ -16,22 +16,37 @@ use crate::{
         },
         thread,
     },
-    Lifecycle, Weighter,
+    Equivalent, Lifecycle, Weighter,
 };
 
 pub type SharedPlaceholder<Val> = Arc<Placeholder<Val>>;
 
-#[allow(unknown_lints)] // arc_with_non_send_sync only present in 1.72 onwards
-#[allow(clippy::arc_with_non_send_sync)]
-pub fn new_shared_placeholder<Val>(hash: u64, idx: Token) -> SharedPlaceholder<Val> {
-    Arc::new(Placeholder {
-        hash,
-        idx,
-        state: RwLock::new(State {
-            waiters: Default::default(),
-            loading: LoadingState::Loading,
-        }),
-    })
+impl<Val> crate::shard::SharedPlaceholder for SharedPlaceholder<Val> {
+    fn new(hash: u64, idx: Token) -> Self {
+        Arc::new(Placeholder {
+            hash,
+            idx,
+            state: RwLock::new(State {
+                waiters: Default::default(),
+                loading: LoadingState::Loading,
+            }),
+        })
+    }
+
+    #[inline]
+    fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(self, other)
+    }
+
+    #[inline]
+    fn hash(&self) -> u64 {
+        self.hash
+    }
+
+    #[inline]
+    fn idx(&self) -> Token {
+        self.idx
+    }
 }
 
 #[derive(Debug)]
@@ -62,7 +77,7 @@ enum LoadingState<Val> {
 
 pub struct PlaceholderGuard<'a, Key, Val, We, B, L> {
     lifecycle: &'a L,
-    shard: &'a RwLock<CacheShard<Key, Val, We, B, L>>,
+    shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
     shared: SharedPlaceholder<Val>,
     inserted: bool,
 }
@@ -118,7 +133,7 @@ pub enum GuardResult<'a, Key, Val, We, B, L> {
 impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
     pub fn start_loading(
         lifecycle: &'a L,
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         shared: SharedPlaceholder<Val>,
     ) -> Self {
         debug_assert!(matches!(
@@ -133,17 +148,16 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
         }
     }
 
-    #[allow(clippy::type_complexity)]
     #[inline]
     fn join_internal(
         lifecycle: &'a L,
         // We take shard lock here even if unused, as manipulating the waiters list
         // requires holding it to avoid races.
         _shard_lock: Result<
-            RwLockWriteGuard<'a, CacheShard<Key, Val, We, B, L>>,
-            RwLockReadGuard<'a, CacheShard<Key, Val, We, B, L>>,
+            RwLockWriteGuard<'a, CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
+            RwLockReadGuard<'a, CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         >,
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         shared: &SharedPlaceholder<Val>,
         notified: bool,
         waiter_fn: impl FnOnce() -> Waiter,
@@ -184,16 +198,19 @@ impl<
         L: Lifecycle<Key, Val>,
     > PlaceholderGuard<'a, Key, Val, We, B, L>
 {
-    pub fn join(
+    pub fn join<Q>(
         lifecycle: &'a L,
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         hash: u64,
-        key: Key,
+        key: &Q,
         timeout: Option<Duration>,
-    ) -> GuardResult<'a, Key, Val, We, B, L> {
+    ) -> GuardResult<'a, Key, Val, We, B, L>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
         let mut shard_guard = shard.write();
         let shared = match shard_guard.upsert_placeholder(hash, key) {
-            Ok(v) => return GuardResult::Value(v),
+            Ok((_, v)) => return GuardResult::Value(v.clone()),
             Err((shared, true)) => {
                 return GuardResult::Guard(Self::start_loading(lifecycle, shard, shared));
             }
@@ -220,6 +237,7 @@ impl<
             if let Some(timeout) = timeout {
                 let start = Instant::now();
                 loop {
+                    #[cfg(not(fuzzing))]
                     thread::park_timeout(Instant::now().saturating_duration_since(start));
                     if notification.load(atomic::Ordering::Acquire) {
                         break;
@@ -332,13 +350,13 @@ impl<'a, Key, Val, We, B, L> std::fmt::Debug for PlaceholderGuard<'a, Key, Val, 
 pub enum JoinFuture<'a, 'b, Q: ?Sized, Key, Val, We, B, L> {
     Created {
         lifecycle: &'a L,
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         hash: u64,
         key: &'b Q,
     },
     Pending {
         lifecycle: &'a L,
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         shared: SharedPlaceholder<Val>,
         waiter: Option<SharedTaskWaiter>,
     },
@@ -348,7 +366,7 @@ pub enum JoinFuture<'a, 'b, Q: ?Sized, Key, Val, We, B, L> {
 impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
     pub fn new(
         lifecycle: &'a L,
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         hash: u64,
         key: &'b Q,
     ) -> JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
@@ -405,7 +423,7 @@ impl<
         'a,
         'b,
         Key: Eq + Hash,
-        Q: ToOwned<Owned = Key> + ?Sized,
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
         Val: Clone,
         We: Weighter<Key, Val>,
         B: BuildHasher,
@@ -426,10 +444,10 @@ impl<
                 key,
             } => {
                 let mut shard_guard = shard.write();
-                match shard_guard.upsert_placeholder(*hash, (*key).to_owned()) {
-                    Ok(v) => {
+                match shard_guard.upsert_placeholder(*hash, *key) {
+                    Ok((_, v)) => {
                         *self = Self::Done;
-                        return Poll::Ready(Ok(v));
+                        return Poll::Ready(Ok(v.clone()));
                     }
                     Err((shared, true)) => {
                         let guard = PlaceholderGuard::start_loading(*lifecycle, *shard, shared);
@@ -456,9 +474,7 @@ impl<
                 if waiter.notified {
                     waiter.notified = false;
                 } else {
-                    if !waiter.waker.will_wake(cx.waker()) {
-                        waiter.waker = cx.waker().clone();
-                    }
+                    waiter.waker.clone_from(cx.waker());
                     return Poll::Pending;
                 }
                 // drop waiter first to avoid deadlock due to lock order
@@ -479,23 +495,25 @@ impl<
             unreachable!()
         };
         // If we reach here and waiter is some, it means we got a notification.
+        let notified = waiter.is_some();
+        let waiter_fn = || {
+            let task_waiter = waiter
+                .get_or_insert_with(|| {
+                    Arc::new(RwLock::new(TaskWaiter {
+                        notified: false,
+                        waker: cx.waker().clone(),
+                    }))
+                })
+                .clone();
+            Waiter::Task(task_waiter)
+        };
         match PlaceholderGuard::join_internal(
             *lifecycle,
             shard_guard,
             *shard,
             shared,
-            waiter.is_some(),
-            || {
-                let task_waiter = waiter
-                    .get_or_insert_with(|| {
-                        Arc::new(RwLock::new(TaskWaiter {
-                            notified: false,
-                            waker: cx.waker().clone(),
-                        }))
-                    })
-                    .clone();
-                Waiter::Task(task_waiter)
-            },
+            notified,
+            waiter_fn,
         ) {
             Some(result) => {
                 *waiter = None;

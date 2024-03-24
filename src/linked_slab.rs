@@ -71,6 +71,7 @@ impl<T> LinkedSlab<T> {
             debug_assert!(entry.item.is_none());
             entry.item = Some(item);
         } else {
+            debug_assert_eq!(idx, self.entries.len());
             self.next_free = Token::new(token.get().wrapping_add(1)).expect("Capacity overflow");
             self.entries.push(Entry {
                 next: token,

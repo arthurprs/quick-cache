@@ -1,19 +1,18 @@
 use std::{
-    hash::{BuildHasher, Hash, Hasher},
-    mem,
+    hash::{BuildHasher, Hash},
+    mem::{self, MaybeUninit},
 };
 
 use hashbrown::raw::RawTable;
 
 use crate::{
     linked_slab::{LinkedSlab, Token},
-    placeholder::{new_shared_placeholder, SharedPlaceholder},
-    shim::sync::{
-        atomic::{self, AtomicBool, AtomicU64},
-        Arc,
-    },
+    shim::sync::atomic::{self, AtomicBool},
     Equivalent, Lifecycle,
 };
+
+#[cfg(feature = "stats")]
+use crate::shim::sync::atomic::AtomicU64;
 
 /// Superset of Weighter (weights 0u32..=u32::MAX) that returns the same weight as u64.
 /// Since each shard can only hold up to u32::MAX - 1 items its internal weight cannot overflow.
@@ -29,6 +28,13 @@ where
     fn weight(&self, key: &Key, val: &Val) -> u64 {
         crate::Weighter::weight(self, key, val) as u64
     }
+}
+
+pub trait SharedPlaceholder: Clone {
+    fn new(hash: u64, idx: Token) -> Self;
+    fn same_as(&self, other: &Self) -> bool;
+    fn hash(&self) -> u64;
+    fn idx(&self) -> Token;
 }
 
 pub enum InsertStrategy {
@@ -51,28 +57,28 @@ pub struct Resident<Key, Val> {
 }
 
 #[derive(Debug)]
-pub struct Placeholder<Key, Val> {
+struct Placeholder<Key, Plh> {
     key: Key,
     hot: ResidentState,
-    shared: SharedPlaceholder<Val>,
+    shared: Plh,
 }
 
-enum Entry<Key, Val> {
+enum Entry<Key, Val, Plh> {
     Resident(Resident<Key, Val>),
-    Placeholder(Placeholder<Key, Val>),
+    Placeholder(Placeholder<Key, Plh>),
     Ghost(u64),
 }
 
 /// A bounded cache using a modified CLOCK-PRO eviction policy.
 /// The implementation allows some parallelism as gets don't require exclusive access.
 /// Any evicted items are returned so they can be dropped by the caller, outside the locks.
-pub struct CacheShard<Key, Val, We, B, L> {
+pub struct CacheShard<Key, Val, We, B, L, Plh> {
     hash_builder: B,
     /// Map to an entry in the `entries` slab.
     /// Note that the actual key/value/hash are not stored in the map but in the slab.
     map: RawTable<Token>,
     /// Slab holding entries
-    entries: LinkedSlab<Entry<Key, Val>>,
+    entries: LinkedSlab<Entry<Key, Val, Plh>>,
     /// Head of cold list, containing Cold entries.
     cold_head: Option<Token>,
     /// Head of hot list, containing Hot entries.
@@ -87,41 +93,64 @@ pub struct CacheShard<Key, Val, We, B, L> {
     num_cold: usize,
     num_non_resident: usize,
     capacity_non_resident: usize,
+    #[cfg(feature = "stats")]
     hits: AtomicU64,
+    #[cfg(feature = "stats")]
     misses: AtomicU64,
     weighter: We,
     pub(crate) lifecycle: L,
 }
 
+#[cfg(feature = "stats")]
 macro_rules! record_hit {
     ($self: expr) => {{
         $self.hits.fetch_add(1, atomic::Ordering::Relaxed);
     }};
 }
+#[cfg(feature = "stats")]
 macro_rules! record_hit_mut {
     ($self: expr) => {{
         *$self.hits.get_mut() += 1;
     }};
 }
+#[cfg(feature = "stats")]
 macro_rules! record_miss {
     ($self: expr) => {{
         $self.misses.fetch_add(1, atomic::Ordering::Relaxed);
     }};
 }
+#[cfg(feature = "stats")]
 macro_rules! record_miss_mut {
     ($self: expr) => {{
         *$self.misses.get_mut() += 1;
     }};
 }
 
-impl<Key, Val, We, B, L> CacheShard<Key, Val, We, B, L> {
-    pub fn remove_placeholder(&mut self, placeholder: &SharedPlaceholder<Val>) {
-        self.map.remove_entry(placeholder.hash, |&idx| {
-            if idx != placeholder.idx {
+#[cfg(not(feature = "stats"))]
+macro_rules! record_hit {
+    ($self: expr) => {{}};
+}
+#[cfg(not(feature = "stats"))]
+macro_rules! record_hit_mut {
+    ($self: expr) => {{}};
+}
+#[cfg(not(feature = "stats"))]
+macro_rules! record_miss {
+    ($self: expr) => {{}};
+}
+#[cfg(not(feature = "stats"))]
+macro_rules! record_miss_mut {
+    ($self: expr) => {{}};
+}
+
+impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, Plh> {
+    pub fn remove_placeholder(&mut self, placeholder: &Plh) {
+        self.map.remove_entry(placeholder.hash(), |&idx| {
+            if idx != placeholder.idx() {
                 return false;
             }
             let (entry, _) = self.entries.get(idx).unwrap();
-            matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if Arc::ptr_eq(shared, placeholder))
+            matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if shared.same_as(placeholder))
         });
     }
 }
@@ -132,7 +161,8 @@ impl<
         We: InternalWeighter<Key, Val>,
         B: BuildHasher,
         L: Lifecycle<Key, Val>,
-    > CacheShard<Key, Val, We, B, L>
+        Plh: SharedPlaceholder,
+    > CacheShard<Key, Val, We, B, L, Plh>
 {
     pub fn new(
         hot_allocation: f64,
@@ -150,7 +180,9 @@ impl<
             map: RawTable::with_capacity(0),
             entries: LinkedSlab::with_capacity(0),
             weight_capacity,
+            #[cfg(feature = "stats")]
             hits: Default::default(),
+            #[cfg(feature = "stats")]
             misses: Default::default(),
             cold_head: None,
             hot_head: None,
@@ -207,7 +239,7 @@ impl<
         assert_eq!(num_non_resident, self.num_non_resident);
         assert_eq!(weight_hot, self.weight_hot);
         assert_eq!(weight_cold, self.weight_cold);
-        assert!(weight_hot <= self.weight_target_hot);
+        assert!(weight_hot + weight_cold <= self.weight_capacity);
         assert!(num_non_resident <= self.capacity_non_resident);
     }
 
@@ -240,10 +272,12 @@ impl<
         self.weight_capacity
     }
 
+    #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.hits.load(atomic::Ordering::Relaxed)
     }
 
+    #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.misses.load(atomic::Ordering::Relaxed)
     }
@@ -276,27 +310,25 @@ impl<
     }
 
     #[inline]
-    fn hash_static<Q: ?Sized>(hasher: &B, key: &Q) -> u64
+    fn hash_static<Q>(hasher: &B, key: &Q) -> u64
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
-        let mut hasher = hasher.build_hasher();
-        key.hash(&mut hasher);
-        hasher.finish()
+        hasher.hash_one(key)
     }
 
     #[inline]
-    pub fn hash<Q: ?Sized>(&self, key: &Q) -> u64
+    pub fn hash<Q>(&self, key: &Q) -> u64
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
         Self::hash_static(&self.hash_builder, key)
     }
 
     #[inline]
-    fn search<Q: ?Sized>(&self, hash: u64, k: &Q) -> Option<Token>
+    fn search<Q>(&self, hash: u64, k: &Q) -> Option<Token>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
         // Safety for `RawTable::iter_hash` and `Bucket::as_ref`:
         // * Their outputs do not outlive their HashBrown:
@@ -327,85 +359,57 @@ impl<
     }
 
     #[inline]
-    fn search_resident<Q: ?Sized>(&self, hash: u64, k: &Q) -> Option<Token>
+    fn search_resident<Q>(&self, hash: u64, k: &Q) -> Option<(Token, &Resident<Key, Val>)>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
+        let mut resident = MaybeUninit::uninit();
         self.map
             .get(hash, |&idx| {
                 let (entry, _) = self.entries.get(idx).unwrap();
-                matches!(
-                    entry,
-                    Entry::Resident(Resident { key, .. })
-                    if k.equivalent(key)
-                )
+                match entry {
+                    Entry::Resident(r) if k.equivalent(&r.key) => {
+                        resident.write(r);
+                        true
+                    }
+                    _ => false,
+                }
             })
-            .copied()
+            .map(|idx| {
+                // Safety: we found a successful entry in `get` above,
+                // thus resident is initialized.
+                (*idx, unsafe { resident.assume_init() })
+            })
     }
 
-    pub fn get<Q: ?Sized>(&self, hash: u64, key: &Q) -> Option<&Val>
+    pub fn get<Q>(&self, hash: u64, key: &Q) -> Option<&Val>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
-        if let Some(idx) = self.search_resident(hash, key) {
-            let Some((Entry::Resident(resident), _)) = self.entries.get(idx) else {
-                unreachable!()
-            };
+        if let Some((_, resident)) = self.search_resident(hash, key) {
             resident.referenced.store(true, atomic::Ordering::Relaxed);
             record_hit!(self);
-            return Some(&resident.value);
+            Some(&resident.value)
+        } else {
+            record_miss!(self);
+            None
         }
-        record_miss!(self);
-        None
     }
 
-    pub fn get_mut<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
+    pub fn get_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
-        if let Some(idx) = self.search_resident(hash, key) {
-            let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
-                unreachable!()
-            };
-            *resident.referenced.get_mut() = true;
-            record_hit_mut!(self);
-
-            let weight = if resident.state == ResidentState::Hot {
-                &mut self.weight_hot
-            } else {
-                &mut self.weight_cold
-            };
-            *weight -= self.weighter.weight(&resident.key, &resident.value);
-            return Some(RefMut {
-                key: &resident.key,
-                value: &mut resident.value,
-                weight,
-                weighter: &self.weighter,
-            });
-        }
-        record_miss_mut!(self);
-        None
-    }
-
-    pub fn peek<Q: ?Sized>(&self, hash: u64, key: &Q) -> Option<&Val>
-    where
-        Q: Hash + Equivalent<Key>,
-    {
-        let idx = self.search_resident(hash, key)?;
-        let Some((Entry::Resident(resident), _)) = self.entries.get(idx) else {
-            unreachable!()
+        let Some((idx, _)) = self.search_resident(hash, key) else {
+            record_miss_mut!(self);
+            return None;
         };
-        Some(&resident.value)
-    }
-
-    pub fn peek_mut<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
-    where
-        Q: Hash + Equivalent<Key>,
-    {
-        let idx = self.search_resident(hash, key)?;
         let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
             unreachable!()
         };
+        *resident.referenced.get_mut() = true;
+        record_hit_mut!(self);
+
         let weight = if resident.state == ResidentState::Hot {
             &mut self.weight_hot
         } else {
@@ -420,11 +424,61 @@ impl<
         })
     }
 
-    pub fn remove<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<(Key, Val)>
+    #[inline]
+    pub fn peek_token(&self, token: Token) -> Option<&Val> {
+        if let Some((Entry::Resident(resident), _)) = self.entries.get(token) {
+            Some(&resident.value)
+        } else {
+            None
+        }
+    }
+
+    pub fn peek_token_mut(&mut self, token: Token) -> Option<RefMut<'_, Key, Val, We>> {
+        if let Some((Entry::Resident(resident), _)) = self.entries.get_mut(token) {
+            let weight = if resident.state == ResidentState::Hot {
+                &mut self.weight_hot
+            } else {
+                &mut self.weight_cold
+            };
+            *weight -= self.weighter.weight(&resident.key, &resident.value);
+            Some(RefMut {
+                key: &resident.key,
+                value: &mut resident.value,
+                weight,
+                weighter: &self.weighter,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn peek<Q>(&self, hash: u64, key: &Q) -> Option<&Val>
     where
-        Q: Hash + Equivalent<Key>,
+        Q: Hash + Equivalent<Key> + ?Sized,
     {
+        let (_, resident) = self.search_resident(hash, key)?;
+        Some(&resident.value)
+    }
+
+    pub fn peek_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        let (idx, _) = self.search_resident(hash, key)?;
+        self.peek_token_mut(idx)
+    }
+
+    pub fn remove<Q>(&mut self, hash: u64, key: &Q) -> Option<(Key, Val)>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        // This could be search_resident, but calling `remove` is likely a
+        // strong indication that this input isn't important.
         let idx = self.search(hash, key)?;
+        self.remove_internal(hash, idx)
+    }
+
+    fn remove_internal(&mut self, hash: u64, idx: Token) -> Option<(Key, Val)> {
         self.map_remove(hash, idx);
         let mut result = None;
         let (entry, next) = self.entries.remove(idx).unwrap();
@@ -602,7 +656,7 @@ impl<
         strategy: InsertStrategy,
     ) -> Result<(), (Key, Val)> {
         // caller must have already handled overweight items
-        debug_assert!(weight <= self.weight_capacity);
+        debug_assert!(weight <= self.weight_target_hot);
         let (entry, _) = self.entries.get_mut(idx).unwrap();
         let referenced;
         let enter_state;
@@ -639,11 +693,11 @@ impl<
                 debug_assert_eq!(evicted.state, enter_state);
                 let evicted_weight = self.weighter.weight(&evicted.key, &evicted.value);
                 if enter_state == ResidentState::Hot {
-                    self.weight_hot += weight;
                     self.weight_hot -= evicted_weight;
+                    self.weight_hot += weight;
                 } else {
-                    self.weight_cold += weight;
                     self.weight_cold -= evicted_weight;
+                    self.weight_cold += weight;
                 }
                 self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
             }
@@ -673,10 +727,6 @@ impl<
             }
         }
 
-        // the replacement may have made the hot section/cache too big
-        while self.weight_hot > self.weight_target_hot {
-            self.advance_hot(lcs);
-        }
         while self.weight_hot + self.weight_cold > self.weight_capacity {
             self.advance_cold(lcs);
         }
@@ -723,21 +773,21 @@ impl<
     pub fn replace_placeholder(
         &mut self,
         lcs: &mut L::RequestState,
-        placeholder: &SharedPlaceholder<Val>,
+        placeholder: &Plh,
         referenced: bool,
         value: Val,
     ) -> Result<(), Val> {
-        let found = self.map.find(placeholder.hash, |&idx| {
-            if idx != placeholder.idx {
+        let found = self.map.find(placeholder.hash(), |&idx| {
+            if idx != placeholder.idx() {
                 return false;
             }
             let (entry, _) = self.entries.get(idx).unwrap();
-            matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if Arc::ptr_eq(shared, placeholder))
+            matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if shared.same_as(placeholder))
         }).is_some();
         if !found {
             return Err(value);
         }
-        let (entry, _) = self.entries.get_mut(placeholder.idx).unwrap();
+        let (entry, _) = self.entries.get_mut(placeholder.idx()).unwrap();
         let Entry::Placeholder(Placeholder {
             key,
             hot: mut placeholder_hot,
@@ -747,12 +797,9 @@ impl<
             unreachable!()
         };
         let weight = self.weighter.weight(&key, &value);
-        if weight > self.weight_capacity {
+        if weight > self.weight_target_hot {
             // don't admit if it won't fit within the budget
-            self.entries.remove(placeholder.idx);
-            self.map_remove(placeholder.hash, placeholder.idx);
-            self.lifecycle.on_evict(lcs, key, value);
-            return Ok(());
+            return self.handle_overweight_replace_placeholder(placeholder, lcs, key, value);
         }
 
         if self.weight_hot + self.weight_cold + weight <= self.weight_capacity {
@@ -774,17 +821,27 @@ impl<
             self.weight_cold += weight;
             &mut self.cold_head
         };
-        self.entries.link(placeholder.idx, *list_head);
-        list_head.get_or_insert(placeholder.idx);
+        self.entries.link(placeholder.idx(), *list_head);
+        list_head.get_or_insert(placeholder.idx());
 
-        // the replacement may have made the hot section/cache too big
-        while self.weight_hot > self.weight_target_hot {
-            self.advance_hot(lcs);
-        }
         while self.weight_hot + self.weight_cold > self.weight_capacity {
             self.advance_cold(lcs);
         }
 
+        Ok(())
+    }
+
+    #[cold]
+    fn handle_overweight_replace_placeholder(
+        &mut self,
+        placeholder: &Plh,
+        lcs: &mut L::RequestState,
+        key: Key,
+        value: Val,
+    ) -> Result<(), Val> {
+        self.entries.remove(placeholder.idx());
+        self.map_remove(placeholder.hash(), placeholder.idx());
+        self.lifecycle.on_evict(lcs, key, value);
         Ok(())
     }
 
@@ -798,18 +855,11 @@ impl<
     ) -> Result<(), (Key, Val)> {
         let mut weight = self.weighter.weight(&key, &value);
         // don't admit if it won't fit within the budget
-        if weight > self.weight_capacity {
+        if weight > self.weight_target_hot {
             self.lifecycle.before_evict(lcs, &key, &mut value);
             weight = self.weighter.weight(&key, &value);
-            if weight > self.weight_capacity {
-                // Make sure to remove any existing entry
-                if let Some((ek, ev)) = self.remove(hash, &key) {
-                    self.lifecycle.on_evict(lcs, ek, ev);
-                } else if matches!(strategy, InsertStrategy::Replace { .. }) {
-                    return Err((key, value));
-                }
-                self.lifecycle.on_evict(lcs, key, value);
-                return Ok(());
+            if weight > self.weight_target_hot {
+                return self.handle_insert_overweight(lcs, hash, key, value, strategy);
             }
         }
 
@@ -856,31 +906,58 @@ impl<
         Ok(())
     }
 
-    pub fn upsert_placeholder(
+    #[cold]
+    fn handle_insert_overweight(
         &mut self,
+        lcs: &mut L::RequestState,
         hash: u64,
         key: Key,
-    ) -> Result<Val, (SharedPlaceholder<Val>, bool)>
+        value: Val,
+        strategy: InsertStrategy,
+    ) -> Result<(), (Key, Val)> {
+        // Make sure to remove any existing entry
+        if let Some((idx, _)) = self.search_resident(hash, &key) {
+            if let Some((ek, ev)) = self.remove_internal(hash, idx) {
+                self.lifecycle.on_evict(lcs, ek, ev);
+            }
+        }
+        if matches!(strategy, InsertStrategy::Replace { .. }) {
+            return Err((key, value));
+        }
+        self.lifecycle.on_evict(lcs, key, value);
+        Ok(())
+    }
+
+    pub fn upsert_placeholder<Q>(
+        &mut self,
+        hash: u64,
+        key: &Q,
+    ) -> Result<(Token, &Val), (Plh, bool)>
     where
-        Val: Clone,
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         let shared;
-        if let Some(idx) = self.search(hash, &key) {
+        if let Some(idx) = self.search(hash, key) {
             let (entry, _) = self.entries.get_mut(idx).unwrap();
             match entry {
                 Entry::Resident(resident) => {
                     *resident.referenced.get_mut() = true;
                     record_hit_mut!(self);
-                    return Ok(resident.value.clone());
+                    unsafe {
+                        // Rustc gets insanely confused returning references from mut borrows
+                        // Safety: value will have the same lifetime as `resident`
+                        let value_ptr: *const Val = &resident.value;
+                        return Ok((idx, &*value_ptr));
+                    }
                 }
                 Entry::Placeholder(p) => {
                     record_hit_mut!(self);
                     return Err((p.shared.clone(), false));
                 }
                 Entry::Ghost(_) => {
-                    shared = new_shared_placeholder(hash, idx);
+                    shared = Plh::new(hash, idx);
                     *entry = Entry::Placeholder(Placeholder {
-                        key,
+                        key: key.to_owned(),
                         hot: ResidentState::Hot,
                         shared: shared.clone(),
                     });
@@ -893,10 +970,10 @@ impl<
             }
         } else {
             let idx = self.entries.next_free();
-            shared = new_shared_placeholder(hash, idx);
+            shared = Plh::new(hash, idx);
             let idx_ = self.entries.insert(
                 Entry::Placeholder(Placeholder {
-                    key,
+                    key: key.to_owned(),
                     hot: ResidentState::Cold,
                     shared: shared.clone(),
                 }),

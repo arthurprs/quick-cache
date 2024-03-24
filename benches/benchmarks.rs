@@ -1,7 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use quick_cache::sync::Cache;
 use rand::prelude::*;
-use rand::rngs::SmallRng;
 use rand_distr::Zipf;
 
 pub fn r_benchmark(c: &mut Criterion) {
