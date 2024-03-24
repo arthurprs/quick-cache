@@ -4,10 +4,7 @@ use std::time::Duration;
 use ahash::{HashMap, HashSet};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use quick_cache::{
-    sync::{Cache, GuardResult},
-    Lifecycle, OptionsBuilder, Weighter,
-};
+use quick_cache::{sync::Cache, GuardResult, Lifecycle, OptionsBuilder, Weighter};
 
 #[derive(Clone)]
 struct MyWeighter;
