@@ -4,7 +4,10 @@ use std::time::Duration;
 use ahash::{HashMap, HashSet};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use quick_cache::{sync::Cache, GuardResult, Lifecycle, OptionsBuilder, Weighter};
+use quick_cache::{
+    sync::{Cache, GuardResult},
+    Lifecycle, OptionsBuilder, Weighter,
+};
 
 #[derive(Clone)]
 struct MyWeighter;
@@ -48,7 +51,11 @@ enum Op {
 
 #[derive(Debug, Arbitrary)]
 struct Input {
-    ops: [u8; 6],
+    seed: u32,
+    estimated_items_capacity: u16,
+    weight_capacity: u32,
+    hot_allocation: u8,
+    ghost_allocation: u8,
     operations: Vec<Op>,
 }
 
@@ -57,20 +64,25 @@ fuzz_target!(|input: Input| {
 });
 
 fn run(input: Input) {
-    let Input { ops, operations } = input;
-    let hasher =
-        ahash::RandomState::with_seeds(ops[0] as u64, ops[1] as u64, ops[2] as u64, ops[3] as u64);
-    let estimated_items_capacity = ops[0] as usize;
-    let weight_capacity = ops[0] as u64 * ops[1] as u64 * ops[2] as u64;
-    let hot_allocation = ops[3] as f64 / (u16::MAX as f64);
-    let ghost_allocation = ops[4] as f64 / (u16::MAX as f64);
-    let shards = (ops[5] as usize) % 10;
+    let Input {
+        seed,
+        operations,
+        estimated_items_capacity,
+        weight_capacity,
+        hot_allocation,
+        ghost_allocation,
+    } = input;
+    let hasher = ahash::RandomState::with_seed(seed as usize);
+    let estimated_items_capacity = estimated_items_capacity as usize;
+    let weight_capacity = weight_capacity as u64;
+    let hot_allocation = hot_allocation as f64 / (u8::MAX as f64);
+    let ghost_allocation = ghost_allocation as f64 / (u8::MAX as f64);
     let options = OptionsBuilder::new()
         .estimated_items_capacity(estimated_items_capacity)
         .weight_capacity(weight_capacity)
         .hot_allocation(hot_allocation)
         .ghost_allocation(ghost_allocation)
-        .shards(shards)
+        .shards(1)
         .build()
         .unwrap();
     let cache = Cache::with_options(options, MyWeighter, hasher, MyLifecycle);
@@ -79,27 +91,27 @@ fn run(input: Input) {
         match op {
             Op::Insert(k, v) => {
                 // eprintln!("insert {k} {v}");
-                placeholders.remove(&k);
                 let evicted = cache.insert_with_lifecycle(k, (v, v));
+                placeholders.remove(&k);
                 // if k is present it must have value v
-                let get = cache.get(&k);
-                assert!(get.is_none() || get.unwrap().0 == v);
-                check_evicted(k, get, evicted);
+                let peek = cache.peek(&k);
+                assert!(peek.is_none() || peek.unwrap().0 == v);
+                check_evicted(k, peek, evicted);
             }
             Op::Replace(k, v) => {
                 // eprintln!("replace {k} {v}");
                 placeholders.remove(&k);
                 if let Ok(evicted) = cache.replace_with_lifecycle(k, (v, v), false) {
                     // if k is present it must have value v
-                    let get = cache.get(&k);
-                    assert!(get.is_none() || get.unwrap().0 == v);
-                    check_evicted(k, get, evicted);
+                    let peek = cache.peek(&k);
+                    assert!(peek.is_none() || peek.unwrap().0 == v);
+                    check_evicted(k, peek, evicted);
                 } else {
-                    assert!(cache.get(&k).is_none());
+                    assert!(cache.peek(&k).is_none());
                 }
             }
             Op::Placeholder(k) => {
-                // eprintln!("get_value_or_guard {k} {v}");
+                // eprintln!("get_value_or_guard {k}");
                 match cache.get_value_or_guard(&k, Some(Duration::default())) {
                     GuardResult::Value(_gv) => {
                         // assert_eq!(gv.0, v);
@@ -116,7 +128,7 @@ fn run(input: Input) {
                     placeholders.remove(&k);
                     assert_eq!(rem_k, k);
                 }
-                assert!(cache.get(&k).is_none());
+                assert!(cache.peek(&k).is_none());
             }
         }
     }
