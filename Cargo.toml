@@ -1,6 +1,6 @@
 [package]
 name = "quick_cache"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 description = "Lightweight and high performance concurrent cache"
 repository = "https://github.com/arthurprs/quick-cache"
@@ -10,18 +10,19 @@ keywords = ["lru", "concurrent", "cache"]
 categories = ["caching", "concurrency", "data-structures"]
 readme = "README.md"
 exclude = ["fuzz"]
-rust-version = "1.63"
+rust-version = "1.71"
 
 [features]
 default = ["ahash", "parking_lot"]
 shuttle = ["dep:shuttle"]
+stats = []
 
 [dependencies]
-ahash = { optional = true, version = "0.8" }
+ahash = { optional = true, version = "0.8.10" }
 equivalent = "1.0.1"
 hashbrown = { version = "0.14", default-features = false, features = ["raw", "inline-more"] }
 parking_lot = { optional = true, version = "0.12" }
-shuttle = { version = "0.6", optional = true }
+shuttle = { version = "0.7", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"

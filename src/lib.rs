@@ -50,6 +50,7 @@
 //! By default the crate uses [parking_lot](https://crates.io/crates/parking_lot), which is enabled (by default) via
 //! a crate feature with the same name. If the `parking_lot` feature is disabled the crate defaults to the std lib
 //! implementation instead.
+#![allow(clippy::type_complexity)]
 
 #[cfg(not(fuzzing))]
 mod linked_slab;
@@ -59,13 +60,13 @@ pub mod linked_slab;
 mod options;
 #[cfg(fuzzing)]
 pub mod options;
-mod placeholder;
 #[cfg(not(feature = "shuttle"))]
 mod rw_lock;
 mod shard;
 mod shim;
 /// Concurrent cache variants that can be used from multiple threads.
 pub mod sync;
+mod sync_placeholder;
 /// Non-concurrent cache variants.
 pub mod unsync;
 pub use equivalent::Equivalent;
@@ -74,7 +75,6 @@ pub use equivalent::Equivalent;
 mod shuttle_tests;
 
 pub use options::{Options, OptionsBuilder};
-pub use placeholder::{GuardResult, PlaceholderGuard};
 pub use shard::RefMut;
 
 #[cfg(feature = "ahash")]
@@ -274,6 +274,7 @@ mod tests {
 
     #[test]
     fn test_value_or_guard() {
+        use crate::sync::*;
         use rand::prelude::*;
         for _i in 0..2000 {
             dbg!(_i);
