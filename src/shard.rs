@@ -884,6 +884,7 @@ impl<
                         hot: ResidentState::Hot,
                         shared: shared.clone(),
                     });
+                    self.num_non_resident -= 1;
                     let next = self.entries.unlink(idx);
                     if self.ghost_head == Some(idx) {
                         self.ghost_head = next;
