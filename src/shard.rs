@@ -775,19 +775,14 @@ impl<
         lcs: &mut L::RequestState,
         placeholder: &Plh,
         referenced: bool,
-        value: Val,
+        mut value: Val,
     ) -> Result<(), Val> {
-        let found = self.map.find(placeholder.hash(), |&idx| {
-            if idx != placeholder.idx() {
-                return false;
+        let entry = match self.entries.get_mut(placeholder.idx()) {
+            Some((entry, _)) if matches!(&*entry, Entry::Placeholder(p) if p.shared.same_as(placeholder)) => {
+                entry
             }
-            let (entry, _) = self.entries.get(idx).unwrap();
-            matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if shared.same_as(placeholder))
-        }).is_some();
-        if !found {
-            return Err(value);
-        }
-        let (entry, _) = self.entries.get_mut(placeholder.idx()).unwrap();
+            _ => return Err(value),
+        };
         let Entry::Placeholder(Placeholder {
             key,
             hot: mut placeholder_hot,
@@ -796,10 +791,14 @@ impl<
         else {
             unreachable!()
         };
-        let weight = self.weighter.weight(&key, &value);
+        let mut weight = self.weighter.weight(&key, &value);
+        // don't admit if it won't fit within the budget
         if weight > self.weight_target_hot {
-            // don't admit if it won't fit within the budget
-            return self.handle_overweight_replace_placeholder(placeholder, lcs, key, value);
+            self.lifecycle.before_evict(lcs, &key, &mut value);
+            weight = self.weighter.weight(&key, &value);
+            if weight > self.weight_target_hot {
+                return self.handle_overweight_replace_placeholder(lcs, placeholder, key, value);
+            }
         }
 
         if self.weight_hot + self.weight_cold + weight <= self.weight_capacity {
@@ -834,8 +833,8 @@ impl<
     #[cold]
     fn handle_overweight_replace_placeholder(
         &mut self,
-        placeholder: &Plh,
         lcs: &mut L::RequestState,
+        placeholder: &Plh,
         key: Key,
         value: Val,
     ) -> Result<(), Val> {
