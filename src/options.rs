@@ -1,4 +1,4 @@
-pub const DEFAULT_HOT_ALLOCATION: f64 = 0.99;
+pub const DEFAULT_HOT_ALLOCATION: f64 = 0.97;
 pub const DEFAULT_GHOST_ALLOCATION: f64 = 0.5;
 
 /// Cache options. Built with [OptionsBuilder].
@@ -88,7 +88,7 @@ impl OptionsBuilder {
     /// lowering this setting. In practice the useful ranges are between 50% to 99%
     /// (usually on the higher side).
     ///
-    /// Defaults to: `0.99` (99%).
+    /// Defaults to: `0.97` (97%).
     #[inline]
     pub fn hot_allocation(&mut self, hot_allocation: f64) -> &mut Self {
         assert!(

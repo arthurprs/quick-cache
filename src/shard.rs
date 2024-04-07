@@ -7,12 +7,15 @@ use hashbrown::raw::RawTable;
 
 use crate::{
     linked_slab::{LinkedSlab, Token},
-    shim::sync::atomic::{self, AtomicBool},
+    shim::sync::atomic::{self, AtomicU16},
     Equivalent, Lifecycle,
 };
 
 #[cfg(feature = "stats")]
 use crate::shim::sync::atomic::AtomicU64;
+
+// Max reference counter, this is 1 in ClockPro and 3 in the S3-FIFO.
+const MAX_F: u16 = 2;
 
 /// Superset of Weighter (weights 0u32..=u32::MAX) that returns the same weight as u64.
 /// Since each shard can only hold up to u32::MAX - 1 items its internal weight cannot overflow.
@@ -53,7 +56,7 @@ pub struct Resident<Key, Val> {
     key: Key,
     value: Val,
     state: ResidentState,
-    referenced: AtomicBool,
+    referenced: AtomicU16,
 }
 
 #[derive(Debug)]
@@ -387,7 +390,13 @@ impl<
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         if let Some((_, resident)) = self.search_resident(hash, key) {
-            resident.referenced.store(true, atomic::Ordering::Relaxed);
+            let referenced = resident.referenced.load(atomic::Ordering::Relaxed);
+            // Attempt to avoid contention on hot items, which may have their counters maxed out
+            if referenced < MAX_F {
+                // While extremely unlikely, this increment can theoretically overflow.
+                // Even if that happens there's no impact correctness wise.
+                resident.referenced.fetch_add(1, atomic::Ordering::Relaxed);
+            }
             record_hit!(self);
             Some(&resident.value)
         } else {
@@ -407,7 +416,9 @@ impl<
         let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
             unreachable!()
         };
-        *resident.referenced.get_mut() = true;
+        if *resident.referenced.get_mut() < MAX_F {
+            *resident.referenced.get_mut() += 1;
+        }
         record_hit_mut!(self);
 
         let weight = if resident.state == ResidentState::Hot {
@@ -530,8 +541,8 @@ impl<
                 unreachable!()
             };
             debug_assert_eq!(resident.state, ResidentState::Cold);
-            if *resident.referenced.get_mut() {
-                *resident.referenced.get_mut() = false;
+            if *resident.referenced.get_mut() != 0 {
+                *resident.referenced.get_mut() = (*resident.referenced.get_mut()).min(MAX_F) - 1;
                 resident.state = ResidentState::Hot;
                 let weight = self.weighter.weight(&resident.key, &resident.value);
                 self.weight_hot += weight;
@@ -602,8 +613,8 @@ impl<
                 unreachable!()
             };
             debug_assert_eq!(resident.state, ResidentState::Hot);
-            if *resident.referenced.get_mut() {
-                *resident.referenced.get_mut() = false;
+            if *resident.referenced.get_mut() != 0 {
+                *resident.referenced.get_mut() = (*resident.referenced.get_mut()).min(MAX_F) - 1;
                 self.hot_head = Some(next);
                 continue;
             }
@@ -663,7 +674,7 @@ impl<
         match entry {
             Entry::Resident(resident) => {
                 enter_state = resident.state;
-                referenced = *resident.referenced.get_mut()
+                referenced = *resident.referenced.get_mut() != 0
                     || matches!(strategy, InsertStrategy::Replace { soft: false });
             }
             _ if matches!(strategy, InsertStrategy::Replace { .. }) => {
@@ -685,7 +696,7 @@ impl<
                 key,
                 value,
                 state: enter_state,
-                referenced: AtomicBool::new(referenced),
+                referenced: (referenced as u16).into(),
             }),
         );
         match evicted {
@@ -808,7 +819,7 @@ impl<
             key,
             value,
             state: placeholder_hot,
-            referenced: referenced.into(),
+            referenced: (referenced as u16).into(),
         });
 
         let list_head = if placeholder_hot == ResidentState::Hot {
@@ -940,7 +951,9 @@ impl<
             let (entry, _) = self.entries.get_mut(idx).unwrap();
             match entry {
                 Entry::Resident(resident) => {
-                    *resident.referenced.get_mut() = true;
+                    if *resident.referenced.get_mut() < MAX_F {
+                        *resident.referenced.get_mut() += 1;
+                    }
                     record_hit_mut!(self);
                     unsafe {
                         // Rustc gets insanely confused returning references from mut borrows
