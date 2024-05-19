@@ -30,14 +30,16 @@ fuzz_target!(|ops: Vec<Op>| {
                         }
                         Some((_, &next_token)) => {
                             // insert i before next_token, which is the token for a key > i
-                            let new_token = slab.insert(i, Some(next_token));
+                            let new_token = slab.insert(i);
+                            slab.link(new_token, Some(next_token));
                             model.insert(i, new_token);
                         }
                         None => {
                             // insert i before the very first token,
                             // which is the same as inserting at the end
                             let first_token = model.values().next().copied();
-                            let new_token = slab.insert(i, first_token);
+                            let new_token = slab.insert(i);
+                            slab.link(new_token, first_token);
                             model.insert(i, new_token);
                         }
                     }
