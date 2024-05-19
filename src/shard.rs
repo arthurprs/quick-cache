@@ -8,7 +8,7 @@ use hashbrown::raw::RawTable;
 use crate::{
     linked_slab::{LinkedSlab, Token},
     shim::sync::atomic::{self, AtomicU16},
-    Equivalent, Lifecycle,
+    Equivalent, Lifecycle, Weighter,
 };
 
 #[cfg(feature = "stats")]
@@ -16,22 +16,6 @@ use crate::shim::sync::atomic::AtomicU64;
 
 // Max reference counter, this is 1 in ClockPro and 3 in the S3-FIFO.
 const MAX_F: u16 = 2;
-
-/// Superset of Weighter (weights 0u32..=u32::MAX) that returns the same weight as u64.
-/// Since each shard can only hold up to u32::MAX - 1 items its internal weight cannot overflow.
-pub trait InternalWeighter<Key, Val> {
-    fn weight(&self, key: &Key, val: &Val) -> u64;
-}
-
-impl<Key, Val, T> InternalWeighter<Key, Val> for T
-where
-    T: crate::Weighter<Key, Val>,
-{
-    #[inline]
-    fn weight(&self, key: &Key, val: &Val) -> u64 {
-        crate::Weighter::weight(self, key, val) as u64
-    }
-}
 
 pub trait SharedPlaceholder: Clone {
     fn new(hash: u64, idx: Token) -> Self;
@@ -161,7 +145,7 @@ impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, 
 impl<
         Key: Eq + Hash,
         Val,
-        We: InternalWeighter<Key, Val>,
+        We: Weighter<Key, Val>,
         B: BuildHasher,
         L: Lifecycle<Key, Val>,
         Plh: SharedPlaceholder,
@@ -999,16 +983,14 @@ impl<
 }
 
 /// Structure wrapping a mutable reference to a cached item.
-pub struct RefMut<'cache, Key, Val, We: InternalWeighter<Key, Val>> {
+pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>> {
     key: &'cache Key,
     value: &'cache mut Val,
     weight: &'cache mut u64,
     weighter: &'cache We,
 }
 
-impl<'cache, Key, Val, We: InternalWeighter<Key, Val>> std::ops::Deref
-    for RefMut<'cache, Key, Val, We>
-{
+impl<'cache, Key, Val, We: Weighter<Key, Val>> std::ops::Deref for RefMut<'cache, Key, Val, We> {
     type Target = Val;
 
     fn deref(&self) -> &Self::Target {
@@ -1016,15 +998,13 @@ impl<'cache, Key, Val, We: InternalWeighter<Key, Val>> std::ops::Deref
     }
 }
 
-impl<'cache, Key, Val, We: InternalWeighter<Key, Val>> std::ops::DerefMut
-    for RefMut<'cache, Key, Val, We>
-{
+impl<'cache, Key, Val, We: Weighter<Key, Val>> std::ops::DerefMut for RefMut<'cache, Key, Val, We> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.value
     }
 }
 
-impl<'cache, Key, Val, We: InternalWeighter<Key, Val>> Drop for RefMut<'cache, Key, Val, We> {
+impl<'cache, Key, Val, We: Weighter<Key, Val>> Drop for RefMut<'cache, Key, Val, We> {
     fn drop(&mut self) {
         *self.weight += self.weighter.weight(self.key, self.value);
     }

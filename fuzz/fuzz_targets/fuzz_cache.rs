@@ -16,8 +16,8 @@ struct MyWeighter;
 struct MyLifecycle;
 
 impl Weighter<u16, (u16, u16)> for MyWeighter {
-    fn weight(&self, _key: &u16, val: &(u16, u16)) -> u32 {
-        val.1 as u32
+    fn weight(&self, _key: &u16, val: &(u16, u16)) -> u64 {
+        val.1 as u64
     }
 }
 
