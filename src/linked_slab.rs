@@ -55,12 +55,12 @@ impl<T> LinkedSlab<T> {
         }
     }
 
-    /// Inserts a new entry in the list.
-    /// Initially, the item will belong to a list only containing itself.
+    /// Inserts a new entry in the list, link it before `head`.
+    /// If `head` is not set the item will belong to a list only containing itself.
     ///
     /// # Panics
     /// Panics if number of items exceed `u32::MAX - 1`.
-    pub fn insert(&mut self, item: T) -> Token {
+    pub fn insert(&mut self, item: T, head: Option<Token>) -> Token {
         let token = self.next_free;
         // eprintln!("linkedslab::insert token {token} head {head:?}");
         let idx = (token.get() - 1) as usize;
@@ -79,6 +79,7 @@ impl<T> LinkedSlab<T> {
                 item: Some(item),
             });
         }
+        self.link(token, head);
         token
     }
 
@@ -134,8 +135,8 @@ impl<T> LinkedSlab<T> {
 
         let entry = &mut self.entries[(idx.get() - 1) as usize];
         debug_assert!(entry.item.is_some());
-        debug_assert_eq!(entry.next, idx);
-        debug_assert_eq!(entry.prev, idx);
+        assert_eq!(entry.next, idx);
+        assert_eq!(entry.prev, idx);
         (entry.prev, entry.next) = (prev, next);
     }
 
