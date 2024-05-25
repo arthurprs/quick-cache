@@ -140,6 +140,26 @@ impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, 
             matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if shared.same_as(placeholder))
         });
     }
+
+    #[cold]
+    fn cold_change_weight(&mut self, idx: Token, old_weight: u64, new_weight: u64) {
+        let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
+            unreachable!()
+        };
+        let (weight_ptr, target_head) = if resident.state == ResidentState::Hot {
+            (&mut self.weight_hot, &mut self.hot_head)
+        } else {
+            (&mut self.weight_cold, &mut self.cold_head)
+        };
+        *weight_ptr -= old_weight;
+        *weight_ptr += new_weight;
+
+        if old_weight == 0 && new_weight != 0 {
+            *target_head = Some(self.entries.link(idx, *target_head));
+        } else if old_weight != 0 && new_weight == 0 {
+            *target_head = self.entries.unlink(idx);
+        }
+    }
 }
 
 impl<
@@ -389,7 +409,7 @@ impl<
         }
     }
 
-    pub fn get_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
+    pub fn get_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
@@ -397,6 +417,7 @@ impl<
             record_miss_mut!(self);
             return None;
         };
+        let cache = self as *mut _;
         let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
             unreachable!()
         };
@@ -405,17 +426,13 @@ impl<
         }
         record_hit_mut!(self);
 
-        let weight = if resident.state == ResidentState::Hot {
-            &mut self.weight_hot
-        } else {
-            &mut self.weight_cold
-        };
-        *weight -= self.weighter.weight(&resident.key, &resident.value);
+        let old_weight = self.weighter.weight(&resident.key, &resident.value);
         Some(RefMut {
             key: &resident.key,
             value: &mut resident.value,
-            weight,
-            weighter: &self.weighter,
+            idx,
+            old_weight,
+            cache,
         })
     }
 
@@ -428,19 +445,17 @@ impl<
         }
     }
 
-    pub fn peek_token_mut(&mut self, token: Token) -> Option<RefMut<'_, Key, Val, We>> {
+    #[inline]
+    pub fn peek_token_mut(&mut self, token: Token) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>> {
+        let cache = self as *mut _;
         if let Some((Entry::Resident(resident), _)) = self.entries.get_mut(token) {
-            let weight = if resident.state == ResidentState::Hot {
-                &mut self.weight_hot
-            } else {
-                &mut self.weight_cold
-            };
-            *weight -= self.weighter.weight(&resident.key, &resident.value);
+            let old_weight = self.weighter.weight(&resident.key, &resident.value);
             Some(RefMut {
                 key: &resident.key,
                 value: &mut resident.value,
-                weight,
-                weighter: &self.weighter,
+                old_weight,
+                idx: token,
+                cache,
             })
         } else {
             None
@@ -455,7 +470,7 @@ impl<
         Some(&resident.value)
     }
 
-    pub fn peek_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
+    pub fn peek_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
@@ -640,18 +655,18 @@ impl<
         match entry {
             Entry::Resident(resident) => {
                 enter_state = resident.state;
-                referenced = *resident.referenced.get_mut() != 0
-                    || matches!(strategy, InsertStrategy::Replace { soft: false });
+                referenced = *resident.referenced.get_mut()
+                    + (!matches!(strategy, InsertStrategy::Replace { soft: false })) as u16;
             }
             _ if matches!(strategy, InsertStrategy::Replace { .. }) => {
                 return Err((key, value));
             }
             Entry::Ghost(_) => {
-                referenced = false;
+                referenced = 0;
                 enter_state = ResidentState::Hot;
             }
             Entry::Placeholder(ph) => {
-                referenced = true;
+                referenced = 1; // Pretend it's a newly insereted Resident
                 enter_state = ph.hot;
             }
         }
@@ -662,7 +677,7 @@ impl<
                 key,
                 value,
                 state: enter_state,
-                referenced: (referenced as u16).into(),
+                referenced: referenced.into(),
             }),
         );
         match evicted {
@@ -679,8 +694,7 @@ impl<
                     &mut self.cold_head
                 };
                 if evicted_weight == 0 && weight != 0 {
-                    self.entries.link(idx, *list_head);
-                    list_head.get_or_insert(idx);
+                    *list_head = Some(self.entries.link(idx, *list_head));
                 } else if evicted_weight != 0 && weight == 0 {
                     *list_head = self.entries.unlink(idx);
                 }
@@ -713,8 +727,7 @@ impl<
                     &mut self.cold_head
                 };
                 if weight != 0 {
-                    self.entries.link(idx, *list_head);
-                    list_head.get_or_insert(idx);
+                    *list_head = Some(self.entries.link(idx, *list_head));
                 }
             }
         }
@@ -814,8 +827,7 @@ impl<
         };
 
         if weight != 0 {
-            self.entries.link(placeholder.idx(), *list_head);
-            list_head.get_or_insert(placeholder.idx());
+            *list_head = Some(self.entries.link(placeholder.idx(), *list_head));
             while self.weight_hot + self.weight_cold > self.weight_capacity {
                 self.advance_cold(lcs);
             }
@@ -892,8 +904,7 @@ impl<
             referenced: Default::default(),
         }));
         if weight != 0 {
-            self.entries.link(idx, *list_head);
-            list_head.get_or_insert(idx);
+            *list_head = Some(self.entries.link(idx, *list_head));
         }
         self.map_insert(hash, idx);
         Ok(())
@@ -980,29 +991,23 @@ impl<
 }
 
 /// Structure wrapping a mutable reference to a cached item.
-pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>> {
-    key: &'cache Key,
-    value: &'cache mut Val,
-    weight: &'cache mut u64,
-    weighter: &'cache We,
+pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> {
+    pub key: &'cache Key,
+    pub value: &'cache mut Val,
+    idx: Token,
+    old_weight: u64,
+    cache: *mut CacheShard<Key, Val, We, B, L, Plh>,
 }
 
-impl<'cache, Key, Val, We: Weighter<Key, Val>> std::ops::Deref for RefMut<'cache, Key, Val, We> {
-    type Target = Val;
-
-    fn deref(&self) -> &Self::Target {
-        self.value
-    }
-}
-
-impl<'cache, Key, Val, We: Weighter<Key, Val>> std::ops::DerefMut for RefMut<'cache, Key, Val, We> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.value
-    }
-}
-
-impl<'cache, Key, Val, We: Weighter<Key, Val>> Drop for RefMut<'cache, Key, Val, We> {
+impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
+    for RefMut<'cache, Key, Val, We, B, L, Plh>
+{
+    #[inline]
     fn drop(&mut self) {
-        *self.weight += self.weighter.weight(self.key, self.value);
+        let value = &*self.value;
+        let new_weight = unsafe { &*self.cache }.weighter.weight(self.key, value);
+        if self.old_weight != new_weight {
+            unsafe { &mut *self.cache }.cold_change_weight(self.idx, self.old_weight, new_weight);
+        }
     }
 }

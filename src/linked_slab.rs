@@ -104,12 +104,13 @@ impl<T> LinkedSlab<T> {
         None
     }
 
-    /// Links an entry before `target_head`
+    /// Links an entry before `target_head`. Returns the item next to the linked item,
+    /// which is either the item itself or `target_head`.
     ///
     /// # Panics
     /// Panics on out of bounds access.
     /// Panics (in debug mode) if linking an absent entry.
-    pub fn link(&mut self, idx: Token, target_head: Option<Token>) {
+    pub fn link(&mut self, idx: Token, target_head: Option<Token>) -> Token {
         // eprintln!("linkedslab::link {idx} head {target_head:?}");
         let (prev, next) = if let Some(target_head) = target_head {
             let head = &mut self.entries[(target_head.get() - 1) as usize];
@@ -137,6 +138,7 @@ impl<T> LinkedSlab<T> {
         debug_assert_eq!(entry.next, idx);
         debug_assert_eq!(entry.prev, idx);
         (entry.prev, entry.next) = (prev, next);
+        next
     }
 
     /// Unlinks an entry without removing it from the ring

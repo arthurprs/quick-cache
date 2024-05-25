@@ -2,7 +2,7 @@ use crate::{
     linked_slab::Token,
     options::*,
     shard::{self, CacheShard, InsertStrategy},
-    DefaultHashBuilder, Equivalent, Lifecycle, RefMut, UnitWeighter, Weighter,
+    DefaultHashBuilder, Equivalent, Lifecycle, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
 
@@ -150,11 +150,11 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// Fetches an item from the cache.
     ///
     /// Note: Leaking the returned RefMut might cause undefined behavior.
-    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        self.shard.get_mut(self.shard.hash(key), key)
+        self.shard.get_mut(self.shard.hash(key), key).map(RefMut)
     }
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
@@ -168,11 +168,11 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
     ///
     /// Note: Leaking the returned RefMut might cause undefined behavior.
-    pub fn peek_mut<Q>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We>>
+    pub fn peek_mut<Q>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        self.shard.peek_mut(self.shard.hash(key), key)
+        self.shard.peek_mut(self.shard.hash(key), key).map(RefMut)
     }
 
     /// Remove an item from the cache whose key is `key`.
@@ -249,7 +249,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         &'a mut self,
         key: &Q,
         with: impl FnOnce() -> Result<Val, E>,
-    ) -> Result<Option<RefMut<'a, Key, Val, We>>, E>
+    ) -> Result<Option<RefMut<'a, Key, Val, We, B, L>>, E>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
@@ -262,7 +262,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
                 plh.idx
             }
         };
-        Ok(self.shard.peek_token_mut(idx))
+        Ok(self.shard.peek_token_mut(idx).map(RefMut))
     }
 
     /// Gets an item from the cache with key `key` .
@@ -297,13 +297,13 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     pub fn get_mut_or_guard<'a, Q>(
         &'a mut self,
         key: &Q,
-    ) -> Result<Option<RefMut<'a, Key, Val, We>>, Guard<'a, Key, Val, We, B, L>>
+    ) -> Result<Option<RefMut<'a, Key, Val, We, B, L>>, Guard<'a, Key, Val, We, B, L>>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         // TODO: this could be using a simpler entry API
         match self.shard.upsert_placeholder(self.shard.hash(key), key) {
-            Ok((idx, _)) => Ok(self.shard.peek_token_mut(idx)),
+            Ok((idx, _)) => Ok(self.shard.peek_token_mut(idx).map(RefMut)),
             Err((placeholder, _)) => Err(Guard {
                 cache: self,
                 placeholder,
@@ -447,6 +447,30 @@ impl<'a, Key, Val, We, B, L> Drop for Guard<'a, Key, Val, We, B, L> {
     }
 }
 
+pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L>(
+    crate::shard::RefMut<'cache, Key, Val, We, B, L, SharedPlaceholder>,
+);
+
+impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L> std::ops::Deref
+    for RefMut<'cache, Key, Val, We, B, L>
+{
+    type Target = Val;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.0.value
+    }
+}
+
+impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L> std::ops::DerefMut
+    for RefMut<'cache, Key, Val, We, B, L>
+{
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.value
+    }
+}
+
 impl shard::SharedPlaceholder for SharedPlaceholder {
     fn new(hash: u64, idx: Token) -> Self {
         Self { hash, idx }
@@ -465,5 +489,48 @@ impl shard::SharedPlaceholder for SharedPlaceholder {
     #[inline]
     fn idx(&self) -> Token {
         self.idx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Weighter;
+
+    impl crate::Weighter<u32, u32> for Weighter {
+        fn weight(&self, _key: &u32, val: &u32) -> u64 {
+            *val as u64
+        }
+    }
+
+    #[test]
+    fn test_zero_weights() {
+        let mut cache = Cache::with_weighter(100, 100, Weighter);
+        cache.insert(0, 0);
+        assert_eq!(cache.weight(), 0);
+        for i in 1..100 {
+            cache.insert(i, i);
+            cache.insert(i, i);
+        }
+        assert_eq!(cache.get(&0).copied(), Some(0));
+        let a = cache.weight();
+        *cache.get_mut(&0).unwrap() += 1;
+        assert_eq!(cache.weight(), a + 1);
+        for i in 1..100 {
+            cache.insert(i, i);
+            cache.insert(i, i);
+        }
+        assert_eq!(cache.get(&0), None);
+
+        cache.insert(0, 1);
+        let a = cache.weight();
+        *cache.get_mut(&0).unwrap() -= 1;
+        assert_eq!(cache.weight(), a - 1);
+        for i in 1..100 {
+            cache.insert(i, i);
+            cache.insert(i, i);
+        }
+        assert_eq!(cache.get(&0).copied(), Some(0));
     }
 }
