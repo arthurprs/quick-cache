@@ -55,12 +55,12 @@ impl<T> LinkedSlab<T> {
         }
     }
 
-    /// Inserts a new entry in the list, link it before `head`.
-    /// If `head` is not set the item will belong to a list only containing itself.
+    /// Inserts a new entry in the list.
+    /// Initially, the item will belong to a list only containing itself.
     ///
     /// # Panics
     /// Panics if number of items exceed `u32::MAX - 1`.
-    pub fn insert(&mut self, item: T, head: Option<Token>) -> Token {
+    pub fn insert(&mut self, item: T) -> Token {
         let token = self.next_free;
         // eprintln!("linkedslab::insert token {token} head {head:?}");
         let idx = (token.get() - 1) as usize;
@@ -79,7 +79,6 @@ impl<T> LinkedSlab<T> {
                 item: Some(item),
             });
         }
-        self.link(token, head);
         token
     }
 
@@ -105,12 +104,13 @@ impl<T> LinkedSlab<T> {
         None
     }
 
-    /// Links an entry before `target_head`
+    /// Links an entry before `target_head`. Returns the item next to the linked item,
+    /// which is either the item itself or `target_head`.
     ///
     /// # Panics
     /// Panics on out of bounds access.
     /// Panics (in debug mode) if linking an absent entry.
-    pub fn link(&mut self, idx: Token, target_head: Option<Token>) {
+    pub fn link(&mut self, idx: Token, target_head: Option<Token>) -> Token {
         // eprintln!("linkedslab::link {idx} head {target_head:?}");
         let (prev, next) = if let Some(target_head) = target_head {
             let head = &mut self.entries[(target_head.get() - 1) as usize];
@@ -135,9 +135,10 @@ impl<T> LinkedSlab<T> {
 
         let entry = &mut self.entries[(idx.get() - 1) as usize];
         debug_assert!(entry.item.is_some());
-        assert_eq!(entry.next, idx);
-        assert_eq!(entry.prev, idx);
+        debug_assert_eq!(entry.next, idx);
+        debug_assert_eq!(entry.prev, idx);
         (entry.prev, entry.next) = (prev, next);
+        next
     }
 
     /// Unlinks an entry without removing it from the ring

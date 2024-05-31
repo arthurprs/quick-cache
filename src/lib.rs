@@ -75,7 +75,6 @@ pub use equivalent::Equivalent;
 mod shuttle_tests;
 
 pub use options::{Options, OptionsBuilder};
-pub use shard::RefMut;
 
 #[cfg(feature = "ahash")]
 pub type DefaultHashBuilder = ahash::RandomState;
