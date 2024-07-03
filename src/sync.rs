@@ -210,7 +210,7 @@ impl<
 
     /// Reserver additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
-    pub fn reserve(&mut self, additional: usize) {
+    pub fn reserve(&self, additional: usize) {
         let additional_per_shard =
             additional.saturating_add(self.shards.len() - 1) / self.shards.len();
         for s in &*self.shards {
