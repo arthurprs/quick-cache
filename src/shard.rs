@@ -656,7 +656,7 @@ impl<
             Entry::Resident(resident) => {
                 enter_state = resident.state;
                 referenced = *resident.referenced.get_mut()
-                    + (!matches!(strategy, InsertStrategy::Replace { soft: false })) as u16;
+                    + (!matches!(strategy, InsertStrategy::Replace { soft: true })) as u16;
             }
             _ if matches!(strategy, InsertStrategy::Replace { .. }) => {
                 return Err((key, value));
