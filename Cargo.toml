@@ -33,3 +33,6 @@ tokio = { version = "1", features = ["full"] }
 [[bench]]
 name = "benchmarks"
 harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
