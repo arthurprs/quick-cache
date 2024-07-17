@@ -40,7 +40,7 @@ jobs:
       - run: cargo test --all-features --no-run
 
   shuttle-tests:
-    name: Tests
+    name: Shuttle Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -50,6 +50,20 @@ jobs:
           toolchain: stable
           override: true
       - run: cargo test --features shuttle shuttle
+
+  docs:
+    name: Build Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+      - run: cargo doc --features stats --package quick_cache
+        env:
+          RUSTDOCFLAGS: --cfg docsrs
 
   fuzz-tests:
     name: Fuzz tests

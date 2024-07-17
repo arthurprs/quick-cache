@@ -36,3 +36,7 @@ harness = false
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[package.metadata.docs.rs]
+features = ["stats"]
+rustdoc-args = ["--cfg", "docsrs"]
