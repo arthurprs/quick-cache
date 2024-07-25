@@ -406,6 +406,7 @@ impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, 
 }
 
 impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> Drop for JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
+    #[inline]
     fn drop(&mut self) {
         if matches!(
             self,

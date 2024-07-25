@@ -273,6 +273,67 @@ mod tests {
     }
 
     #[test]
+    fn test_get_or_insert_unsync() {
+        let mut cache = unsync::Cache::<u64, u64>::new(100);
+        let guard = cache.get_ref_or_guard(&0).unwrap_err();
+        guard.insert(0);
+        assert_eq!(cache.get_ref_or_guard(&0).ok().copied(), Some(0));
+        let guard = cache.get_mut_or_guard(&1).err().unwrap();
+        guard.insert(1);
+        let v = *cache.get_mut_or_guard(&1).ok().unwrap().unwrap();
+        assert_eq!(v, 1);
+        let result = cache.get_or_insert_with::<_, ()>(&0, || panic!());
+        assert_eq!(result, Ok(Some(&0)));
+        let result = cache.get_or_insert_with::<_, ()>(&1, || panic!());
+        assert_eq!(result, Ok(Some(&1)));
+        let result = cache.get_or_insert_with::<_, ()>(&3, || Ok(3));
+        assert_eq!(result, Ok(Some(&3)));
+        let result = cache.get_or_insert_with::<_, ()>(&4, || Err(()));
+        assert_eq!(result, Err(()));
+    }
+
+    #[tokio::test]
+    async fn test_get_or_insert_sync() {
+        use crate::sync::*;
+        let cache = sync::Cache::<u64, u64>::new(100);
+        let GuardResult::Guard(guard) = cache.get_value_or_guard(&0, None) else {
+            panic!();
+        };
+        guard.insert(0).unwrap();
+        let GuardResult::Value(v) = cache.get_value_or_guard(&0, None) else {
+            panic!();
+        };
+        assert_eq!(v, 0);
+        let Err(guard) = cache.get_value_or_guard_async(&1).await else {
+            panic!();
+        };
+        guard.insert(1).unwrap();
+        let Ok(v) = cache.get_value_or_guard_async(&1).await else {
+            panic!();
+        };
+        assert_eq!(v, 1);
+
+        let result = cache.get_or_insert_with::<_, ()>(&0, || panic!());
+        assert_eq!(result, Ok(0));
+        let result = cache.get_or_insert_with::<_, ()>(&3, || Ok(3));
+        assert_eq!(result, Ok(3));
+        let result = cache.get_or_insert_with::<_, ()>(&4, || Err(()));
+        assert_eq!(result, Err(()));
+        let result = cache
+            .get_or_insert_async::<_, ()>(&0, async { panic!() })
+            .await;
+        assert_eq!(result, Ok(0));
+        let result = cache
+            .get_or_insert_async::<_, ()>(&4, async { Err(()) })
+            .await;
+        assert_eq!(result, Err(()));
+        let result = cache
+            .get_or_insert_async::<_, ()>(&4, async { Ok(4) })
+            .await;
+        assert_eq!(result, Ok(4));
+    }
+
+    #[test]
     fn test_value_or_guard() {
         use crate::sync::*;
         use rand::prelude::*;
