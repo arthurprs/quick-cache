@@ -242,7 +242,8 @@ impl<
                     if notification.load(atomic::Ordering::Acquire) {
                         break;
                     }
-                    if start.elapsed() < timeout {
+                    // for shuttle assume no spurious unparks as the timeout isn't respected anyway
+                    if !cfg!(feature = "shuttle") && start.elapsed() < timeout {
                         // spurious unpark
                         continue;
                     }
