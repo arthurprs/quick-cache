@@ -49,7 +49,7 @@ jobs:
           profile: minimal
           toolchain: stable
           override: true
-      - run: cargo test --features shuttle shuttle
+      - run: cargo test --release --features shuttle shuttle
 
   fuzz-tests:
     name: Fuzz tests
