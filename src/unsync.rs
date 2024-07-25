@@ -235,7 +235,9 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             Err((plh, _)) => {
                 let v = with()?;
                 let mut lcs = self.shard.lifecycle.begin_request();
-                let _ = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
+                let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
+                self.shard.lifecycle.end_request(lcs);
+                debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
                 plh.idx
             }
         };
@@ -259,7 +261,9 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             Err((plh, _)) => {
                 let v = with()?;
                 let mut lcs = self.shard.lifecycle.begin_request();
-                let _ = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
+                let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
+                debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
+                self.shard.lifecycle.end_request(lcs);
                 plh.idx
             }
         };
@@ -418,14 +422,14 @@ impl<'a, Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecyc
         self.insert_internal(value, true).unwrap()
     }
 
+    #[inline]
     fn insert_internal(mut self, value: Val, return_lcs: bool) -> Option<L::RequestState> {
         let mut lcs = self.cache.shard.lifecycle.begin_request();
-        let replaced = self
-            .cache
-            .shard
-            .replace_placeholder(&mut lcs, &self.placeholder, false, value)
-            .is_err();
-        debug_assert!(replaced, "unsync replace_placeholder can't fail");
+        let replaced =
+            self.cache
+                .shard
+                .replace_placeholder(&mut lcs, &self.placeholder, false, value);
+        debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
         self.inserted = true;
         if return_lcs {
             Some(lcs)
@@ -437,6 +441,7 @@ impl<'a, Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecyc
 }
 
 impl<'a, Key, Val, We, B, L> Drop for Guard<'a, Key, Val, We, B, L> {
+    #[inline]
     fn drop(&mut self) {
         #[cold]
         fn drop_slow<Key, Val, We, B, L>(this: &mut Guard<'_, Key, Val, We, B, L>) {
@@ -473,6 +478,7 @@ impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L> std::ops::DerefMut
 }
 
 impl shard::SharedPlaceholder for SharedPlaceholder {
+    #[inline]
     fn new(hash: u64, idx: Token) -> Self {
         Self { hash, idx }
     }
