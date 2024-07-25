@@ -349,7 +349,8 @@ impl<
         }
     }
 
-    /// Gets an item from the cache with key `key` .
+    /// Gets an item from the cache with key `key`.
+    ///
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
     /// While the returned guard is alive, other calls with the same key using the

@@ -235,7 +235,8 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             Err((plh, _)) => {
                 let v = with()?;
                 let mut lcs = self.shard.lifecycle.begin_request();
-                let _ = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
+                let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
+                debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
                 plh.idx
             }
         };
@@ -259,7 +260,8 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             Err((plh, _)) => {
                 let v = with()?;
                 let mut lcs = self.shard.lifecycle.begin_request();
-                let _ = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
+                let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
+                debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
                 plh.idx
             }
         };
@@ -420,12 +422,11 @@ impl<'a, Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecyc
 
     fn insert_internal(mut self, value: Val, return_lcs: bool) -> Option<L::RequestState> {
         let mut lcs = self.cache.shard.lifecycle.begin_request();
-        let replaced = self
-            .cache
-            .shard
-            .replace_placeholder(&mut lcs, &self.placeholder, false, value)
-            .is_err();
-        debug_assert!(replaced, "unsync replace_placeholder can't fail");
+        let replaced =
+            self.cache
+                .shard
+                .replace_placeholder(&mut lcs, &self.placeholder, false, value);
+        debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
         self.inserted = true;
         if return_lcs {
             Some(lcs)
