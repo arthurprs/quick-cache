@@ -308,18 +308,23 @@ impl<
             }
         }
 
+        // Set flag to disable drop_uninserted_slow, it has no work to do:
+        //   - waiters have already been drained
+        //   - no waiters can be added because we set LoadingState::Inserted
+        //   - the placeholder will be removed here, if it still exists
+        self.inserted = true;
+
         let mut lcs = self.lifecycle.begin_request();
         self.shard
             .write()
             .replace_placeholder(&mut lcs, &self.shared, referenced, value)?;
-        self.inserted = true;
         Ok(lcs)
     }
 }
 
 impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
     #[cold]
-    fn drop_slow(&mut self) {
+    fn drop_uninserted_slow(&mut self) {
         // Make sure to acquire the shard lock to prevent races with other threads
         let mut shard = self.shard.write();
         let mut state = self.shared.state.write();
@@ -336,7 +341,7 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
 impl<'a, Key, Val, We, B, L> Drop for PlaceholderGuard<'a, Key, Val, We, B, L> {
     fn drop(&mut self) {
         if !self.inserted {
-            self.drop_slow();
+            self.drop_uninserted_slow();
         }
     }
 }
