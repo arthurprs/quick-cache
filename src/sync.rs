@@ -443,6 +443,7 @@ mod tests {
     };
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_multiple_threads() {
         const N_THREAD_PAIRS: usize = 8;
         const N_ROUNDS: usize = 1_000;

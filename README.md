@@ -1,6 +1,5 @@
 # Quick Cache
 
-
 [![Crates.io](https://img.shields.io/crates/v/quick_cache.svg)](https://crates.io/crates/quick_cache)
 [![Docs](https://docs.rs/quick_cache/badge.svg)](https://docs.rs/quick_cache/latest)
 [![CI](https://github.com/arthurprs/quick-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/arthurprs/quick-cache/actions/workflows/ci.yml)
