@@ -33,9 +33,10 @@
 //!
 //! # Lifecycle hooks
 //!
-//! A user can optionally provide a custom `Lifecycle` implementation to hook into the lifecycle of cache entries.
+//! A user can optionally provide a custom [Lifecycle] implementation to hook into the lifecycle of cache entries.
 //!
 //! Example use cases:
+//! * item pinning, so even if the item occupies weight but isn't allowed to be evicted
 //! * send evicted items to a channel, achieving the equivalent to an eviction listener feature.
 //! * zero out item weights so they are left in the cache instead of evicted.
 //!
@@ -134,14 +135,30 @@ impl<Key, Val> Weighter<Key, Val> for UnitWeighter {
 pub trait Lifecycle<Key, Val> {
     type RequestState;
 
+    /// Returns whether the item is pinned. Items that are pinned can't be evicted.
+    /// Note that a pinned item can still be replaced with get_mut, insert, replace and similar APIs.
+    ///
+    /// Compared to zero (0) weight items, pinned items still consume (non-zero) weight even if they can't
+    /// be evicted. Furthermore, zero (0) weight items are separated from the other entries, which allows
+    /// having a large number of them without impacting performance, but moving them in/out or the evictable
+    /// section has a small cost. Pinning on the other hand doesn't separate entries, so during eviction
+    /// the cache may visit pinned entries but will ignore them.
+    #[allow(unused_variables)]
+    #[inline]
+    fn is_pinned(&self, key: &Key, val: &Val) -> bool {
+        false
+    }
+
     /// Called before the insert request starts, e.g.: insert, replace.
     fn begin_request(&self) -> Self::RequestState;
 
     /// Called when a cache item is about to be evicted.
     /// Note that value replacement (e.g. insertions for the same key) won't call this method.
     ///
-    /// This is the only time the item can change its weight. If the weight becomes 0 then the item
-    /// will be left in the cache, otherwise it'll still be removed.
+    /// This is the only time the item can change its weight. If the item weight becomes zero (0) it
+    /// will be left in the cache, otherwise it'll still be removed. Zero (0) weight items aren't evictable
+    /// and are kept separated from the other items so it's possible to have a large number of them without
+    /// negatively affecting eviction performance.
     #[allow(unused_variables)]
     #[inline]
     fn before_evict(&self, state: &mut Self::RequestState, key: &Key, val: &mut Val) {}
@@ -219,7 +236,7 @@ mod tests {
         };
         assert_eq!(cache.get(&1).unwrap(), "");
         assert_eq!(cache.weight(), 0);
-        cache.validate();
+        cache.validate(false);
     }
 
     #[derive(Debug, Hash)]

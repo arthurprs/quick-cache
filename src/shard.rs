@@ -207,22 +207,34 @@ impl<
     }
 
     #[cfg(any(fuzzing, test))]
-    pub fn validate(&self) {
+    pub fn validate(&self, accept_overweight: bool) {
         self.entries.validate();
         let mut num_hot = 0;
         let mut num_cold = 0;
         let mut num_non_resident = 0;
         let mut weight_hot = 0;
+        let mut weight_hot_pinned = 0;
         let mut weight_cold = 0;
+        let mut weight_cold_pinned = 0;
         for e in self.entries.iter_entries() {
             match e {
                 Entry::Resident(r) if r.state == ResidentState::Cold => {
                     num_cold += 1;
-                    weight_cold += self.weighter.weight(&r.key, &r.value);
+                    let weight = self.weighter.weight(&r.key, &r.value);
+                    if self.lifecycle.is_pinned(&r.key, &r.value) {
+                        weight_cold_pinned += weight;
+                    } else {
+                        weight_cold += weight;
+                    }
                 }
                 Entry::Resident(r) => {
                     num_hot += 1;
-                    weight_hot += self.weighter.weight(&r.key, &r.value);
+                    let weight = self.weighter.weight(&r.key, &r.value);
+                    if self.lifecycle.is_pinned(&r.key, &r.value) {
+                        weight_hot_pinned += weight;
+                    } else {
+                        weight_hot += weight;
+                    }
                 }
                 Entry::Ghost(_) => {
                     num_non_resident += 1;
@@ -231,22 +243,31 @@ impl<
             }
         }
         // eprintln!("-------------");
-        // dbg!(num_hot, num_cold, num_non_resident, weight_hot, weight_cold);
         // dbg!(
+        //     num_hot,
+        //     num_cold,
+        //     num_non_resident,
+        //     weight_hot,
+        //     weight_hot_pinned,
+        //     weight_cold,
+        //     weight_cold_pinned,
         //     self.num_hot,
         //     self.num_cold,
         //     self.num_non_resident,
         //     self.weight_hot,
         //     self.weight_cold,
         //     self.weight_target_hot,
+        //     self.weight_capacity,
         //     self.capacity_non_resident
         // );
         assert_eq!(num_hot, self.num_hot);
         assert_eq!(num_cold, self.num_cold);
         assert_eq!(num_non_resident, self.num_non_resident);
-        assert_eq!(weight_hot, self.weight_hot);
-        assert_eq!(weight_cold, self.weight_cold);
-        assert!(weight_hot + weight_cold <= self.weight_capacity);
+        assert_eq!(weight_hot + weight_hot_pinned, self.weight_hot);
+        assert_eq!(weight_cold + weight_cold_pinned, self.weight_cold);
+        if !accept_overweight {
+            assert!(weight_hot + weight_cold <= self.weight_capacity);
+        }
         assert!(num_non_resident <= self.capacity_non_resident);
     }
 
@@ -519,75 +540,86 @@ impl<
 
     /// Advance cold ring, promoting to hot and demoting as needed.
     /// Panics if the cache is empty.
-    fn advance_cold(&mut self, lcs: &mut L::RequestState) {
+    #[must_use]
+    fn advance_cold(&mut self, lcs: &mut L::RequestState) -> bool {
         debug_assert_ne!(self.num_cold + self.num_hot, 0);
         debug_assert_ne!(self.weight_cold + self.weight_hot, 0);
 
-        let idx = if let Some(idx) = self.cold_head {
-            idx
-        } else {
-            self.advance_hot(lcs);
-            return;
-        };
-        let (entry, _) = self.entries.get_mut(idx).unwrap();
-        let Entry::Resident(resident) = entry else {
-            unreachable!()
-        };
-        debug_assert_eq!(resident.state, ResidentState::Cold);
-        if *resident.referenced.get_mut() != 0 {
-            resident.state = ResidentState::Hot;
-            let weight = self.weighter.weight(&resident.key, &resident.value);
-            self.weight_hot += weight;
-            self.weight_cold -= weight;
-            self.num_hot += 1;
-            self.num_cold -= 1;
+        let mut pinned = 0usize;
+        loop {
+            let idx = if let Some(idx) = self.cold_head {
+                idx
+            } else {
+                return self.advance_hot(lcs);
+            };
+            let (entry, next) = self.entries.get_mut(idx).unwrap();
+            let Entry::Resident(resident) = entry else {
+                unreachable!()
+            };
+            debug_assert_eq!(resident.state, ResidentState::Cold);
+            if *resident.referenced.get_mut() != 0 {
+                resident.state = ResidentState::Hot;
+                let weight = self.weighter.weight(&resident.key, &resident.value);
+                self.weight_hot += weight;
+                self.weight_cold -= weight;
+                self.num_hot += 1;
+                self.num_cold -= 1;
+                Self::relink(
+                    &mut self.entries,
+                    idx,
+                    &mut self.cold_head,
+                    &mut self.hot_head,
+                );
+                // evict from hot if overweight
+                while self.weight_hot > self.weight_target_hot && self.advance_hot(lcs) {}
+                return true;
+            }
+
+            if self.lifecycle.is_pinned(&resident.key, &resident.value) {
+                pinned += 1;
+                if pinned >= self.num_cold {
+                    return self.advance_hot(lcs);
+                }
+                self.cold_head = Some(next);
+                continue;
+            }
+
+            self.weight_cold -= self.weighter.weight(&resident.key, &resident.value);
+            self.lifecycle
+                .before_evict(lcs, &resident.key, &mut resident.value);
+            if self.weighter.weight(&resident.key, &resident.value) == 0 {
+                self.cold_head = self.entries.unlink(idx);
+                return true;
+            }
+            let hash = Self::hash_static(&self.hash_builder, &resident.key);
+            let Entry::Resident(evicted) = mem::replace(entry, Entry::Ghost(hash)) else {
+                unreachable!()
+            };
             Self::relink(
                 &mut self.entries,
                 idx,
                 &mut self.cold_head,
-                &mut self.hot_head,
+                &mut self.ghost_head,
             );
-            // evict from hot if overweight
-            while self.weight_hot > self.weight_target_hot {
-                self.advance_hot(lcs);
+            self.num_cold -= 1;
+            self.num_non_resident += 1;
+            // evict from ghost if oversized
+            if self.num_non_resident > self.capacity_non_resident {
+                self.advance_ghost();
             }
-            return;
+            self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
+            return true;
         }
-
-        self.weight_cold -= self.weighter.weight(&resident.key, &resident.value);
-        self.lifecycle
-            .before_evict(lcs, &resident.key, &mut resident.value);
-        if self.weighter.weight(&resident.key, &resident.value) == 0 {
-            self.cold_head = self.entries.unlink(idx);
-            return;
-        }
-        let hash = Self::hash_static(&self.hash_builder, &resident.key);
-        let Entry::Resident(evicted) = mem::replace(entry, Entry::Ghost(hash)) else {
-            unreachable!()
-        };
-        Self::relink(
-            &mut self.entries,
-            idx,
-            &mut self.cold_head,
-            &mut self.ghost_head,
-        );
-        self.num_cold -= 1;
-        self.num_non_resident += 1;
-        // evict from ghost if oversized
-        if self.num_non_resident > self.capacity_non_resident {
-            self.advance_ghost();
-        }
-        self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
     }
 
     /// Advance hot ring evicting entries.
-    /// Panics if there are no hot entries.
-    #[inline]
-    fn advance_hot(&mut self, lcs: &mut L::RequestState) {
-        debug_assert_ne!(self.num_hot, 0);
-        debug_assert_ne!(self.weight_hot, 0);
+    #[must_use]
+    fn advance_hot(&mut self, lcs: &mut L::RequestState) -> bool {
+        let mut pinned = 0usize;
         loop {
-            let idx = self.hot_head.unwrap();
+            let Some(idx) = self.hot_head else {
+                return false;
+            };
             let (entry, next) = self.entries.get_mut(idx).unwrap();
             let Entry::Resident(resident) = entry else {
                 unreachable!()
@@ -595,6 +627,14 @@ impl<
             debug_assert_eq!(resident.state, ResidentState::Hot);
             if *resident.referenced.get_mut() != 0 {
                 *resident.referenced.get_mut() = (*resident.referenced.get_mut()).min(MAX_F) - 1;
+                self.hot_head = Some(next);
+                continue;
+            }
+            if self.lifecycle.is_pinned(&resident.key, &resident.value) {
+                pinned += 1;
+                if pinned >= self.num_hot * MAX_F as usize {
+                    return false;
+                }
                 self.hot_head = Some(next);
                 continue;
             }
@@ -614,7 +654,7 @@ impl<
                 };
                 self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
             }
-            return;
+            return true;
         }
     }
 
@@ -726,9 +766,7 @@ impl<
             }
         }
 
-        while self.weight_hot + self.weight_cold > self.weight_capacity {
-            self.advance_cold(lcs);
-        }
+        while self.weight_hot + self.weight_cold > self.weight_capacity && self.advance_cold(lcs) {}
         Ok(())
     }
 
@@ -822,9 +860,9 @@ impl<
 
         if weight != 0 {
             *list_head = Some(self.entries.link(placeholder.idx(), *list_head));
-            while self.weight_hot + self.weight_cold > self.weight_capacity {
-                self.advance_cold(lcs);
-            }
+            while self.weight_hot + self.weight_cold > self.weight_capacity
+                && self.advance_cold(lcs)
+            {}
         }
 
         Ok(())
@@ -871,9 +909,13 @@ impl<
         let enter_hot = if self.weight_hot + self.weight_cold + weight > self.weight_capacity {
             // evict until we have enough space for this entry
             loop {
-                self.advance_cold(lcs);
-                if self.weight_hot + self.weight_cold + weight <= self.weight_capacity {
+                let evicted = self.advance_cold(lcs);
+                let overweight = self.weight_hot + self.weight_cold + weight > self.weight_capacity;
+                if !overweight {
                     break;
+                }
+                if !evicted {
+                    return self.handle_insert_overweight(lcs, hash, key, value, strategy);
                 }
             }
             false

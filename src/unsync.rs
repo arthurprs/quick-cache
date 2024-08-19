@@ -357,9 +357,9 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.drain()
     }
 
-    #[cfg(test)]
-    pub fn validate(&self) {
-        self.shard.validate();
+    #[cfg(any(fuzzing, test))]
+    pub fn validate(&self, accept_overweight: bool) {
+        self.shard.validate(accept_overweight);
     }
 }
 

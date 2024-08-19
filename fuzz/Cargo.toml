@@ -21,8 +21,14 @@ path = ".."
 members = ["."]
 
 [[bin]]
-name = "fuzz_cache"
-path = "fuzz_targets/fuzz_cache.rs"
+name = "fuzz_sync_cache"
+path = "fuzz_targets/fuzz_sync_cache.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_unsync_cache"
+path = "fuzz_targets/fuzz_unsync_cache.rs"
 test = false
 doc = false
 

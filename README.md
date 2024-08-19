@@ -12,6 +12,7 @@ Lightweight and high performance concurrent cache optimized for low cache overhe
 * Scales well with the number of threads
 * Atomic operations with `get_or_insert` and `get_value_or_guard` functions
 * Atomic async operations with `get_or_insert_async` and `get_value_or_guard_async` functions
+* Supports item pinning
 * Handles zero weight items efficiently
 * Allows for customizable lifecycle hooks (e.g. can be used to implement eviction listeners)
 * Doesn't use background threads

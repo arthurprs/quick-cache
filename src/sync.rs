@@ -152,7 +152,7 @@ impl<
     #[cfg(fuzzing)]
     pub fn validate(&self) {
         for s in &*self.shards {
-            s.read().validate()
+            s.read().validate(false)
         }
     }
 
