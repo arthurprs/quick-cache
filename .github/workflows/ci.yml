@@ -98,3 +98,17 @@ jobs:
         with:
           command: clippy
           args: -- -D warnings
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: nightly
+        override: true
+        components: miri
+    - name: Run Miri
+      run: cargo miri test

@@ -206,7 +206,7 @@ impl<
         }
     }
 
-    #[cfg(fuzzing)]
+    #[cfg(any(fuzzing, test))]
     pub fn validate(&self) {
         self.entries.validate();
         let mut num_hot = 0;
@@ -417,7 +417,6 @@ impl<
             record_miss_mut!(self);
             return None;
         };
-        let cache = self as *mut _;
         let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
             unreachable!()
         };
@@ -428,11 +427,9 @@ impl<
 
         let old_weight = self.weighter.weight(&resident.key, &resident.value);
         Some(RefMut {
-            key: &resident.key,
-            value: &mut resident.value,
             idx,
             old_weight,
-            cache,
+            cache: self,
         })
     }
 
@@ -447,15 +444,12 @@ impl<
 
     #[inline]
     pub fn peek_token_mut(&mut self, token: Token) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>> {
-        let cache = self as *mut _;
         if let Some((Entry::Resident(resident), _)) = self.entries.get_mut(token) {
             let old_weight = self.weighter.weight(&resident.key, &resident.value);
             Some(RefMut {
-                key: &resident.key,
-                value: &mut resident.value,
                 old_weight,
                 idx: token,
-                cache,
+                cache: self,
             })
         } else {
             None
@@ -992,11 +986,41 @@ impl<
 
 /// Structure wrapping a mutable reference to a cached item.
 pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> {
-    pub key: &'cache Key,
-    pub value: &'cache mut Val,
+    cache: &'cache mut CacheShard<Key, Val, We, B, L, Plh>,
     idx: Token,
     old_weight: u64,
-    cache: *mut CacheShard<Key, Val, We, B, L, Plh>,
+}
+
+impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
+    RefMut<'cache, Key, Val, We, B, L, Plh>
+{
+    pub(crate) fn pair(&self) -> (&Key, &Val) {
+        // Safety: RefMut was constructed correctly from a Resident entry in get_mut or peek_token_mut
+        // and it couldn't be modified as we're holding a mutable reference to the cache
+        unsafe {
+            if let (Entry::Resident(Resident { key, value, .. }), _) =
+                self.cache.entries.get_unchecked(self.idx)
+            {
+                (key, value)
+            } else {
+                core::hint::unreachable_unchecked()
+            }
+        }
+    }
+
+    pub(crate) fn value_mut(&mut self) -> &mut Val {
+        // Safety: RefMut was constructed correctly from a Resident entry in get_mut or peek_token_mut
+        // and it couldn't be modified as we're holding a mutable reference to the cache
+        unsafe {
+            if let (Entry::Resident(Resident { value, .. }), _) =
+                self.cache.entries.get_mut_unchecked(self.idx)
+            {
+                value
+            } else {
+                core::hint::unreachable_unchecked()
+            }
+        }
+    }
 }
 
 impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
@@ -1004,10 +1028,11 @@ impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Dro
 {
     #[inline]
     fn drop(&mut self) {
-        let value = &*self.value;
-        let new_weight = unsafe { &*self.cache }.weighter.weight(self.key, value);
+        let (key, value) = self.pair();
+        let new_weight = self.cache.weighter.weight(key, value);
         if self.old_weight != new_weight {
-            unsafe { &mut *self.cache }.cold_change_weight(self.idx, self.old_weight, new_weight);
+            self.cache
+                .cold_change_weight(self.idx, self.old_weight, new_weight);
         }
     }
 }

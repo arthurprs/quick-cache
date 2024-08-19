@@ -140,7 +140,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.reserve(additional);
     }
 
-    /// Fetches an item from the cache. Callers should prefer `get_mut` whenever possible as it's more efficient.
+    /// Fetches an item from the cache.
     pub fn get<Q>(&self, key: &Q) -> Option<&Val>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -356,6 +356,11 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         // TODO: add a concrete type, impl trait in the public api is really bad.
         self.shard.drain()
     }
+
+    #[cfg(test)]
+    pub fn validate(&self) {
+        self.shard.validate();
+    }
 }
 
 impl<Key, Val, We, B, L> std::fmt::Debug for Cache<Key, Val, We, B, L> {
@@ -464,7 +469,7 @@ impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L> std::ops::Deref
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        self.0.value
+        self.0.pair().1
     }
 }
 
@@ -473,7 +478,7 @@ impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L> std::ops::DerefMut
 {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.value
+        self.0.value_mut()
     }
 }
 

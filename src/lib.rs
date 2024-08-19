@@ -169,6 +169,14 @@ mod tests {
     };
 
     use super::*;
+    #[derive(Clone)]
+    struct StringWeighter;
+
+    impl Weighter<u64, String> for StringWeighter {
+        fn weight(&self, _key: &u64, val: &String) -> u64 {
+            val.len() as u64
+        }
+    }
 
     #[test]
     fn test_new() {
@@ -186,20 +194,32 @@ mod tests {
 
     #[test]
     fn test_custom_cost() {
-        #[derive(Clone)]
-        struct StringWeighter;
-
-        impl Weighter<u64, String> for StringWeighter {
-            fn weight(&self, _key: &u64, val: &String) -> u64 {
-                val.len() as u64
-            }
-        }
-
         let cache = sync::Cache::with_weighter(100, 100_000, StringWeighter);
         cache.insert(1, "1".to_string());
         cache.insert(54, "54".to_string());
         cache.insert(1000, "1000".to_string());
         assert_eq!(cache.get(&1000).unwrap(), "1000");
+    }
+
+    #[test]
+    fn test_change_get_mut_change_weight() {
+        let mut cache = unsync::Cache::with_weighter(100, 100_000, StringWeighter);
+        cache.insert(1, "1".to_string());
+        assert_eq!(cache.get(&1).unwrap(), "1");
+        assert_eq!(cache.weight(), 1);
+        let _old = {
+            cache
+                .get_mut(&1)
+                .map(|mut v| std::mem::replace(&mut *v, "11".to_string()))
+        };
+        let _old = {
+            cache
+                .get_mut(&1)
+                .map(|mut v| std::mem::replace(&mut *v, "".to_string()))
+        };
+        assert_eq!(cache.get(&1).unwrap(), "");
+        assert_eq!(cache.weight(), 0);
+        cache.validate();
     }
 
     #[derive(Debug, Hash)]
@@ -243,6 +263,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_get_or_insert() {
         use rand::prelude::*;
         for _i in 0..2000 {
@@ -334,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_value_or_guard() {
         use crate::sync::*;
         use rand::prelude::*;
@@ -371,6 +393,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
     async fn test_get_or_insert_async() {
         use rand::prelude::*;
         for _i in 0..5000 {
@@ -413,6 +436,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
     async fn test_value_or_guard_async() {
         use rand::prelude::*;
         for _i in 0..5000 {
