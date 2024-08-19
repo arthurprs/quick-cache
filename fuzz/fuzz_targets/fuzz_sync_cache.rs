@@ -15,27 +15,38 @@ struct MyWeighter;
 #[derive(Clone)]
 struct MyLifecycle;
 
-impl Weighter<u16, (u16, u16)> for MyWeighter {
-    fn weight(&self, _key: &u16, val: &(u16, u16)) -> u64 {
-        val.1 as u64
+#[derive(Debug, Clone, Copy)]
+struct Value {
+    original: u16,
+    current: u16,
+    pinned: bool,
+}
+
+impl Weighter<u16, Value> for MyWeighter {
+    fn weight(&self, _key: &u16, val: &Value) -> u64 {
+        val.current as u64
     }
 }
 
-impl Lifecycle<u16, (u16, u16)> for MyLifecycle {
-    type RequestState = Vec<(u16, (u16, u16))>;
+impl Lifecycle<u16, Value> for MyLifecycle {
+    type RequestState = Vec<(u16, Value)>;
 
     fn begin_request(&self) -> Self::RequestState {
         Default::default()
     }
 
-    fn before_evict(&self, _state: &mut Self::RequestState, _key: &u16, val: &mut (u16, u16)) {
+    fn is_pinned(&self, _key: &u16, val: &Value) -> bool {
+        val.pinned
+    }
+
+    fn before_evict(&self, _state: &mut Self::RequestState, _key: &u16, val: &mut Value) {
         // eprintln!("Before evict {_key} {val:?}");
-        if val.0 % 5 == 0 {
-            val.1 = 0;
+        if val.original % 5 == 0 {
+            val.current = 0;
         }
     }
 
-    fn on_evict(&self, state: &mut Self::RequestState, key: u16, val: (u16, u16)) {
+    fn on_evict(&self, state: &mut Self::RequestState, key: u16, val: Value) {
         // eprintln!("Evicted {key}");
         state.push((key, val));
     }
@@ -43,9 +54,10 @@ impl Lifecycle<u16, (u16, u16)> for MyLifecycle {
 
 #[derive(Debug, Arbitrary)]
 enum Op {
-    Insert(u16, u16),
-    Replace(u16, u16),
+    Insert(u16, u16, bool),
+    Replace(u16, u16, bool),
     Placeholder(u16),
+    SetPlaceholder(u16, u16, bool),
     Remove(u16),
 }
 
@@ -89,22 +101,37 @@ fn run(input: Input) {
     let mut placeholders: HashMap<u16, _> = HashMap::default();
     for op in operations {
         match op {
-            Op::Insert(k, v) => {
+            Op::Insert(k, v, pinned) => {
                 // eprintln!("insert {k} {v}");
-                let evicted = cache.insert_with_lifecycle(k, (v, v));
+                let evicted = cache.insert_with_lifecycle(
+                    k,
+                    Value {
+                        original: v,
+                        current: v,
+                        pinned,
+                    },
+                );
                 placeholders.remove(&k);
                 // if k is present it must have value v
                 let peek = cache.peek(&k);
-                assert!(peek.is_none() || peek.unwrap().0 == v);
+                assert!(peek.is_none() || peek.unwrap().original == v);
                 check_evicted(k, peek, evicted);
             }
-            Op::Replace(k, v) => {
+            Op::Replace(k, v, pinned) => {
                 // eprintln!("replace {k} {v}");
                 placeholders.remove(&k);
-                if let Ok(evicted) = cache.replace_with_lifecycle(k, (v, v), false) {
+                if let Ok(evicted) = cache.replace_with_lifecycle(
+                    k,
+                    Value {
+                        original: v,
+                        current: v,
+                        pinned,
+                    },
+                    false,
+                ) {
                     // if k is present it must have value v
                     let peek = cache.peek(&k);
-                    assert!(peek.is_none() || peek.unwrap().0 == v);
+                    assert!(peek.is_none() || peek.unwrap().original == v);
                     check_evicted(k, peek, evicted);
                 } else {
                     assert!(cache.peek(&k).is_none());
@@ -113,13 +140,25 @@ fn run(input: Input) {
             Op::Placeholder(k) => {
                 // eprintln!("get_value_or_guard {k}");
                 match cache.get_value_or_guard(&k, Some(Duration::default())) {
-                    GuardResult::Value(_gv) => {
-                        // assert_eq!(gv.0, v);
-                    }
+                    GuardResult::Value(_gv) => {}
                     GuardResult::Guard(g) => {
                         placeholders.insert(k, g);
                     }
                     GuardResult::Timeout => assert!(placeholders.contains_key(&k)),
+                }
+            }
+            Op::SetPlaceholder(k, v, pinned) => {
+                if let Some(p) = placeholders.remove(&k) {
+                    let value = Value {
+                        original: v,
+                        current: v,
+                        pinned,
+                    };
+                    if let Ok(evicted) = p.insert_with_lifecycle(value) {
+                        let peek = cache.peek(&k);
+                        assert!(peek.is_none() || peek.unwrap().original == v);
+                        check_evicted(k, peek, evicted);
+                    }
                 }
             }
             Op::Remove(k) => {
@@ -135,12 +174,12 @@ fn run(input: Input) {
     cache.validate();
 }
 
-fn check_evicted(key: u16, get: Option<(u16, u16)>, evicted: Vec<(u16, (u16, u16))>) {
+fn check_evicted(key: u16, get: Option<Value>, evicted: Vec<(u16, Value)>) {
     let mut evicted_hm = HashSet::default();
     evicted_hm.reserve(evicted.len());
-    for (ek, (_, ew)) in evicted {
+    for (ek, ev) in evicted {
         // we can't evict a 0 weight item, unless it was for the same key
-        assert!(ew != 0 || ek == key);
+        assert!(ev.current != 0 || ek == key);
         // we can't evict something twice, except if the insert displaced an old old value but the new value also got evicted
         assert!(evicted_hm.insert(ek) || (ek == key && get.is_none()));
     }

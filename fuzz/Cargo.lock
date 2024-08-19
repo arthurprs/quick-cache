@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "quick_cache"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "ahash",
  "equivalent",
