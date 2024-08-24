@@ -542,9 +542,6 @@ impl<
     /// Panics if the cache is empty.
     #[must_use]
     fn advance_cold(&mut self, lcs: &mut L::RequestState) -> bool {
-        debug_assert_ne!(self.num_cold + self.num_hot, 0);
-        debug_assert_ne!(self.weight_cold + self.weight_hot, 0);
-
         let mut pinned = 0usize;
         loop {
             let idx = if let Some(idx) = self.cold_head {
@@ -632,7 +629,7 @@ impl<
             }
             if self.lifecycle.is_pinned(&resident.key, &resident.value) {
                 pinned += 1;
-                if pinned >= self.num_hot * MAX_F as usize {
+                if pinned > self.num_hot * MAX_F as usize {
                     return false;
                 }
                 self.hot_head = Some(next);
@@ -681,8 +678,7 @@ impl<
         weight: u64,
         strategy: InsertStrategy,
     ) -> Result<(), (Key, Val)> {
-        // caller must have already handled overweight items
-        debug_assert!(weight <= self.weight_target_hot);
+        // caller already handled overweight items, but it could have been pinned
         let (entry, _) = self.entries.get_mut(idx).unwrap();
         let referenced;
         let enter_state;
@@ -830,7 +826,7 @@ impl<
         };
         let mut weight = self.weighter.weight(&key, &value);
         // don't admit if it won't fit within the budget
-        if weight > self.weight_target_hot {
+        if weight > self.weight_target_hot && !self.lifecycle.is_pinned(&key, &value) {
             self.lifecycle.before_evict(lcs, &key, &mut value);
             weight = self.weighter.weight(&key, &value);
             if weight > self.weight_target_hot {
@@ -892,7 +888,7 @@ impl<
     ) -> Result<(), (Key, Val)> {
         let mut weight = self.weighter.weight(&key, &value);
         // don't admit if it won't fit within the budget
-        if weight > self.weight_target_hot {
+        if weight > self.weight_target_hot && !self.lifecycle.is_pinned(&key, &value) {
             self.lifecycle.before_evict(lcs, &key, &mut value);
             weight = self.weighter.weight(&key, &value);
             if weight > self.weight_target_hot {
@@ -906,24 +902,13 @@ impl<
             return Err((key, value));
         }
 
-        let enter_hot = if self.weight_hot + self.weight_cold + weight > self.weight_capacity {
-            // evict until we have enough space for this entry
-            loop {
-                let evicted = self.advance_cold(lcs);
-                let overweight = self.weight_hot + self.weight_cold + weight > self.weight_capacity;
-                if !overweight {
-                    break;
-                }
-                if !evicted {
-                    return self.handle_insert_overweight(lcs, hash, key, value, strategy);
-                }
-            }
-            false
-        } else {
-            // cache if filling, admit as hot if possible
-            self.weight_hot + weight <= self.weight_target_hot
-        };
+        // pre-evict instead of post-evict, this gives sightly more priority to the new item
+        while self.weight_hot + self.weight_cold + weight > self.weight_capacity
+            && self.advance_cold(lcs)
+        {}
 
+        // cache is filling up, admit as hot if possible
+        let enter_hot = self.weight_hot + weight <= self.weight_target_hot;
         let (state, list_head) = if enter_hot {
             self.num_hot += 1;
             self.weight_hot += weight;
