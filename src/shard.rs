@@ -903,13 +903,13 @@ impl<
             return Err((key, value));
         }
 
+        // cache is filling up, admit as hot if possible
+        let enter_hot = self.weight_hot + weight <= self.weight_target_hot;
         // pre-evict instead of post-evict, this gives sightly more priority to the new item
         while self.weight_hot + self.weight_cold + weight > self.weight_capacity
             && self.advance_cold(lcs)
         {}
 
-        // cache is filling up, admit as hot if possible
-        let enter_hot = self.weight_hot + weight <= self.weight_target_hot;
         let (state, list_head) = if enter_hot {
             self.num_hot += 1;
             self.weight_hot += weight;
