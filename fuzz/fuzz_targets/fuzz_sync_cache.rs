@@ -178,9 +178,11 @@ fn check_evicted(key: u16, get: Option<Value>, evicted: Vec<(u16, Value)>) {
     let mut evicted_hm = HashSet::default();
     evicted_hm.reserve(evicted.len());
     for (ek, ev) in evicted {
-        // we can't evict a 0 weight item, unless it was for the same key
+        // we can't evict a 0 weight item, unless it was replaced
         assert!(ev.current != 0 || ek == key);
-        // we can't evict something twice, except if the insert displaced an old old value but the new value also got evicted
+        // we can't evict a pinned item, unless it was replaced
+        assert!(!ev.pinned || ek == key);
+        // we can't evict something twice, except if the insert displaced an old value but the new value also got evicted
         assert!(evicted_hm.insert(ek) || (ek == key && get.is_none()));
     }
 }

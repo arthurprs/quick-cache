@@ -1,6 +1,4 @@
 #![no_main]
-use std::time::Duration;
-
 use ahash::HashSet;
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -94,7 +92,7 @@ fn run(input: Input) {
         .shards(1)
         .build()
         .unwrap();
-    let mut did_any_update_increase_weight = false;
+    let mut did_any_update_increase_weight_or_unpin = false;
     let mut cache = Cache::with_options(options, MyWeighter, hasher, MyLifecycle);
     for op in operations {
         match op {
@@ -115,7 +113,8 @@ fn run(input: Input) {
             }
             Op::Update(k, v, pinned) => {
                 if let Some(mut ref_mut) = cache.get_mut(&k) {
-                    did_any_update_increase_weight |= v > ref_mut.current;
+                    did_any_update_increase_weight_or_unpin |=
+                        ref_mut.current < v || (ref_mut.pinned && !pinned);
                     *ref_mut = Value {
                         original: v,
                         current: v,
@@ -171,9 +170,9 @@ fn run(input: Input) {
                 assert!(cache.peek(&k).is_none());
             }
         }
+        cache.validate(did_any_update_increase_weight_or_unpin);
     }
-    cache.validate(did_any_update_increase_weight);
-    if did_any_update_increase_weight {
+    if did_any_update_increase_weight_or_unpin {
         cache.insert(
             0,
             Value {
@@ -190,9 +189,11 @@ fn check_evicted(key: u16, get: Option<Value>, evicted: Vec<(u16, Value)>) {
     let mut evicted_hm = HashSet::default();
     evicted_hm.reserve(evicted.len());
     for (ek, ev) in evicted {
-        // we can't evict a 0 weight item, unless it was for the same key
+        // we can't evict a 0 weight item, unless it was replaced
         assert!(ev.current != 0 || ek == key);
-        // we can't evict something twice, except if the insert displaced an old old value but the new value also got evicted
+        // we can't evict a pinned item, unless it was replaced
+        assert!(!ev.pinned || ek == key);
+        // we can't evict something twice, except if the insert displaced an old value but the new value also got evicted
         assert!(evicted_hm.insert(ek) || (ek == key && get.is_none()));
     }
 }
