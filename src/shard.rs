@@ -555,6 +555,7 @@ impl<
             };
             debug_assert_eq!(resident.state, ResidentState::Cold);
             if *resident.referenced.get_mut() != 0 {
+                *resident.referenced.get_mut() -= 1;
                 resident.state = ResidentState::Hot;
                 let weight = self.weighter.weight(&resident.key, &resident.value);
                 self.weight_hot += weight;
