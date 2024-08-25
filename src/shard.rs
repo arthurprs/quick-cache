@@ -539,16 +539,12 @@ impl<
     }
 
     /// Advance cold ring, promoting to hot and demoting as needed.
-    /// Panics if the cache is empty.
     #[must_use]
     fn advance_cold(&mut self, lcs: &mut L::RequestState) -> bool {
-        let mut pinned = 0usize;
+        let Some(mut idx) = self.cold_head else {
+            return self.advance_hot(lcs);
+        };
         loop {
-            let idx = if let Some(idx) = self.cold_head {
-                idx
-            } else {
-                return self.advance_hot(lcs);
-            };
             let (entry, next) = self.entries.get_mut(idx).unwrap();
             let Entry::Resident(resident) = entry else {
                 unreachable!()
@@ -562,23 +558,18 @@ impl<
                 self.weight_cold -= weight;
                 self.num_hot += 1;
                 self.num_cold -= 1;
-                Self::relink(
-                    &mut self.entries,
-                    idx,
-                    &mut self.cold_head,
-                    &mut self.hot_head,
-                );
+                self.cold_head = self.entries.unlink(idx);
+                self.hot_head = Some(self.entries.link(idx, self.hot_head));
                 // evict from hot if overweight
                 while self.weight_hot > self.weight_target_hot && self.advance_hot(lcs) {}
                 return true;
             }
 
             if self.lifecycle.is_pinned(&resident.key, &resident.value) {
-                pinned += 1;
-                if pinned >= self.num_cold {
+                if Some(next) == self.cold_head {
                     return self.advance_hot(lcs);
                 }
-                self.cold_head = Some(next);
+                idx = next;
                 continue;
             }
 
@@ -591,14 +582,11 @@ impl<
             }
             let hash = Self::hash_static(&self.hash_builder, &resident.key);
             let Entry::Resident(evicted) = mem::replace(entry, Entry::Ghost(hash)) else {
-                unreachable!()
+                // Safety: we had a mut reference to the Resident inside entry until the previous line
+                unsafe { core::hint::unreachable_unchecked() };
             };
-            Self::relink(
-                &mut self.entries,
-                idx,
-                &mut self.cold_head,
-                &mut self.ghost_head,
-            );
+            self.cold_head = self.entries.unlink(idx);
+            self.ghost_head = Some(self.entries.link(idx, self.ghost_head));
             self.num_cold -= 1;
             self.num_non_resident += 1;
             // evict from ghost if oversized
@@ -613,27 +601,30 @@ impl<
     /// Advance hot ring evicting entries.
     #[must_use]
     fn advance_hot(&mut self, lcs: &mut L::RequestState) -> bool {
-        let mut pinned = 0usize;
+        let mut unpinned = 0usize;
+        let Some(mut idx) = self.hot_head else {
+            return false;
+        };
         loop {
-            let Some(idx) = self.hot_head else {
-                return false;
-            };
             let (entry, next) = self.entries.get_mut(idx).unwrap();
             let Entry::Resident(resident) = entry else {
                 unreachable!()
             };
             debug_assert_eq!(resident.state, ResidentState::Hot);
-            if *resident.referenced.get_mut() != 0 {
-                *resident.referenced.get_mut() = (*resident.referenced.get_mut()).min(MAX_F) - 1;
-                self.hot_head = Some(next);
-                continue;
-            }
             if self.lifecycle.is_pinned(&resident.key, &resident.value) {
-                pinned += 1;
-                if pinned > self.num_hot * MAX_F as usize {
+                *resident.referenced.get_mut() = (*resident.referenced.get_mut())
+                    .min(MAX_F)
+                    .saturating_sub(1);
+                if unpinned == 0 && Some(next) == self.hot_head {
                     return false;
                 }
-                self.hot_head = Some(next);
+                idx = next;
+                continue;
+            }
+            unpinned += 1;
+            if *resident.referenced.get_mut() != 0 {
+                *resident.referenced.get_mut() = (*resident.referenced.get_mut()).min(MAX_F) - 1;
+                idx = next;
                 continue;
             }
             self.weight_hot -= self.weighter.weight(&resident.key, &resident.value);
@@ -644,13 +635,13 @@ impl<
             } else {
                 self.num_hot -= 1;
                 let hash = Self::hash_static(&self.hash_builder, &resident.key);
-                let (entry, next) = self.entries.remove(idx).unwrap();
-                self.hot_head = next;
-                self.map_remove(hash, idx);
-                let Entry::Resident(evicted) = entry else {
-                    unreachable!()
+                let Some((Entry::Resident(evicted), next)) = self.entries.remove(idx) else {
+                    // Safety: we had a mut reference to the Resident under `idx` until the previous line
+                    unsafe { core::hint::unreachable_unchecked() };
                 };
+                self.hot_head = next;
                 self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
+                self.map_remove(hash, idx);
             }
             return true;
         }
@@ -735,17 +726,13 @@ impl<
                 self.weight_hot += weight;
                 self.num_hot += 1;
                 self.num_non_resident -= 1;
-                let mut _tmp = None;
-                Self::relink(
-                    &mut self.entries,
-                    idx,
-                    &mut self.ghost_head,
-                    if weight != 0 {
-                        &mut self.hot_head
-                    } else {
-                        &mut _tmp
-                    },
-                );
+                let next_ghost = self.entries.unlink(idx);
+                if self.ghost_head == Some(idx) {
+                    self.ghost_head = next_ghost;
+                }
+                if weight != 0 {
+                    self.hot_head = Some(self.entries.link(idx, self.hot_head));
+                }
             }
             Entry::Placeholder(_) => {
                 let list_head = if enter_state == ResidentState::Hot {
@@ -765,23 +752,6 @@ impl<
 
         while self.weight_hot + self.weight_cold > self.weight_capacity && self.advance_cold(lcs) {}
         Ok(())
-    }
-
-    #[inline]
-    fn relink<T>(
-        ring: &mut LinkedSlab<T>,
-        idx: Token,
-        source_head: &mut Option<Token>,
-        target_head: &mut Option<Token>,
-    ) {
-        let next = ring.unlink(idx);
-        if *source_head == Some(idx) {
-            *source_head = next;
-        }
-        ring.link(idx, *target_head);
-        if target_head.is_none() {
-            *target_head = Some(idx);
-        }
     }
 
     #[inline]
@@ -823,7 +793,8 @@ impl<
             ..
         }) = mem::replace(entry, Entry::Ghost(0))
         else {
-            unreachable!()
+            // Safety: we had a mut reference to entry with Resident inside as checked by the first match statement
+            unsafe { core::hint::unreachable_unchecked() };
         };
         let mut weight = self.weighter.weight(&key, &value);
         // don't admit if it won't fit within the budget
