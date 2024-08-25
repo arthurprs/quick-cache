@@ -76,7 +76,7 @@ jobs:
           toolchain: nightly
           override: true
       - run: cargo install cargo-fuzz
-      - run: for fuzz_test in `cargo fuzz list`; do cargo fuzz run $fuzz_test -- -max_total_time=30 || exit 1; done
+      - run: for fuzz_test in `cargo fuzz list`; do cargo fuzz run $fuzz_test -- -max_total_time=30 -timeout=5 || exit 1; done
 
   lint:
     name: Rustfmt & Clippy
