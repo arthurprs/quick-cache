@@ -719,8 +719,13 @@ impl<
         match entry {
             Entry::Resident(resident) => {
                 enter_state = resident.state;
-                referenced = *resident.referenced.get_mut()
-                    + (!matches!(strategy, InsertStrategy::Replace { soft: true })) as u16;
+                referenced = resident
+                    .referenced
+                    .get_mut()
+                    .saturating_add(
+                        !matches!(strategy, InsertStrategy::Replace { soft: true }) as u16
+                    )
+                    .min(MAX_F);
             }
             _ if matches!(strategy, InsertStrategy::Replace { .. }) => {
                 return Err((key, value));
