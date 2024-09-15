@@ -72,7 +72,6 @@ enum Entry<Key, Val, Plh> {
 /// A bounded cache using a modified CLOCK-PRO eviction policy.
 /// The implementation allows some parallelism as gets don't require exclusive access.
 /// Any evicted items are returned so they can be dropped by the caller, outside the locks.
-#[derive(Clone)]
 pub struct CacheShard<Key, Val, We, B, L, Plh> {
     hash_builder: B,
     /// Map to an entry in the `entries` slab.
@@ -100,6 +99,35 @@ pub struct CacheShard<Key, Val, We, B, L, Plh> {
     misses: AtomicU64,
     weighter: We,
     pub(crate) lifecycle: L,
+}
+
+impl<Key: Clone, Val: Clone, We: Clone, B: Clone, L: Clone, Plh: Clone> Clone
+    for CacheShard<Key, Val, We, B, L, Plh>
+{
+    fn clone(&self) -> Self {
+        Self {
+            hash_builder: self.hash_builder.clone(),
+            map: self.map.clone(),
+            entries: self.entries.clone(),
+            cold_head: self.cold_head,
+            hot_head: self.hot_head,
+            ghost_head: self.ghost_head,
+            weight_target_hot: self.weight_target_hot,
+            weight_capacity: self.weight_capacity,
+            weight_hot: self.weight_hot,
+            weight_cold: self.weight_cold,
+            num_hot: self.num_hot,
+            num_cold: self.num_cold,
+            num_non_resident: self.num_non_resident,
+            capacity_non_resident: self.capacity_non_resident,
+            #[cfg(feature = "stats")]
+            hits: self.hits.load(atomic::Ordering::Relaxed).into(),
+            #[cfg(feature = "stats")]
+            misses: self.misses.load(atomic::Ordering::Relaxed).into(),
+            weighter: self.weighter.clone(),
+            lifecycle: self.lifecycle.clone(),
+        }
+    }
 }
 
 #[cfg(feature = "stats")]
