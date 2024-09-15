@@ -7,6 +7,7 @@ use crate::{
 use std::hash::{BuildHasher, Hash};
 
 /// A non-concurrent cache.
+#[derive(Clone)]
 pub struct Cache<
     Key,
     Val,

@@ -43,13 +43,26 @@ pub struct Resident<Key, Val> {
     referenced: AtomicU16,
 }
 
-#[derive(Debug)]
+impl<Key: Clone, Val: Clone> Clone for Resident<Key, Val> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+            state: self.state,
+            referenced: self.referenced.load(atomic::Ordering::Relaxed).into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct Placeholder<Key, Plh> {
     key: Key,
     hot: ResidentState,
     shared: Plh,
 }
 
+#[derive(Clone)]
 enum Entry<Key, Val, Plh> {
     Resident(Resident<Key, Val>),
     Placeholder(Placeholder<Key, Plh>),
@@ -59,6 +72,7 @@ enum Entry<Key, Val, Plh> {
 /// A bounded cache using a modified CLOCK-PRO eviction policy.
 /// The implementation allows some parallelism as gets don't require exclusive access.
 /// Any evicted items are returned so they can be dropped by the caller, outside the locks.
+#[derive(Clone)]
 pub struct CacheShard<Key, Val, We, B, L, Plh> {
     hash_builder: B,
     /// Map to an entry in the `entries` slab.

@@ -1,6 +1,6 @@
 pub type Token = std::num::NonZeroU32;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Entry<T> {
     item: Option<T>,
     /// The next item in the list (possibly itself).
@@ -12,7 +12,7 @@ struct Entry<T> {
 }
 
 /// A slab like structure that also maintains circular lists with its items.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LinkedSlab<T> {
     entries: Vec<Entry<T>>,
     next_free: Token,
