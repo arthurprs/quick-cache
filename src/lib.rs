@@ -92,7 +92,7 @@ pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 ///
 /// impl Weighter<u64, String> for StringWeighter {
 ///     fn weight(&self, _key: &u64, val: &String) -> u64 {
-///         // Be cautions out about zero weights!
+///         // Be cautious out about zero weights!
 ///         val.len() as u64
 ///     }
 /// }
