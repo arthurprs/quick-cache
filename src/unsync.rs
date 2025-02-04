@@ -141,6 +141,14 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.reserve(additional);
     }
 
+    /// Check if a key exist in the cache.
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        self.shard.contains(self.shard.hash(key), key)
+    }
+
     /// Fetches an item from the cache.
     pub fn get<Q>(&self, key: &Q) -> Option<&Val>
     where
@@ -527,6 +535,7 @@ mod tests {
             cache.insert(i, i);
         }
         assert_eq!(cache.get(&0).copied(), Some(0));
+        assert!(cache.contains_key(&0));
         let a = cache.weight();
         *cache.get_mut(&0).unwrap() += 1;
         assert_eq!(cache.weight(), a + 1);
@@ -535,6 +544,7 @@ mod tests {
             cache.insert(i, i);
         }
         assert_eq!(cache.get(&0), None);
+        assert!(!cache.contains_key(&0));
 
         cache.insert(0, 1);
         let a = cache.weight();
@@ -545,5 +555,6 @@ mod tests {
             cache.insert(i, i);
         }
         assert_eq!(cache.get(&0).copied(), Some(0));
+        assert!(cache.contains_key(&0));
     }
 }

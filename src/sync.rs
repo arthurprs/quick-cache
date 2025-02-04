@@ -218,6 +218,17 @@ impl<
         }
     }
 
+    /// Check if a key exist in the cache.
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        self.shard_for(key)
+            .is_some_and(|(shard, hash)| {
+                shard.read().contains(hash, key)
+            })
+    }
+
     /// Fetches an item from the cache whose key is `key`.
     pub fn get<Q>(&self, key: &Q) -> Option<Val>
     where
@@ -473,7 +484,10 @@ mod tests {
                 barrier.wait();
                 for _round in 0..N_ROUNDS {
                     for i in start..start + ITEMS_PER_THREAD {
-                        if let Some(cached) = cache.get(&i) {
+                        let exist = cache.contains_key(&i);
+                        let cached = cache.get(&i);
+                        assert_eq!(exist, cached.is_some());
+                        if let Some(cached) = cached {
                             assert_eq!(cached, i);
                         }
                     }
