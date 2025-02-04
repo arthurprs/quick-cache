@@ -459,7 +459,7 @@ impl<
         self.map
             .get(hash, |&idx| {
                 let (entry, _) = self.entries.get(idx).unwrap();
-                matches!(entry, Entry::Resident(r) if key.equivalent(&r.key)) 
+                matches!(entry, Entry::Resident(r) if key.equivalent(&r.key))
             })
             .is_some()
     }

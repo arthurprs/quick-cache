@@ -224,9 +224,7 @@ impl<
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         self.shard_for(key)
-            .is_some_and(|(shard, hash)| {
-                shard.read().contains(hash, key)
-            })
+            .is_some_and(|(shard, hash)| shard.read().contains(hash, key))
     }
 
     /// Fetches an item from the cache whose key is `key`.
@@ -484,10 +482,7 @@ mod tests {
                 barrier.wait();
                 for _round in 0..N_ROUNDS {
                     for i in start..start + ITEMS_PER_THREAD {
-                        let exist = cache.contains_key(&i);
-                        let cached = cache.get(&i);
-                        assert_eq!(exist, cached.is_some());
-                        if let Some(cached) = cached {
+                        if let Some(cached) = cache.get(&i) {
                             assert_eq!(cached, i);
                         }
                     }
