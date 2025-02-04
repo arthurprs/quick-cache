@@ -273,13 +273,12 @@ impl<
 }
 
 impl<
-        'a,
         Key: Eq + Hash,
         Val: Clone,
         We: Weighter<Key, Val>,
         B: BuildHasher,
         L: Lifecycle<Key, Val>,
-    > PlaceholderGuard<'a, Key, Val, We, B, L>
+    > PlaceholderGuard<'_, Key, Val, We, B, L>
 {
     /// Inserts the value into the placeholder
     ///
@@ -323,7 +322,7 @@ impl<
     }
 }
 
-impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
+impl<Key, Val, We, B, L> PlaceholderGuard<'_, Key, Val, We, B, L> {
     #[cold]
     fn drop_uninserted_slow(&mut self) {
         // Make sure to acquire the shard lock to prevent races with other threads
@@ -339,14 +338,14 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
     }
 }
 
-impl<'a, Key, Val, We, B, L> Drop for PlaceholderGuard<'a, Key, Val, We, B, L> {
+impl<Key, Val, We, B, L> Drop for PlaceholderGuard<'_, Key, Val, We, B, L> {
     fn drop(&mut self) {
         if !self.inserted {
             self.drop_uninserted_slow();
         }
     }
 }
-impl<'a, Key, Val, We, B, L> std::fmt::Debug for PlaceholderGuard<'a, Key, Val, We, B, L> {
+impl<Key, Val, We, B, L> std::fmt::Debug for PlaceholderGuard<'_, Key, Val, We, B, L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlaceholderGuard").finish_non_exhaustive()
     }
@@ -411,7 +410,7 @@ impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, 
     }
 }
 
-impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> Drop for JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
+impl<Q: ?Sized, Key, Val, We, B, L> Drop for JoinFuture<'_, '_, Q, Key, Val, We, B, L> {
     #[inline]
     fn drop(&mut self) {
         if matches!(
@@ -428,14 +427,13 @@ impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> Drop for JoinFuture<'a, 'b, Q, Key, 
 
 impl<
         'a,
-        'b,
         Key: Eq + Hash,
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
         Val: Clone,
         We: Weighter<Key, Val>,
         B: BuildHasher,
         L: Lifecycle<Key, Val>,
-    > Future for JoinFuture<'a, 'b, Q, Key, Val, We, B, L>
+    > Future for JoinFuture<'a, '_, Q, Key, Val, We, B, L>
 {
     type Output = Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>;
 

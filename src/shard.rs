@@ -452,6 +452,18 @@ impl<
             })
     }
 
+    pub fn contains<Q>(&self, hash: u64, key: &Q) -> bool
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        self.map
+            .get(hash, |&idx| {
+                let (entry, _) = self.entries.get(idx).unwrap();
+                matches!(entry, Entry::Resident(r) if key.equivalent(&r.key))
+            })
+            .is_some()
+    }
+
     pub fn get<Q>(&self, hash: u64, key: &Q) -> Option<&Val>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -1037,8 +1049,8 @@ pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPla
     old_weight: u64,
 }
 
-impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
-    RefMut<'cache, Key, Val, We, B, L, Plh>
+impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
+    RefMut<'_, Key, Val, We, B, L, Plh>
 {
     pub(crate) fn pair(&self) -> (&Key, &Val) {
         // Safety: RefMut was constructed correctly from a Resident entry in get_mut or peek_token_mut
@@ -1069,8 +1081,8 @@ impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
     }
 }
 
-impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
-    for RefMut<'cache, Key, Val, We, B, L, Plh>
+impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
+    for RefMut<'_, Key, Val, We, B, L, Plh>
 {
     #[inline]
     fn drop(&mut self) {
