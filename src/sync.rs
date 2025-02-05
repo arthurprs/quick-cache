@@ -218,6 +218,15 @@ impl<
         }
     }
 
+    /// Check if a key exist in the cache.
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        self.shard_for(key)
+            .is_some_and(|(shard, hash)| shard.read().contains(hash, key))
+    }
+
     /// Fetches an item from the cache whose key is `key`.
     pub fn get<Q>(&self, key: &Q) -> Option<Val>
     where
@@ -312,11 +321,11 @@ impl<
     /// is dropped or the value is inserted.
     ///
     /// A `None` `timeout` means waiting forever.
-    pub fn get_value_or_guard<'a, Q>(
-        &'a self,
+    pub fn get_value_or_guard<Q>(
+        &self,
         key: &Q,
         timeout: Option<Duration>,
-    ) -> GuardResult<'a, Key, Val, We, B, L>
+    ) -> GuardResult<'_, Key, Val, We, B, L>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
@@ -371,7 +380,7 @@ impl<
     }
 
     /// Gets or inserts an item in the cache with key `key`.
-    pub async fn get_or_insert_async<'a, Q, E>(
+    pub async fn get_or_insert_async<Q, E>(
         &self,
         key: &Q,
         with: impl Future<Output = Result<Val, E>>,

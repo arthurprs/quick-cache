@@ -141,6 +141,14 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.reserve(additional);
     }
 
+    /// Check if a key exist in the cache.
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        self.shard.contains(self.shard.hash(key), key)
+    }
+
     /// Fetches an item from the cache.
     pub fn get<Q>(&self, key: &Q) -> Option<&Val>
     where
@@ -274,10 +282,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// Gets an item from the cache with key `key` .
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
-    pub fn get_ref_or_guard<'a, Q>(
-        &'a mut self,
-        key: &Q,
-    ) -> Result<&Val, Guard<'a, Key, Val, We, B, L>>
+    pub fn get_ref_or_guard<Q>(&mut self, key: &Q) -> Result<&Val, Guard<'_, Key, Val, We, B, L>>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
@@ -415,8 +420,8 @@ pub struct Guard<'a, Key, Val, We, B, L> {
     inserted: bool,
 }
 
-impl<'a, Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<Key, Val>>
-    Guard<'a, Key, Val, We, B, L>
+impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<Key, Val>>
+    Guard<'_, Key, Val, We, B, L>
 {
     /// Inserts the value into the placeholder
     pub fn insert(self, value: Val) {
@@ -446,7 +451,7 @@ impl<'a, Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecyc
     }
 }
 
-impl<'a, Key, Val, We, B, L> Drop for Guard<'a, Key, Val, We, B, L> {
+impl<Key, Val, We, B, L> Drop for Guard<'_, Key, Val, We, B, L> {
     #[inline]
     fn drop(&mut self) {
         #[cold]
@@ -463,9 +468,7 @@ pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L>(
     crate::shard::RefMut<'cache, Key, Val, We, B, L, SharedPlaceholder>,
 );
 
-impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L> std::ops::Deref
-    for RefMut<'cache, Key, Val, We, B, L>
-{
+impl<Key, Val, We: Weighter<Key, Val>, B, L> std::ops::Deref for RefMut<'_, Key, Val, We, B, L> {
     type Target = Val;
 
     #[inline]
@@ -474,9 +477,7 @@ impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L> std::ops::Deref
     }
 }
 
-impl<'cache, Key, Val, We: Weighter<Key, Val>, B, L> std::ops::DerefMut
-    for RefMut<'cache, Key, Val, We, B, L>
-{
+impl<Key, Val, We: Weighter<Key, Val>, B, L> std::ops::DerefMut for RefMut<'_, Key, Val, We, B, L> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.value_mut()
@@ -527,6 +528,7 @@ mod tests {
             cache.insert(i, i);
         }
         assert_eq!(cache.get(&0).copied(), Some(0));
+        assert!(cache.contains_key(&0));
         let a = cache.weight();
         *cache.get_mut(&0).unwrap() += 1;
         assert_eq!(cache.weight(), a + 1);
@@ -535,6 +537,7 @@ mod tests {
             cache.insert(i, i);
         }
         assert_eq!(cache.get(&0), None);
+        assert!(!cache.contains_key(&0));
 
         cache.insert(0, 1);
         let a = cache.weight();
@@ -545,5 +548,6 @@ mod tests {
             cache.insert(i, i);
         }
         assert_eq!(cache.get(&0).copied(), Some(0));
+        assert!(cache.contains_key(&0));
     }
 }
