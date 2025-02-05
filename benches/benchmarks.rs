@@ -32,12 +32,12 @@ pub fn r_benchmark(c: &mut Criterion) {
 
 pub fn rw_benchmark(c: &mut Criterion) {
     const N_SAMPLES: usize = 1_000;
-    for population in [10_000, 1_000_000] {
+    for population in [10_000.0, 1_000_000.0] {
         for s in [0.5, 0.75] {
             let mut g = c.benchmark_group(format!("Zipf N={} S={}", population, s));
             g.throughput(criterion::Throughput::Elements(N_SAMPLES as u64));
             for capacity_ratio in [0.05, 0.1, 0.15] {
-                let capacity = (population as f64 * capacity_ratio) as usize;
+                let capacity = (population * capacity_ratio) as usize;
                 g.bench_function(format!("qc {}", capacity), |b| {
                     let mut hits = 0u64;
                     let mut misses = 0u64;
@@ -46,7 +46,7 @@ pub fn rw_benchmark(c: &mut Criterion) {
                             let mut rng = SmallRng::seed_from_u64(1);
                             let dist = Zipf::new(population, s).unwrap();
                             let cache = Cache::new(capacity);
-                            for _ in 0..population * 3 {
+                            for _ in 0..population as usize * 3 {
                                 let sample = dist.sample(&mut rng) as usize;
                                 cache.insert(sample, sample);
                             }
