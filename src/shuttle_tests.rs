@@ -15,7 +15,7 @@ use shuttle::{
 fn test_guard_works() {
     let mut config = shuttle::Config::default();
     config.max_steps = shuttle::MaxSteps::None;
-    let check_determinism = std::env::var("CHECK_DETERMINISM").map_or(false, |s| !s.is_empty());
+    let check_determinism = std::env::var("CHECK_DETERMINISM").is_ok_and(|s| !s.is_empty());
     if let Ok(seed) = std::env::var("SEED") {
         let seed = std::fs::read_to_string(&seed).unwrap_or(seed.clone());
         let scheduler = shuttle::scheduler::ReplayScheduler::new_from_encoded(&seed);
