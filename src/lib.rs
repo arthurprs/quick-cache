@@ -289,7 +289,7 @@ mod tests {
             let cache = sync::Cache::<(u64, u64), u64>::new(100);
             const THREADS: usize = 100;
             let wg = std::sync::Barrier::new(THREADS);
-            let solve_at = rand::thread_rng().gen_range(0..THREADS);
+            let solve_at = rand::rng().random_range(0..THREADS);
             std::thread::scope(|s| {
                 for _ in 0..THREADS {
                     s.spawn(|| {
@@ -382,7 +382,7 @@ mod tests {
             let cache = sync::Cache::<(u64, u64), u64>::new(100);
             const THREADS: usize = 100;
             let wg = std::sync::Barrier::new(THREADS);
-            let solve_at = rand::thread_rng().gen_range(0..THREADS);
+            let solve_at = rand::rng().random_range(0..THREADS);
             std::thread::scope(|s| {
                 for _ in 0..THREADS {
                     s.spawn(|| {
@@ -419,7 +419,7 @@ mod tests {
             let cache = Arc::new(sync::Cache::<(u64, u64), u64>::new(100));
             const TASKS: usize = 100;
             let wg = Arc::new(tokio::sync::Barrier::new(TASKS));
-            let solve_at = rand::thread_rng().gen_range(0..TASKS);
+            let solve_at = rand::rng().random_range(0..TASKS);
             let mut tasks = Vec::new();
             for _ in 0..TASKS {
                 let cache = cache.clone();
@@ -462,7 +462,7 @@ mod tests {
             let cache = Arc::new(sync::Cache::<(u64, u64), u64>::new(100));
             const TASKS: usize = 100;
             let wg = Arc::new(tokio::sync::Barrier::new(TASKS));
-            let solve_at = rand::thread_rng().gen_range(0..TASKS);
+            let solve_at = rand::rng().random_range(0..TASKS);
             let mut tasks = Vec::new();
             for _ in 0..TASKS {
                 let cache = cache.clone();

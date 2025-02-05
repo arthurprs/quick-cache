@@ -3,7 +3,7 @@ use std::{
     mem::{self, MaybeUninit},
 };
 
-use hashbrown::raw::RawTable;
+use hashbrown::HashTable;
 
 use crate::{
     linked_slab::{LinkedSlab, Token},
@@ -76,7 +76,7 @@ pub struct CacheShard<Key, Val, We, B, L, Plh> {
     hash_builder: B,
     /// Map to an entry in the `entries` slab.
     /// Note that the actual key/value/hash are not stored in the map but in the slab.
-    map: RawTable<Token>,
+    map: HashTable<Token>,
     /// Slab holding entries
     entries: LinkedSlab<Entry<Key, Val, Plh>>,
     /// Head of cold list, containing Cold entries.
@@ -174,13 +174,15 @@ macro_rules! record_miss_mut {
 
 impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, Plh> {
     pub fn remove_placeholder(&mut self, placeholder: &Plh) {
-        self.map.remove_entry(placeholder.hash(), |&idx| {
+        if let Ok(entry) = self.map.find_entry(placeholder.hash(), |&idx| {
             if idx != placeholder.idx() {
                 return false;
             }
             let (entry, _) = self.entries.get(idx).unwrap();
             matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if shared.same_as(placeholder))
-        });
+        }) {
+            entry.remove();
+        }
     }
 
     #[cold]
@@ -226,7 +228,7 @@ impl<
         let capacity_non_resident = (estimated_items_capacity as f64 * ghost_allocation) as usize;
         Self {
             hash_builder,
-            map: RawTable::with_capacity(0),
+            map: HashTable::with_capacity(0),
             entries: LinkedSlab::with_capacity(0),
             weight_capacity,
             #[cfg(feature = "stats")]
@@ -400,32 +402,24 @@ impl<
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        // Safety for `RawTable::iter_hash` and `Bucket::as_ref`:
-        // * Their outputs do not outlive their HashBrown:
-        // The HashBrown instance is alive for the entirety of the function and
-        // the content references never leave the function.
-        // * HashBrown can't be mutated while being iterated with iter_hash:
-        // The HashBrown instance isn't mutated in this method.
-        unsafe {
-            let mut hash_match = None;
-            for bucket in self.map.iter_hash(hash) {
-                let idx = *bucket.as_ref();
-                let (entry, _) = self.entries.get(idx).unwrap();
-                match entry {
-                    Entry::Resident(Resident { key, .. })
-                    | Entry::Placeholder(Placeholder { key, .. })
-                        if k.equivalent(key) =>
-                    {
-                        return Some(idx);
-                    }
-                    Entry::Ghost(non_resident_hash) if *non_resident_hash == hash => {
-                        hash_match = Some(idx);
-                    }
-                    _ => (),
+        let mut hash_match = None;
+        for bucket in self.map.iter_hash(hash) {
+            let idx = *bucket;
+            let (entry, _) = self.entries.get(idx).unwrap();
+            match entry {
+                Entry::Resident(Resident { key, .. })
+                | Entry::Placeholder(Placeholder { key, .. })
+                    if k.equivalent(key) =>
+                {
+                    return Some(idx);
                 }
+                Entry::Ghost(non_resident_hash) if *non_resident_hash == hash => {
+                    hash_match = Some(idx);
+                }
+                _ => (),
             }
-            hash_match
         }
+        hash_match
     }
 
     #[inline]
@@ -435,7 +429,7 @@ impl<
     {
         let mut resident = MaybeUninit::uninit();
         self.map
-            .get(hash, |&idx| {
+            .find(hash, |&idx| {
                 let (entry, _) = self.entries.get(idx).unwrap();
                 match entry {
                     Entry::Resident(r) if k.equivalent(&r.key) => {
@@ -457,7 +451,7 @@ impl<
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         self.map
-            .get(hash, |&idx| {
+            .find(hash, |&idx| {
                 let (entry, _) = self.entries.get(idx).unwrap();
                 matches!(entry, Entry::Resident(r) if key.equivalent(&r.key))
             })
@@ -815,7 +809,7 @@ impl<
 
     #[inline]
     fn map_insert(&mut self, hash: u64, idx: Token) {
-        self.map.insert(hash, idx, |&i| {
+        self.map.insert_unique(hash, idx, |&i| {
             let (entry, _) = self.entries.get(i).unwrap();
             match entry {
                 Entry::Resident(Resident { key, .. })
@@ -829,8 +823,12 @@ impl<
 
     #[inline]
     fn map_remove(&mut self, hash: u64, idx: Token) {
-        let removed = self.map.erase_entry(hash, |&i| i == idx);
-        debug_assert!(removed);
+        if let Ok(entry) = self.map.find_entry(hash, |&i| i == idx) {
+            entry.remove();
+            return;
+        }
+        #[cfg(debug_assertions)]
+        panic!("key not found");
     }
 
     pub fn replace_placeholder(
