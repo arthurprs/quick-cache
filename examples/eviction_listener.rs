@@ -7,9 +7,7 @@ struct EvictionListener(mpsc::Sender<(u64, u64)>);
 impl Lifecycle<u64, u64> for EvictionListener {
     type RequestState = ();
 
-    fn begin_request(&self) -> Self::RequestState {
-        ()
-    }
+    fn begin_request(&self) -> Self::RequestState {}
 
     fn on_evict(&self, _state: &mut Self::RequestState, key: u64, val: u64) {
         let _ = self.0.send((key, val));
