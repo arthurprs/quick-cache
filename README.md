@@ -7,7 +7,7 @@
 Lightweight and high performance concurrent cache optimized for low cache overhead.
 
 * Small overhead compared to a concurrent hash table
-* Scan resistent and high hit rate caching policy
+* Scan resistant and high hit rate caching policy
 * User defined weight per item
 * Scales well with the number of threads
 * Atomic operations with `get_or_insert` and `get_value_or_guard` functions
@@ -31,7 +31,7 @@ Basic usage
 use quick_cache::unsync::Cache;
 
 fn main() {
-    let cache = Cache::new(5);
+    let mut cache = Cache::new(5);
     cache.insert("square", "blue");
     cache.insert("circle", "black");
     assert_eq!(*cache.get(&"square").unwrap(), "blue");
