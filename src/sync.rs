@@ -287,6 +287,15 @@ impl<
         Ok(lcs)
     }
 
+    /// Retains only the items specified by the predicate.
+    /// In other words, remove all items for which `f(&key, &mut value)` returns `false`. The
+    /// elements are visited in unsorted (and unspecified) order.
+    pub fn retain<F>(&self, f: F)
+    where
+        F: FnMut(&Key, &mut Val) -> bool,
+    {
+    }
+
     /// Inserts an item in the cache with key `key`.
     pub fn insert(&self, key: Key, value: Val) {
         let lcs = self.insert_with_lifecycle(key, value);

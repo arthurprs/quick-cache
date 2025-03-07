@@ -227,6 +227,15 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         Ok(lcs)
     }
 
+    /// Retains only the items specified by the predicate.
+    /// In other words, remove all items for which `f(&key, &mut value)` returns `false`. The
+    /// elements are visited in unsorted (and unspecified) order.
+    pub fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&Key, &mut Val) -> bool,
+    {
+    }
+
     /// Gets or inserts an item in the cache with key `key`.
     /// Returns a reference to the inserted `value` if it was admitted to the cache.
     ///
