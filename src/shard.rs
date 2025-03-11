@@ -332,6 +332,32 @@ impl<
         })
     }
 
+    pub fn retain<F>(&mut self, f: F)
+    where
+        F: Fn(&Key, &Val) -> bool,
+    {
+        let retained_tokens = self
+            .map
+            .iter()
+            .filter_map(|&idx| match self.entries.get(idx) {
+                Some((entry, _idx)) => match entry {
+                    Entry::Resident(r) => {
+                        if f(&r.key, &r.value) {
+                            let hash = self.hash(&r.key);
+                            Some((idx, hash))
+                        } else {
+                            None
+                        }
+                    }
+                    Entry::Placeholder(_) | Entry::Ghost(_) => None,
+                },
+                None => None,
+            });
+        for (idx, hash) in retained_tokens {
+            self.remove_internal(hash, idx);
+        }
+    }
+
     pub fn weight(&self) -> u64 {
         self.weight_hot + self.weight_cold
     }
