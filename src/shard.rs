@@ -343,7 +343,8 @@ impl<
                 Some((entry, _idx)) => match entry {
                     Entry::Resident(r) => {
                         if f(&r.key, &r.value) {
-                            Some((idx, r.key))
+                            let hash = self.hash(&r.key);
+                            Some((idx, hash))
                         } else {
                             None
                         }
@@ -352,8 +353,7 @@ impl<
                 },
                 None => None,
             });
-        for (idx, key) in retained_tokens {
-            let hash = self.hash(&key);
+        for (idx, hash) in retained_tokens {
             self.remove_internal(hash, idx);
         }
     }
