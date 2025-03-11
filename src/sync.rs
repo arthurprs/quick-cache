@@ -295,7 +295,7 @@ impl<
         F: Fn(&Key, &Val) -> bool,
     {
         for s in self.shards.iter() {
-            s.write().retain(f);
+            s.write().retain(&f);
         }
     }
 
