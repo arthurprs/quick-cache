@@ -374,16 +374,28 @@ mod tests {
     #[test]
     fn test_remove_unsync() {
         let mut cache = unsync::Cache::<u64, u64>::new(100);
-        for i in 0..10 {
+        let ranges = 0..10;
+        for i in ranges.clone() {
             let guard = cache.get_ref_or_guard(&i).unwrap_err();
             guard.insert(i);
             assert_eq!(cache.get_ref_or_guard(&i).ok().copied(), Some(i));
         }
-        let less_than_val = 5;
-        cache.retain(|&key, &val| val < less_than_val || key < less_than_val);
-        for i in 0..10 {
+        let less_than = 3;
+        cache.retain(|&key, &val| val < less_than || key < less_than);
+        for i in ranges.clone() {
             let actual = cache.get(&i);
-            if i < less_than_val {
+            if i < less_than {
+                assert!(actual.is_none());
+            } else {
+                assert!(actual.is_some());
+                assert_eq!(*actual.unwrap(), i);
+            }
+        }
+        let greater_than = 7;
+        cache.retain(|&key, &val| val > greater_than || key > greater_than);
+        for i in ranges {
+            let actual = cache.get(&i);
+            if i > greater_than || i < less_than {
                 assert!(actual.is_none());
             } else {
                 assert!(actual.is_some());
@@ -396,7 +408,8 @@ mod tests {
     async fn test_remove_sync() {
         use crate::sync::*;
         let cache = Cache::<u64, u64>::new(100);
-        for i in 0..10 {
+        let ranges = 0..10;
+        for i in ranges.clone() {
             let GuardResult::Guard(guard) = cache.get_value_or_guard(&i, None) else {
                 panic!();
             };
@@ -406,11 +419,22 @@ mod tests {
             };
             assert_eq!(v, i);
         }
-        let less_than_val = 5;
-        cache.retain(|&key, &val| val < less_than_val || key < less_than_val);
-        for i in 0..10 {
+        let less_than = 4;
+        cache.retain(|&key, &val| val < less_than || key < less_than);
+        for i in ranges.clone() {
             let actual = cache.get(&i);
-            if i < less_than_val {
+            if i < less_than {
+                assert!(actual.is_none());
+            } else {
+                assert!(actual.is_some());
+                assert_eq!(actual.unwrap(), i);
+            }
+        }
+        let greater_than = 8;
+        cache.retain(|&key, &val| val > greater_than || key > greater_than);
+        for i in ranges {
+            let actual = cache.get(&i);
+            if i < less_than || i > greater_than {
                 assert!(actual.is_none());
             } else {
                 assert!(actual.is_some());
