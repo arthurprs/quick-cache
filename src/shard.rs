@@ -342,7 +342,7 @@ impl<
             .filter_map(|&idx| match self.entries.get(idx) {
                 Some((entry, _idx)) => match entry {
                     Entry::Resident(r) => {
-                        if f(&r.key, &r.value) {
+                        if !f(&r.key, &r.value) {
                             let hash = self.hash(&r.key);
                             Some((idx, hash))
                         } else {

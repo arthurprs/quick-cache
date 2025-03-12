@@ -380,26 +380,26 @@ mod tests {
             guard.insert(i);
             assert_eq!(cache.get_ref_or_guard(&i).ok().copied(), Some(i));
         }
-        let less_than = 3;
-        cache.retain(|&key, &val| val < less_than || key < less_than);
+        let small = 3;
+        cache.retain(|&key, &val| val > small && key > small);
         for i in ranges.clone() {
             let actual = cache.get(&i);
-            if i < less_than {
-                assert!(actual.is_none());
-            } else {
+            if i > small {
                 assert!(actual.is_some());
                 assert_eq!(*actual.unwrap(), i);
+            } else {
+                assert!(actual.is_none());
             }
         }
-        let greater_than = 7;
-        cache.retain(|&key, &val| val > greater_than || key > greater_than);
+        let big = 7;
+        cache.retain(|&key, &val| val < big && key < big);
         for i in ranges {
             let actual = cache.get(&i);
-            if i > greater_than || i < less_than {
-                assert!(actual.is_none());
-            } else {
+            if i > small && i < big {
                 assert!(actual.is_some());
                 assert_eq!(*actual.unwrap(), i);
+            } else {
+                assert!(actual.is_none());
             }
         }
     }
@@ -419,26 +419,26 @@ mod tests {
             };
             assert_eq!(v, i);
         }
-        let less_than = 4;
-        cache.retain(|&key, &val| val < less_than || key < less_than);
+        let small = 4;
+        cache.retain(|&key, &val| val > small && key > small);
         for i in ranges.clone() {
             let actual = cache.get(&i);
-            if i < less_than {
-                assert!(actual.is_none());
-            } else {
+            if i > small {
                 assert!(actual.is_some());
                 assert_eq!(actual.unwrap(), i);
+            } else {
+                assert!(actual.is_none());
             }
         }
-        let greater_than = 8;
-        cache.retain(|&key, &val| val > greater_than || key > greater_than);
+        let big = 8;
+        cache.retain(|&key, &val| val < big && key < big);
         for i in ranges {
             let actual = cache.get(&i);
-            if i < less_than || i > greater_than {
-                assert!(actual.is_none());
-            } else {
+            if i > small && i < big {
                 assert!(actual.is_some());
                 assert_eq!(actual.unwrap(), i);
+            } else {
+                assert!(actual.is_none());
             }
         }
     }
