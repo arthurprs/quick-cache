@@ -352,7 +352,8 @@ impl<
                     Entry::Placeholder(_) | Entry::Ghost(_) => None,
                 },
                 None => None,
-            });
+            })
+            .collect::<Vec<_>>();
         for (idx, hash) in retained_tokens {
             self.remove_internal(hash, idx);
         }
