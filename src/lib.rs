@@ -372,6 +372,54 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_unsync() {
+        let mut cache = unsync::Cache::<u64, u64>::new(100);
+        for i in 0..10 {
+            let guard = cache.get_ref_or_guard(&i).unwrap_err();
+            guard.insert(i);
+            assert_eq!(cache.get_ref_or_guard(&i).ok().copied(), Some(i));
+        }
+        let less_than_val = 5;
+        cache.retain(|&key, &val| val < less_than_val || key < less_than_val);
+        for i in 0..10 {
+            let actual = cache.get(&i);
+            if i < less_than_val {
+                assert!(actual.is_none());
+            } else {
+                assert!(actual.is_some());
+                assert_eq!(*actual.unwrap(), i);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_sync() {
+        use crate::sync::*;
+        let cache = Cache::<u64, u64>::new(100);
+        for i in 0..10 {
+            let GuardResult::Guard(guard) = cache.get_value_or_guard(&i, None) else {
+                panic!();
+            };
+            guard.insert(i).unwrap();
+            let GuardResult::Value(v) = cache.get_value_or_guard(&i, None) else {
+                panic!();
+            };
+            assert_eq!(v, i);
+        }
+        let less_than_val = 5;
+        cache.retain(|&key, &val| val < less_than_val || key < less_than_val);
+        for i in 0..10 {
+            let actual = cache.get(&i);
+            if i < less_than_val {
+                assert!(actual.is_none());
+            } else {
+                assert!(actual.is_some());
+                assert_eq!(actual.unwrap(), i);
+            }
+        }
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)]
     fn test_value_or_guard() {
         use crate::sync::*;
