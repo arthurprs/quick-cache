@@ -289,7 +289,7 @@ impl<
 
     /// Retains only the items specified by the predicate.
     /// In other words, remove all items for which `f(&key, &value)` returns `false`. The
-    /// elements are visited in unsorted (and unspecified) order.
+    /// elements are visited in arbitrary order.
     pub fn retain<F>(&self, f: F)
     where
         F: Fn(&Key, &Val) -> bool,
