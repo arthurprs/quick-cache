@@ -372,6 +372,78 @@ mod tests {
     }
 
     #[test]
+    fn test_retain_unsync() {
+        let mut cache = unsync::Cache::<u64, u64>::new(100);
+        let ranges = 0..10;
+        for i in ranges.clone() {
+            let guard = cache.get_ref_or_guard(&i).unwrap_err();
+            guard.insert(i);
+            assert_eq!(cache.get_ref_or_guard(&i).ok().copied(), Some(i));
+        }
+        let small = 3;
+        cache.retain(|&key, &val| val > small && key > small);
+        for i in ranges.clone() {
+            let actual = cache.get(&i);
+            if i > small {
+                assert!(actual.is_some());
+                assert_eq!(*actual.unwrap(), i);
+            } else {
+                assert!(actual.is_none());
+            }
+        }
+        let big = 7;
+        cache.retain(|&key, &val| val < big && key < big);
+        for i in ranges {
+            let actual = cache.get(&i);
+            if i > small && i < big {
+                assert!(actual.is_some());
+                assert_eq!(*actual.unwrap(), i);
+            } else {
+                assert!(actual.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retain_sync() {
+        use crate::sync::*;
+        let cache = Cache::<u64, u64>::new(100);
+        let ranges = 0..10;
+        for i in ranges.clone() {
+            let GuardResult::Guard(guard) = cache.get_value_or_guard(&i, None) else {
+                panic!();
+            };
+            guard.insert(i).unwrap();
+            let GuardResult::Value(v) = cache.get_value_or_guard(&i, None) else {
+                panic!();
+            };
+            assert_eq!(v, i);
+        }
+        let small = 4;
+        cache.retain(|&key, &val| val > small && key > small);
+        for i in ranges.clone() {
+            let actual = cache.get(&i);
+            if i > small {
+                assert!(actual.is_some());
+                assert_eq!(actual.unwrap(), i);
+            } else {
+                assert!(actual.is_none());
+            }
+        }
+        let big = 8;
+        cache.retain(|&key, &val| val < big && key < big);
+        for i in ranges {
+            let actual = cache.get(&i);
+            if i > small && i < big {
+                assert!(actual.is_some());
+                assert_eq!(actual.unwrap(), i);
+            } else {
+                assert!(actual.is_none());
+            }
+        }
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)]
     fn test_value_or_guard() {
         use crate::sync::*;
