@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_unsync() {
+    fn test_retain_unsync() {
         let mut cache = unsync::Cache::<u64, u64>::new(100);
         let ranges = 0..10;
         for i in ranges.clone() {
@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_sync() {
+    async fn test_retain_sync() {
         use crate::sync::*;
         let cache = Cache::<u64, u64>::new(100);
         let ranges = 0..10;
