@@ -158,7 +158,7 @@ impl<
 
     /// Returns whether the cache is empty
     pub fn is_empty(&self) -> bool {
-        self.shards.iter().any(|s| s.read().len() == 0)
+        self.shards.iter().all(|s| s.read().len() == 0)
     }
 
     /// Returns the number of cached items
