@@ -14,7 +14,11 @@ use crate::{
 
 pub use crate::sync_placeholder::{GuardResult, JoinFuture, PlaceholderGuard};
 
-/// A concurrent cache.
+/// A concurrent cache
+///
+/// The concurrent cache is internally composed of equally sized shards, each of which is independently
+/// synchronized. This allows for low contention when multiple threads are accessing the cache but limits the
+/// maximum weight capacity of each shard.
 ///
 /// # Value
 /// Cache values are cloned when fetched. Users should wrap their values with `Arc<_>`
@@ -171,9 +175,21 @@ impl<
         self.shards.iter().map(|s| s.read().weight()).sum()
     }
 
-    /// Returns the maximum weight of cached items
+    /// Returns the _total_ maximum weight capacity of cached items.
+    /// Note that the cache may be composed of multiple shards and each shard has its own maximum weight capacity,
+    /// see [`Self::shard_capacity`].
     pub fn capacity(&self) -> u64 {
         self.shards.iter().map(|s| s.read().capacity()).sum()
+    }
+
+    /// Returns the maximum weight capacity of each shard.
+    pub fn shard_capacity(&self) -> u64 {
+        self.shards[0].read().capacity()
+    }
+
+    /// Returns the number of shards.
+    pub fn num_shards(&self) -> usize {
+        self.shards.len()
     }
 
     /// Returns the number of misses
