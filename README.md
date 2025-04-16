@@ -7,7 +7,7 @@
 Lightweight and high performance concurrent cache optimized for low cache overhead.
 
 * Small overhead compared to a concurrent hash table
-* Scan resistant and high hit rate caching policy
+* Scan resistant and high hit rate caching policy (S3-FIFO)
 * User defined weight per item
 * Scales well with the number of threads
 * Atomic operations with `get_or_insert` and `get_value_or_guard` functions

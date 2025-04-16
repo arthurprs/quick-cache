@@ -1,12 +1,12 @@
 [package]
 name = "quick_cache"
-version = "0.6.12"
+version = "0.6.13"
 edition = "2021"
 description = "Lightweight and high performance concurrent cache"
 repository = "https://github.com/arthurprs/quick-cache"
 authors = ["Arthur Silva <arthurprs@gmail.com>"]
 license = "MIT"
-keywords = ["lru", "concurrent", "cache"]
+keywords = ["lru", "concurrent", "cache", "s3-fifo", "clock"]
 categories = ["caching", "concurrency", "data-structures"]
 readme = "README.md"
 exclude = ["fuzz"]
