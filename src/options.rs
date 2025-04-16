@@ -55,7 +55,9 @@ impl OptionsBuilder {
         Self::default()
     }
 
-    /// Set the number of internal shards. Each shard has independent locking
+    /// Set the number of internal shards. Each shard has independent synchronization
+    /// and capacity. This means that the Cache can be used from multiple threads
+    /// with little contetion but the capacity of each shard is a portion of the total.
     ///
     /// Defaults to: `number of detected cores * 4`
     ///
@@ -70,6 +72,10 @@ impl OptionsBuilder {
 
     /// The estimated number of items the cache is expected to hold,
     /// roughly equivalent to `weight_capacity / average item weight`.
+    /// An estimation within one or even two orders of magnitude of the real value is often good enough.
+    ///
+    /// This is used to estimate the maximum number of shards (to avoid shards that are too small)
+    /// and to estimate space required to track items recently evicted from the cache.
     #[inline]
     pub fn estimated_items_capacity(&mut self, estimated_items_capacity: usize) -> &mut Self {
         self.estimated_items_capacity = Some(estimated_items_capacity);
