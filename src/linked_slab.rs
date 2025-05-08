@@ -218,4 +218,23 @@ impl<T> LinkedSlab<T> {
     pub fn iter(&self) -> impl Iterator<Item = &'_ T> + '_ {
         self.entries.iter().flat_map(|i| i.item.as_ref())
     }
+
+    /// Iterator for the items in the slab, starting after a given token.
+    pub fn iter_from(
+        &self,
+        continuation: Option<Token>,
+    ) -> impl Iterator<Item = (Token, &'_ T)> + '_ {
+        let skip = continuation.map_or(0, |c| c.get() as usize);
+        self.entries
+            .iter()
+            .skip(skip)
+            .enumerate()
+            .filter_map(move |(i, e)| {
+                if let Some(item) = &e.item {
+                    Some((Token::new((skip + i + 1) as u32)?, item))
+                } else {
+                    None
+                }
+            })
+    }
 }
