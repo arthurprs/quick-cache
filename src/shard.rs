@@ -206,6 +206,69 @@ impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, 
     }
 }
 
+impl<Key, Val, We, B, L, Plh> CacheShard<Key, Val, We, B, L, Plh> {
+    pub fn weight(&self) -> u64 {
+        self.weight_hot + self.weight_cold
+    }
+
+    pub fn len(&self) -> usize {
+        self.num_hot + self.num_cold
+    }
+
+    pub fn capacity(&self) -> u64 {
+        self.weight_capacity
+    }
+
+    #[cfg(feature = "stats")]
+    pub fn hits(&self) -> u64 {
+        self.hits.load(atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "stats")]
+    pub fn misses(&self) -> u64 {
+        self.misses.load(atomic::Ordering::Relaxed)
+    }
+
+    pub fn clear(&mut self) {
+        let _ = self.drain();
+    }
+
+    pub fn drain(&mut self) -> impl Iterator<Item = (Key, Val)> + '_ {
+        self.cold_head = None;
+        self.hot_head = None;
+        self.ghost_head = None;
+        self.num_hot = 0;
+        self.num_cold = 0;
+        self.num_non_resident = 0;
+        self.weight_hot = 0;
+        self.weight_cold = 0;
+        self.map.clear();
+        self.entries.drain().filter_map(|i| match i {
+            Entry::Resident(r) => Some((r.key, r.value)),
+            Entry::Placeholder(_) | Entry::Ghost(_) => None,
+        })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&'_ Key, &'_ Val)> + '_ {
+        self.entries.iter().filter_map(|i| match i {
+            Entry::Resident(r) => Some((&r.key, &r.value)),
+            Entry::Placeholder(_) | Entry::Ghost(_) => None,
+        })
+    }
+
+    pub fn iter_from(
+        &self,
+        continuation: Option<Token>,
+    ) -> impl Iterator<Item = (Token, &'_ Key, &'_ Val)> + '_ {
+        self.entries
+            .iter_from(continuation)
+            .filter_map(|(token, i)| match i {
+                Entry::Resident(r) => Some((token, &r.key, &r.value)),
+                Entry::Placeholder(_) | Entry::Ghost(_) => None,
+            })
+    }
+}
+
 impl<
         Key: Eq + Hash,
         Val,
@@ -357,55 +420,6 @@ impl<
         for (idx, hash) in retained_tokens {
             self.remove_internal(hash, idx);
         }
-    }
-
-    pub fn weight(&self) -> u64 {
-        self.weight_hot + self.weight_cold
-    }
-
-    pub fn len(&self) -> usize {
-        self.num_hot + self.num_cold
-    }
-
-    pub fn capacity(&self) -> u64 {
-        self.weight_capacity
-    }
-
-    #[cfg(feature = "stats")]
-    pub fn hits(&self) -> u64 {
-        self.hits.load(atomic::Ordering::Relaxed)
-    }
-
-    #[cfg(feature = "stats")]
-    pub fn misses(&self) -> u64 {
-        self.misses.load(atomic::Ordering::Relaxed)
-    }
-
-    pub fn clear(&mut self) {
-        let _ = self.drain();
-    }
-
-    pub fn drain(&mut self) -> impl Iterator<Item = (Key, Val)> + '_ {
-        self.cold_head = None;
-        self.hot_head = None;
-        self.ghost_head = None;
-        self.num_hot = 0;
-        self.num_cold = 0;
-        self.num_non_resident = 0;
-        self.weight_hot = 0;
-        self.weight_cold = 0;
-        self.map.clear();
-        self.entries.drain().filter_map(|i| match i {
-            Entry::Resident(r) => Some((r.key, r.value)),
-            Entry::Placeholder(_) | Entry::Ghost(_) => None,
-        })
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&'_ Key, &'_ Val)> + '_ {
-        self.entries.iter().filter_map(|i| match i {
-            Entry::Resident(r) => Some((&r.key, &r.value)),
-            Entry::Placeholder(_) | Entry::Ghost(_) => None,
-        })
     }
 
     #[inline]
@@ -576,6 +590,28 @@ impl<
         // strong indication that this input isn't important.
         let idx = self.search(hash, key)?;
         self.remove_internal(hash, idx)
+    }
+
+    pub fn remove_token(&mut self, token: Token) -> Option<(Key, Val)> {
+        let Some((Entry::Resident(resident), _)) = self.entries.get(token) else {
+            return None;
+        };
+        let hash = Self::hash_static(&self.hash_builder, &resident.key);
+        self.remove_internal(hash, token)
+    }
+
+    pub fn remove_next(&mut self, continuation: Option<Token>) -> Option<(Token, Key, Val)> {
+        let (token, key, _) = self
+            .entries
+            .iter_from(continuation)
+            .filter_map(|(token, i)| match i {
+                Entry::Resident(r) => Some((token, &r.key, &r.value)),
+                Entry::Placeholder(_) | Entry::Ghost(_) => None,
+            })
+            .next()?;
+        let hash = Self::hash_static(&self.hash_builder, key);
+        self.remove_internal(hash, token)
+            .map(|(k, v)| (token, k, v))
     }
 
     fn remove_internal(&mut self, hash: u64, idx: Token) -> Option<(Key, Val)> {

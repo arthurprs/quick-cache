@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::{
+    linked_slab::Token,
     options::{Options, OptionsBuilder},
     shard::{CacheShard, InsertStrategy},
     shim::rw_lock::RwLock,
@@ -340,6 +341,40 @@ impl<
         }
     }
 
+    /// Iterates over the items in the cache returning cloned key value pairs.
+    ///
+    /// The iterator is guaranteed to yield all items in the cache at the time of creation
+    /// provided that they are not removed or evicted from the cache while iterating.
+    /// The iterator may also yield items added to the cache after the iterator is created.
+    pub fn iter(&self) -> Iter<'_, Key, Val, We, B, L>
+    where
+        Key: Clone,
+    {
+        Iter {
+            shards: &self.shards,
+            current_shard: 0,
+            last: None,
+        }
+    }
+
+    /// Drains items from the cache.
+    ///
+    /// The iterator is guaranteed to drain all items in the cache at the time of creation
+    /// provided that they are not removed or evicted from the cache while draining.
+    /// The iterator may also drain items added to the cache after the iterator is created.
+    /// Due to the above, the cache may not be empty after the iterator is fully consumed
+    /// if items are added to the cache while draining.
+    ///
+    /// Note that dropping the iterator will _not_ finish the draining process, unlike other
+    /// drain methods.
+    pub fn drain(&self) -> Drain<'_, Key, Val, We, B, L> {
+        Drain {
+            shards: &self.shards,
+            current_shard: 0,
+            last: None,
+        }
+    }
+
     /// Gets an item from the cache with key `key` .
     ///
     /// If the corresponding value isn't present in the cache, this functions returns a guard
@@ -433,6 +468,82 @@ impl<Key, Val, We, B, L> std::fmt::Debug for Cache<Key, Val, We, B, L> {
     }
 }
 
+/// Iterator over the items in the cache.
+///
+/// See [`Cache::iter`] for more details.
+pub struct Iter<'a, Key, Val, We, B, L> {
+    shards: &'a [RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>],
+    current_shard: usize,
+    last: Option<Token>,
+}
+
+impl<Key, Val, We, B, L> Iterator for Iter<'_, Key, Val, We, B, L>
+where
+    Key: Clone,
+    Val: Clone,
+{
+    type Item = (Key, Val);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.current_shard < self.shards.len() {
+            let shard = &self.shards[self.current_shard];
+            let lock = shard.read();
+            if let Some((new_last, key, val)) = lock.iter_from(self.last).next() {
+                self.last = Some(new_last);
+                return Some((key.clone(), val.clone()));
+            }
+            self.last = None;
+            self.current_shard += 1;
+        }
+        None
+    }
+}
+
+impl<Key, Val, We, B, L> std::fmt::Debug for Iter<'_, Key, Val, We, B, L> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Iter").finish_non_exhaustive()
+    }
+}
+
+/// Draining iterator for the items in the cache.
+///
+/// See [`Cache::drain`] for more details.
+pub struct Drain<'a, Key, Val, We, B, L> {
+    shards: &'a [RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>],
+    current_shard: usize,
+    last: Option<Token>,
+}
+
+impl<Key, Val, We, B, L> Iterator for Drain<'_, Key, Val, We, B, L>
+where
+    Key: Hash + Eq,
+    We: Weighter<Key, Val>,
+    B: BuildHasher,
+    L: Lifecycle<Key, Val>,
+{
+    type Item = (Key, Val);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.current_shard < self.shards.len() {
+            let shard = &self.shards[self.current_shard];
+            let mut lock = shard.write();
+            if let Some((new_last, key, value)) = lock.remove_next(self.last) {
+                self.last = Some(new_last);
+                return Some((key, value));
+            }
+            self.last = None;
+            self.current_shard += 1;
+        }
+        None
+    }
+}
+
+impl<Key, Val, We, B, L> std::fmt::Debug for Drain<'_, Key, Val, We, B, L> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Drain").finish_non_exhaustive()
+    }
+}
+
 /// Default `Lifecycle` for a sync cache.
 ///
 /// Temporally stashes one evicted item for dropping outside the cache locks.
@@ -520,6 +631,63 @@ mod tests {
         }
         for t in threads {
             t.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_iter() {
+        let capacity = if cfg!(miri) { 100 } else { 100000 };
+        let options = OptionsBuilder::new()
+            .estimated_items_capacity(capacity)
+            .weight_capacity(capacity as u64)
+            .shards(2)
+            .build()
+            .unwrap();
+        let cache = Cache::with_options(
+            options,
+            UnitWeighter,
+            DefaultHashBuilder::default(),
+            DefaultLifecycle::default(),
+        );
+        let items = capacity / 2;
+        for i in 0..items {
+            cache.insert(i, i);
+        }
+        assert_eq!(cache.len(), items);
+        let mut iter_collected = cache.iter().collect::<Vec<_>>();
+        assert_eq!(iter_collected.len(), items);
+        iter_collected.sort();
+        for (i, v) in iter_collected.into_iter().enumerate() {
+            assert_eq!((i, i), v);
+        }
+    }
+
+    #[test]
+    fn test_drain() {
+        let capacity = if cfg!(miri) { 100 } else { 100000 };
+        let options = OptionsBuilder::new()
+            .estimated_items_capacity(capacity)
+            .weight_capacity(capacity as u64)
+            .shards(2)
+            .build()
+            .unwrap();
+        let cache = Cache::with_options(
+            options,
+            UnitWeighter,
+            DefaultHashBuilder::default(),
+            DefaultLifecycle::default(),
+        );
+        let items = capacity / 2;
+        for i in 0..items {
+            cache.insert(i, i);
+        }
+        assert_eq!(cache.len(), items);
+        let mut drain_collected = cache.drain().collect::<Vec<_>>();
+        assert_eq!(cache.len(), 0);
+        assert_eq!(drain_collected.len(), items);
+        drain_collected.sort();
+        for (i, v) in drain_collected.into_iter().enumerate() {
+            assert_eq!((i, i), v);
         }
     }
 }
