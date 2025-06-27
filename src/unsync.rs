@@ -419,7 +419,7 @@ impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
 }
 
 #[derive(Debug, Clone)]
-struct SharedPlaceholder {
+pub(crate) struct SharedPlaceholder {
     hash: u64,
     idx: Token,
 }

@@ -1155,3 +1155,22 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_overhead() {
+        use std::mem::size_of;
+        assert_eq!(
+            size_of::<Entry<u64, u64, crate::sync_placeholder::SharedPlaceholder<u64>>>()
+                - size_of::<[u64; 2]>(),
+            16 // 8 bytes from linked slab, 8 bytes from entry
+        );
+        assert_eq!(
+            size_of::<Entry<u64, u64, crate::unsync::SharedPlaceholder>>() - size_of::<[u64; 2]>(),
+            16 // 8 bytes from linked slab, 8 bytes from entry
+        );
+    }
+}

@@ -40,6 +40,19 @@
 //! * send evicted items to a channel, achieving the equivalent to an eviction listener feature.
 //! * zero out item weights so they are left in the cache instead of evicted.
 //!
+//! # Approximate memory usage
+//!
+//! The memory overhead per entry is `21` bytes.
+//!
+//! The memory usage of the cache data structures can be estimated as:
+//! `(size_of::<K>() + size_of::<V>() + 21) * (length * 1.5).next_power_of_two()`
+//!
+//! Actual memory usage may vary depending on the cache options and the key and value types, which can have external
+//! allocations (e.g. `String`, `Vec`, etc.). The above formula only accounts for the cache's data structures.
+//!
+//! The `1.5` value in the formula above results from `1 + G`, where `G` is the configured ghost allocation specified
+//! in [`OptionsBuilder::ghost_allocation`], which is `0.5` by default.
+//!
 //! # Hasher
 //!
 //! By default the crate uses [ahash](https://crates.io/crates/ahash), which is enabled (by default) via
