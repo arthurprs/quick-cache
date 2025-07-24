@@ -546,7 +546,7 @@ impl<Key, Val, We, B, L> std::fmt::Debug for Drain<'_, Key, Val, We, B, L> {
 
 /// Default `Lifecycle` for a sync cache.
 ///
-/// Temporally stashes one evicted item for dropping outside the cache locks.
+/// Stashes up to two evicted items for dropping them outside the cache locks.
 pub struct DefaultLifecycle<Key, Val>(std::marker::PhantomData<(Key, Val)>);
 
 impl<Key, Val> std::fmt::Debug for DefaultLifecycle<Key, Val> {
@@ -569,16 +569,27 @@ impl<Key, Val> Clone for DefaultLifecycle<Key, Val> {
 }
 
 impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
-    type RequestState = Option<(Key, Val)>;
+    // Why two items?
+    // Because assuming the cache has roughly similarly weighted items,
+    // we can expect that at one or two items will be evicted per request
+    // in most cases. And we want to avoid introducing any extra
+    // overhead (e.g. a vector) for this default lifecycle.
+    type RequestState = [Option<(Key, Val)>; 2];
 
     #[inline]
     fn begin_request(&self) -> Self::RequestState {
-        None
+        [None, None]
     }
 
     #[inline]
     fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val) {
-        *state = Some((key, val));
+        if std::mem::needs_drop::<(Key, Val)>() {
+            if state[0].is_none() {
+                state[0] = Some((key, val));
+            } else if state[1].is_none() {
+                state[1] = Some((key, val));
+            }
+        }
     }
 }
 
