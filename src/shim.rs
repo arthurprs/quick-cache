@@ -8,6 +8,11 @@ pub use std::{sync, thread};
 #[cfg(feature = "shuttle")]
 pub use shuttle::*;
 
+// TODO: OnceLock isn't current present in shuttle.
+// Using the std version like this only works in shuttle
+// because we're not relying on any OnceLock blocking behavior.
+pub use std::sync::OnceLock;
+
 #[cfg(feature = "shuttle")]
 pub mod rw_lock {
     use std::ops::{Deref, DerefMut};
