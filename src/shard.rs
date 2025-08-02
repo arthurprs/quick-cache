@@ -1,5 +1,6 @@
 use std::{
     hash::{BuildHasher, Hash},
+    hint::unreachable_unchecked,
     mem::{self, MaybeUninit},
 };
 
@@ -80,10 +81,13 @@ pub struct CacheShard<Key, Val, We, B, L, Plh> {
     /// Slab holding entries
     entries: LinkedSlab<Entry<Key, Val, Plh>>,
     /// Head of cold list, containing Cold entries.
+    /// Only contains entries of kind `Resident`.
     cold_head: Option<Token>,
     /// Head of hot list, containing Hot entries.
+    /// Only contains entries of kind `Resident`.
     hot_head: Option<Token>,
     /// Head of ghost list, containing non-resident/Hash entries.
+    /// Only contains entries of kind `Ghost`.
     ghost_head: Option<Token>,
     weight_target_hot: u64,
     weight_capacity: u64,
@@ -188,7 +192,7 @@ impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, 
     #[cold]
     fn cold_change_weight(&mut self, idx: Token, old_weight: u64, new_weight: u64) {
         let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
-            unreachable!()
+            unsafe { unreachable_unchecked() };
         };
         let (weight_ptr, target_head) = if resident.state == ResidentState::Hot {
             (&mut self.weight_hot, &mut self.hot_head)
@@ -527,8 +531,9 @@ impl<
             record_miss_mut!(self);
             return None;
         };
-        let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
-            unreachable!()
+        let (Entry::Resident(resident), _) = (unsafe { self.entries.get_mut_unchecked(idx) })
+        else {
+            unsafe { unreachable_unchecked() };
         };
         if *resident.referenced.get_mut() < MAX_F {
             *resident.referenced.get_mut() += 1;
@@ -658,7 +663,7 @@ impl<
         loop {
             let (entry, next) = self.entries.get_mut(idx).unwrap();
             let Entry::Resident(resident) = entry else {
-                unreachable!()
+                unsafe { unreachable_unchecked() };
             };
             debug_assert_eq!(resident.state, ResidentState::Cold);
             if *resident.referenced.get_mut() != 0 {
@@ -719,7 +724,7 @@ impl<
         loop {
             let (entry, next) = self.entries.get_mut(idx).unwrap();
             let Entry::Resident(resident) = entry else {
-                unreachable!()
+                unsafe { unreachable_unchecked() };
             };
             debug_assert_eq!(resident.state, ResidentState::Hot);
             if self.lifecycle.is_pinned(&resident.key, &resident.value) {
@@ -764,7 +769,7 @@ impl<
         let idx = self.ghost_head.unwrap();
         let (entry, _) = self.entries.get_mut(idx).unwrap();
         let Entry::Ghost(hash) = *entry else {
-            unreachable!()
+            unsafe { unreachable_unchecked() };
         };
         self.num_non_resident -= 1;
         self.map_remove(hash, idx);

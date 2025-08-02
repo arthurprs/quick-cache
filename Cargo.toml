@@ -25,13 +25,21 @@ parking_lot = { optional = true, version = "0.12" }
 shuttle = { version = "0.8", optional = true }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.7"
 rand = { version = "0.9", features = ["small_rng"] }
 rand_distr = "0.5"
 tokio = { version = "1", features = ["full"] }
 
 [[bench]]
 name = "benchmarks"
+harness = false
+
+[[bench]]
+name = "placeholder_bench"
+harness = false
+
+[[bench]]
+name = "placeholder_async_bench"
 harness = false
 
 [profile.shuttle]

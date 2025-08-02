@@ -48,7 +48,7 @@ async fn test_guard_works_stub_async() {
     let cache_ = Arc::new(crate::sync::Cache::<u64, u64>::new(100));
     let wg = Arc::new(tokio::sync::Barrier::new(PAIRS));
     let sync_wg = Arc::new(sync::Barrier::new(PAIRS));
-    let solve_at = rand::thread_rng().gen_range(0..PAIRS * 3);
+    let solve_at = rand::thread_rng().gen_range(0..100);
     let mut tasks = Vec::new();
     let mut threads = Vec::new();
     for _ in 0..PAIRS {
@@ -69,13 +69,13 @@ async fn test_guard_works_stub_async() {
                 let cache_fut_res = tokio::select! {
                     // biased is important for determinism
                     biased;
-                    cache_fut_res = cache_fut => cache_fut_res,
                     _ = timeout_fut => {
                         if rand::thread_rng().gen_bool(0.1) {
                             cache.insert(0, 0);
                         }
                         continue;
                     },
+                    cache_fut_res = cache_fut => cache_fut_res,
                 };
                 match cache_fut_res {
                     Ok(v) => {
@@ -106,7 +106,12 @@ async fn test_guard_works_stub_async() {
             wg.wait();
             loop {
                 // node that the actual duration is ignored during shuttle tests
-                match cache.get_value_or_guard(&0, Some(Default::default())) {
+                let timeout = match rand::thread_rng().gen_range(0..3) {
+                    0 => None,
+                    1 => Some(std::time::Duration::default()),
+                    _ => Some(std::time::Duration::from_millis(100)),
+                };
+                match cache.get_value_or_guard(&0, timeout) {
                     GuardResult::Value(v) => {
                         if v == 1 {
                             break;
