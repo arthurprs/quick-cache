@@ -1,6 +1,7 @@
 use std::{
     future::Future,
     hash::{BuildHasher, Hash},
+    hint::unreachable_unchecked,
     time::Duration,
 };
 
@@ -384,6 +385,8 @@ impl<
     /// is dropped or the value is inserted.
     ///
     /// A `None` `timeout` means waiting forever.
+    /// A `Some(<zero>)` timeout will return a Timeout error immediately if the value is not present
+    /// and a guard is alive elsewhere.
     pub fn get_value_or_guard<Q>(
         &self,
         key: &Q,
@@ -417,7 +420,7 @@ impl<
                 let _ = g.insert(v.clone());
                 Ok(v)
             }
-            GuardResult::Timeout => unreachable!(),
+            GuardResult::Timeout => unsafe { unreachable_unchecked() },
         }
     }
 
