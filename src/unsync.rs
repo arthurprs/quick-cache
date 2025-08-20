@@ -2,7 +2,7 @@ use crate::{
     linked_slab::Token,
     options::*,
     shard::{self, CacheShard, InsertStrategy},
-    DefaultHashBuilder, Equivalent, Lifecycle, UnitWeighter, Weighter,
+    DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
 
@@ -376,6 +376,14 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     #[cfg(any(fuzzing, test))]
     pub fn validate(&self, accept_overweight: bool) {
         self.shard.validate(accept_overweight);
+    }
+
+    /// Get total memory used by cache data structures
+    ///
+    /// It should be noted that if cache key or value is some type like `Vec<T>`,
+    /// the memory allocated in the heap will not be counted.
+    pub fn memory_used(&self) -> MemoryUsed {
+        self.shard.memory_used()
     }
 }
 
