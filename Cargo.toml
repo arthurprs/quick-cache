@@ -20,7 +20,7 @@ stats = []
 [dependencies]
 ahash = { optional = true, version = "0.8" }
 equivalent = "1.0"
-hashbrown = { version = "0.15", default-features = false, features = ["inline-more"] }
+hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
 parking_lot = { optional = true, version = "0.12" }
 shuttle = { version = "0.8", optional = true }
 
