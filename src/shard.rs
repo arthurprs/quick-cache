@@ -1106,6 +1106,28 @@ impl<
         record_miss_mut!(self);
         Err((shared, true))
     }
+
+    pub fn set_capacity(&mut self, new_weight_capacity: u64) {
+        // Calculate the ratio to proportionally adjust ghost capacity
+        let old_new_ratio = new_weight_capacity as f64 / self.weight_capacity as f64;
+        let hot_ratio = self.weight_target_hot as f64 / self.weight_capacity as f64;
+
+        // Update capacities
+        self.weight_capacity = new_weight_capacity;
+        self.weight_target_hot = (new_weight_capacity as f64 * hot_ratio) as u64;
+        self.capacity_non_resident = (self.capacity_non_resident as f64 * old_new_ratio) as usize;
+
+        // Evict items if we're over the new capacity
+        let mut lcs = self.lifecycle.begin_request();
+        while self.weight_hot + self.weight_cold > self.weight_capacity
+            && self.advance_cold(&mut lcs)
+        {}
+        self.lifecycle.end_request(lcs);
+        // Trim ghost entries if needed
+        while self.num_non_resident > self.capacity_non_resident {
+            self.advance_ghost();
+        }
+    }
 }
 
 /// Structure wrapping a mutable reference to a cached item.

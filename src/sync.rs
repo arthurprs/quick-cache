@@ -376,6 +376,19 @@ impl<
         }
     }
 
+    /// Sets the cache to a new weight capacity.
+    ///
+    /// This will adjust the weight capacity of each shard proportionally.
+    /// If the new capacity is smaller than the current weight, items will be evicted
+    /// to bring the cache within the new limit.
+    pub fn set_capacity(&self, new_weight_capacity: u64) {
+        let shard_weight_cap = new_weight_capacity.saturating_add(self.shards.len() as u64 - 1)
+            / self.shards.len() as u64;
+        for shard in &*self.shards {
+            shard.write().set_capacity(shard_weight_cap);
+        }
+    }
+
     /// Gets an item from the cache with key `key` .
     ///
     /// If the corresponding value isn't present in the cache, this functions returns a guard
@@ -703,5 +716,31 @@ mod tests {
         for (i, v) in drain_collected.into_iter().enumerate() {
             assert_eq!((i, i), v);
         }
+    }
+
+    #[test]
+    fn test_set_capacity() {
+        let cache = Cache::new(100);
+        for i in 0..80 {
+            cache.insert(i, i);
+        }
+        let initial_len = cache.len();
+        assert!(initial_len <= 80);
+
+        // Set to smaller capacity
+        cache.set_capacity(50);
+        assert!(cache.len() <= 50);
+        assert!(cache.weight() <= 50);
+
+        // Set to larger capacity
+        cache.set_capacity(200);
+        assert_eq!(cache.capacity(), 200);
+
+        // Insert more items
+        for i in 100..180 {
+            cache.insert(i, i);
+        }
+        assert!(cache.len() <= 180);
+        assert!(cache.weight() <= 200);
     }
 }
