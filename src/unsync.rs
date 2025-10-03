@@ -373,6 +373,14 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.drain()
     }
 
+    /// Sets the cache to a new weight capacity.
+    ///
+    /// If the new capacity is smaller than the current weight, items will be evicted
+    /// to bring the cache within the new limit.
+    pub fn set_capacity(&mut self, new_weight_capacity: u64) {
+        self.shard.set_capacity(new_weight_capacity);
+    }
+
     #[cfg(any(fuzzing, test))]
     pub fn validate(&self, accept_overweight: bool) {
         self.shard.validate(accept_overweight);
@@ -559,5 +567,62 @@ mod tests {
         }
         assert_eq!(cache.get(&0).copied(), Some(0));
         assert!(cache.contains_key(&0));
+    }
+
+    #[test]
+    fn test_set_capacity() {
+        let mut cache = Cache::new(100);
+        for i in 0..80 {
+            cache.insert(i, i);
+        }
+        let initial_len = cache.len();
+        assert!(initial_len <= 80);
+
+        // Set to smaller capacity
+        cache.set_capacity(50);
+        assert!(cache.len() <= 50);
+        assert!(cache.weight() <= 50);
+        cache.validate(false);
+
+        // Set to larger capacity
+        cache.set_capacity(200);
+        assert_eq!(cache.capacity(), 200);
+        cache.validate(false);
+
+        // Insert more items
+        for i in 100..180 {
+            cache.insert(i, i);
+        }
+        assert!(cache.len() <= 180);
+        assert!(cache.weight() <= 200);
+        cache.validate(false);
+    }
+
+    #[test]
+    fn test_set_capacity_with_ghosts() {
+        // Create a cache that will generate ghost entries
+        let mut cache = Cache::new(50);
+
+        // Insert items to fill the cache
+        for i in 0..100 {
+            cache.insert(i, i);
+        }
+        cache.validate(false);
+
+        // Set to smaller capacity - should trim both resident and ghost entries
+        cache.set_capacity(25);
+        assert!(cache.weight() <= 25);
+        cache.validate(false);
+
+        // Set back to larger capacity
+        cache.set_capacity(100);
+        assert_eq!(cache.capacity(), 100);
+        cache.validate(false);
+
+        // Insert more items
+        for i in 100..150 {
+            cache.insert(i, i);
+        }
+        cache.validate(false);
     }
 }

@@ -59,6 +59,7 @@ enum Op {
     Placeholder(u16),
     SetPlaceholder(u16, u16, bool),
     Remove(u16),
+    SetCapacity(u32),
 }
 
 #[derive(Debug, Arbitrary)]
@@ -168,6 +169,10 @@ fn run(input: Input) {
                     assert_eq!(rem_k, k);
                 }
                 assert!(cache.peek(&k).is_none());
+            }
+            Op::SetCapacity(new_capacity) => {
+                // eprintln!("set_capacity {new_capacity}");
+                cache.set_capacity(new_capacity as u64);
             }
         }
     }
