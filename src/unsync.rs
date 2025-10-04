@@ -159,7 +159,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
 
     /// Fetches an item from the cache.
     ///
-    /// Note: Leaking the returned RefMut might cause undefined behavior.
+    /// Note: Leaking the returned RefMut might cause cache weight tracking to be inaccurate.
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -177,7 +177,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
 
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
     ///
-    /// Note: Leaking the returned RefMut might cause undefined behavior.
+    /// Note: Leaking the returned RefMut might cause cache weight tracking to be inaccurate.
     pub fn peek_mut<Q>(&mut self, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -315,6 +315,8 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// Gets an item from the cache with key `key` .
     /// If the corresponding value isn't present in the cache, this functions returns a guard
     /// that can be used to insert the value once it's computed.
+    ///
+    /// Note: Leaking the returned RefMut might cause cache weight tracking to be inaccurate.
     pub fn get_mut_or_guard<'a, Q>(
         &'a mut self,
         key: &Q,
