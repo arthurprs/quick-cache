@@ -190,6 +190,22 @@ pub trait Lifecycle<Key, Val> {
     fn end_request(&self, state: Self::RequestState) {}
 }
 
+/// The memory used by the cache
+///
+/// This struct exposes some implementation details, may change in the future
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone)]
+pub struct MemoryUsed {
+    pub entries: usize,
+    pub map: usize,
+}
+
+impl MemoryUsed {
+    pub fn total(&self) -> usize {
+        self.entries + self.map
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
