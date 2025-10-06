@@ -1,0 +1,14 @@
+[package]
+name = "memory_used_plot"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "memory_used_plot"
+path = "src/memory_used_plot.rs"
+
+[dependencies]
+quick_cache = { path = ".." }
+memory-stats = "1.2.0"
+plotters = "0.3"
