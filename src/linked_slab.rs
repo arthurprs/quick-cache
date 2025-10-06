@@ -107,17 +107,21 @@ impl<T> LinkedSlab<T> {
     /// Gets an entry and a token to the next entry w/o checking, thus unsafe.
     #[inline]
     pub unsafe fn get_unchecked(&self, index: Token) -> (&T, Token) {
-        let entry = self.entries.get_unchecked((index.get() - 1) as usize);
-        let v = entry.item.as_ref().unwrap_unchecked();
-        (v, entry.next)
+        unsafe {
+            let entry = self.entries.get_unchecked((index.get() - 1) as usize);
+            let v = entry.item.as_ref().unwrap_unchecked();
+            (v, entry.next)
+        }
     }
 
     /// Gets an entry and a token to the next entry w/o checking, thus unsafe.
     #[inline]
     pub unsafe fn get_mut_unchecked(&mut self, index: Token) -> (&mut T, Token) {
-        let entry = self.entries.get_unchecked_mut((index.get() - 1) as usize);
-        let v = entry.item.as_mut().unwrap_unchecked();
-        (v, entry.next)
+        unsafe {
+            let entry = self.entries.get_unchecked_mut((index.get() - 1) as usize);
+            let v = entry.item.as_mut().unwrap_unchecked();
+            (v, entry.next)
+        }
     }
 
     /// Links an entry before `target_head`. Returns the item next to the linked item,

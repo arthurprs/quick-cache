@@ -271,8 +271,7 @@ impl<
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         let (shard, hash) = self.shard_for(key).unwrap();
-        let removed = shard.write().remove(hash, key);
-        removed
+        shard.write().remove(hash, key)
     }
 
     /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists.
