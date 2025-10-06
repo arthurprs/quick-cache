@@ -1,8 +1,8 @@
 use crate::{
+    DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
     linked_slab::Token,
     options::*,
     shard::{self, CacheShard, InsertStrategy},
-    DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
 

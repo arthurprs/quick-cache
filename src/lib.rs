@@ -210,7 +210,7 @@ impl MemoryUsed {
 mod tests {
     use std::{
         hash::Hash,
-        sync::{atomic::AtomicUsize, Arc},
+        sync::{Arc, atomic::AtomicUsize},
         time::Duration,
     };
 
@@ -325,11 +325,7 @@ mod tests {
                         wg.wait();
                         let result = cache.get_or_insert_with(&(1, 1), || {
                             let before = entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if before == solve_at {
-                                Ok(1)
-                            } else {
-                                Err(())
-                            }
+                            if before == solve_at { Ok(1) } else { Err(()) }
                         });
                         assert!(matches!(result, Ok(1) | Err(())));
                     });
@@ -531,11 +527,7 @@ mod tests {
                     let result = cache
                         .get_or_insert_async(&(1, 1), async {
                             let before = entered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if before == solve_at {
-                                Ok(1)
-                            } else {
-                                Err(())
-                            }
+                            if before == solve_at { Ok(1) } else { Err(()) }
                         })
                         .await;
                     assert!(matches!(result, Ok(1) | Err(())));

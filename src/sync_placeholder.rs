@@ -8,17 +8,18 @@ use std::{
 };
 
 use crate::{
+    Equivalent, Lifecycle, Weighter,
     linked_slab::Token,
     shard::CacheShard,
     shim::{
+        OnceLock,
         rw_lock::{RwLock, RwLockWriteGuard},
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering},
         },
-        thread, OnceLock,
+        thread,
     },
-    Equivalent, Lifecycle, Weighter,
 };
 
 pub type SharedPlaceholder<Val> = Arc<Placeholder<Val>>;
@@ -204,14 +205,8 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
     }
 }
 
-impl<
-        'a,
-        Key: Eq + Hash,
-        Val: Clone,
-        We: Weighter<Key, Val>,
-        B: BuildHasher,
-        L: Lifecycle<Key, Val>,
-    > PlaceholderGuard<'a, Key, Val, We, B, L>
+impl<'a, Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<Key, Val>>
+    PlaceholderGuard<'a, Key, Val, We, B, L>
 {
     pub fn join<Q>(
         lifecycle: &'a L,
@@ -314,13 +309,8 @@ impl<
     }
 }
 
-impl<
-        Key: Eq + Hash,
-        Val: Clone,
-        We: Weighter<Key, Val>,
-        B: BuildHasher,
-        L: Lifecycle<Key, Val>,
-    > PlaceholderGuard<'_, Key, Val, We, B, L>
+impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<Key, Val>>
+    PlaceholderGuard<'_, Key, Val, We, B, L>
 {
     /// Inserts the value into the placeholder
     ///
@@ -490,14 +480,14 @@ impl<Q: ?Sized, Key, Val, We, B, L> Drop for JoinFuture<'_, '_, Q, Key, Val, We,
 }
 
 impl<
-        'a,
-        Key: Eq + Hash,
-        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
-        Val: Clone,
-        We: Weighter<Key, Val>,
-        B: BuildHasher,
-        L: Lifecycle<Key, Val>,
-    > Future for JoinFuture<'a, '_, Q, Key, Val, We, B, L>
+    'a,
+    Key: Eq + Hash,
+    Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    Val: Clone,
+    We: Weighter<Key, Val>,
+    B: BuildHasher,
+    L: Lifecycle<Key, Val>,
+> Future for JoinFuture<'a, '_, Q, Key, Val, We, B, L>
 {
     type Output = Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>;
 
