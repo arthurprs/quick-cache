@@ -64,6 +64,15 @@
 //! By default the crate uses [parking_lot](https://crates.io/crates/parking_lot), which is enabled (by default) via
 //! a crate feature with the same name. If the `parking_lot` feature is disabled the crate defaults to the std lib
 //! implementation instead.
+//!
+//! # Cargo Features
+//!
+//! | Feature | Default | Description |
+//! |---------|---------|-------------|
+//! | `ahash` | ✓ | Use [ahash](https://crates.io/crates/ahash) as the default hasher. When disabled, falls back to std lib's `RandomState` (currently SipHash-1-3). |
+//! | `parking_lot` | ✓ | Use [parking_lot](https://crates.io/crates/parking_lot) for synchronization primitives. When disabled, falls back to std lib's `RwLock`. |
+//! | `shuttle` | | Enable [shuttle](https://crates.io/crates/shuttle) testing support for concurrency testing. |
+//! | `stats` | | Enable cache statistics tracking via the `hits()` and `misses()` methods. |
 #![allow(clippy::type_complexity)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
