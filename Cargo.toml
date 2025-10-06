@@ -1,7 +1,7 @@
 [package]
 name = "quick_cache"
 version = "0.6.16"
-edition = "2024"
+edition = "2021"
 description = "Lightweight and high performance concurrent cache"
 repository = "https://github.com/arthurprs/quick-cache"
 authors = ["Arthur Silva <arthurprs@gmail.com>"]
@@ -10,7 +10,7 @@ keywords = ["lru", "concurrent", "cache", "s3-fifo", "clock"]
 categories = ["caching", "concurrency", "data-structures"]
 readme = "README.md"
 exclude = ["fuzz"]
-rust-version = "1.85"
+rust-version = "1.71"
 
 [features]
 default = ["ahash", "parking_lot"]

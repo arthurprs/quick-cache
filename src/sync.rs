@@ -6,12 +6,12 @@ use std::{
 };
 
 use crate::{
-    DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
     linked_slab::Token,
     options::{Options, OptionsBuilder},
     shard::{CacheShard, InsertStrategy},
     shim::rw_lock::RwLock,
     sync_placeholder::SharedPlaceholder,
+    DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
 };
 
 pub use crate::sync_placeholder::{GuardResult, JoinFuture, PlaceholderGuard};
@@ -73,12 +73,12 @@ impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone> Cache<Key, Val,
 }
 
 impl<
-    Key: Eq + Hash,
-    Val: Clone,
-    We: Weighter<Key, Val> + Clone,
-    B: BuildHasher + Clone,
-    L: Lifecycle<Key, Val> + Clone,
-> Cache<Key, Val, We, B, L>
+        Key: Eq + Hash,
+        Val: Clone,
+        We: Weighter<Key, Val> + Clone,
+        B: BuildHasher + Clone,
+        L: Lifecycle<Key, Val> + Clone,
+    > Cache<Key, Val, We, B, L>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
     /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
@@ -271,7 +271,8 @@ impl<
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         let (shard, hash) = self.shard_for(key).unwrap();
-        shard.write().remove(hash, key)
+        let removed = shard.write().remove(hash, key);
+        removed
     }
 
     /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists.
