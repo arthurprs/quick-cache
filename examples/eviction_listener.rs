@@ -1,4 +1,4 @@
-use quick_cache::{DefaultHashBuilder, Lifecycle, UnitWeighter, sync::Cache};
+use quick_cache::{sync::Cache, DefaultHashBuilder, Lifecycle, UnitWeighter};
 use std::{sync::mpsc, thread};
 
 #[derive(Debug, Clone)]

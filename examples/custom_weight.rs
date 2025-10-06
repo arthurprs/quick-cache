@@ -1,4 +1,4 @@
-use quick_cache::{Weighter, sync::Cache};
+use quick_cache::{sync::Cache, Weighter};
 
 #[derive(Clone)]
 struct StringWeighter;

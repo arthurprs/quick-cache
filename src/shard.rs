@@ -7,9 +7,9 @@ use std::{
 use hashbrown::HashTable;
 
 use crate::{
-    Equivalent, Lifecycle, MemoryUsed, Weighter,
     linked_slab::{LinkedSlab, Token},
     shim::sync::atomic::{self, AtomicU16},
+    Equivalent, Lifecycle, MemoryUsed, Weighter,
 };
 
 #[cfg(feature = "stats")]
@@ -281,13 +281,13 @@ impl<Key, Val, We, B, L, Plh> CacheShard<Key, Val, We, B, L, Plh> {
 }
 
 impl<
-    Key: Eq + Hash,
-    Val,
-    We: Weighter<Key, Val>,
-    B: BuildHasher,
-    L: Lifecycle<Key, Val>,
-    Plh: SharedPlaceholder,
-> CacheShard<Key, Val, We, B, L, Plh>
+        Key: Eq + Hash,
+        Val,
+        We: Weighter<Key, Val>,
+        B: BuildHasher,
+        L: Lifecycle<Key, Val>,
+        Plh: SharedPlaceholder,
+    > CacheShard<Key, Val, We, B, L, Plh>
 {
     pub fn new(
         hot_allocation: f64,

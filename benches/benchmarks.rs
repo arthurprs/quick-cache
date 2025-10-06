@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use quick_cache::sync::Cache;
 use rand::prelude::*;
 use rand_distr::Zipf;

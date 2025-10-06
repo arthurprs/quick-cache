@@ -1,4 +1,4 @@
-use quick_cache::{Equivalent, sync::Cache};
+use quick_cache::{sync::Cache, Equivalent};
 
 #[derive(Debug, Hash)]
 pub struct Pair<A, B>(pub A, pub B);
