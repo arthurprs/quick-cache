@@ -65,7 +65,7 @@
 //! a crate feature with the same name. If the `parking_lot` feature is disabled the crate defaults to the std lib
 //! implementation instead.
 #![allow(clippy::type_complexity)]
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(not(fuzzing))]
 mod linked_slab;
