@@ -38,7 +38,7 @@ fn main() {
             println!("{:?}", memory_data);
             memory_datas.push(memory_data);
         }
-        let key: Key = (n as u128).to_le_bytes();
+        let key: Key = (n as u128).to_le_bytes().into();
         cache.insert(key, ());
     }
 
@@ -62,9 +62,8 @@ fn main() {
     let mut chart = ChartBuilder::on(&root)
         .caption(
             format!(
-                "Memory Used ({}(cap={}))",
-                type_name_of_val(&cache),
-                cache_capacity
+                "Memory Used ({})",
+                format!("{}(cap={})", type_name_of_val(&cache), cache_capacity)
             ),
             ("sans-serif", 60),
         )
@@ -105,8 +104,8 @@ fn main() {
 
     chart
         .configure_series_labels()
-        .background_style(WHITE.mix(0.8))
-        .border_style(BLACK)
+        .background_style(&WHITE.mix(0.8))
+        .border_style(&BLACK)
         .label_font(("sans-serif", 20))
         .legend_area_size(60)
         .draw()

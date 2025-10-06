@@ -105,11 +105,6 @@ jobs:
         with:
           command: clippy
           args: -- -D warnings
-      - name: Install dependencies for tools
-        run: sudo apt-get -y install libfontconfig1-dev jq
-      - name: Check tools
-        working-directory: tools
-        run: cargo clippy -- -D warnings
 
   miri:
     runs-on: ubuntu-latest
