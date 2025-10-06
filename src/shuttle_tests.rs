@@ -1,6 +1,6 @@
 use crate::{
     shim::{
-        sync::{self, atomic, Arc},
+        sync::{self, Arc, atomic},
         thread,
     },
     sync::GuardResult,

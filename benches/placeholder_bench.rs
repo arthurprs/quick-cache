@@ -1,7 +1,7 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use quick_cache::sync::{Cache, GuardResult};
-use std::sync::atomic::{self, AtomicUsize};
 use std::sync::Barrier;
+use std::sync::atomic::{self, AtomicUsize};
 use std::thread;
 
 fn placeholder_contention_bench(c: &mut Criterion) {
