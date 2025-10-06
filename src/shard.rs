@@ -9,7 +9,7 @@ use hashbrown::HashTable;
 use crate::{
     linked_slab::{LinkedSlab, Token},
     shim::sync::atomic::{self, AtomicU16},
-    Equivalent, Lifecycle, Weighter,
+    Equivalent, Lifecycle, MemoryUsed, Weighter,
 };
 
 #[cfg(feature = "stats")]
@@ -211,6 +211,13 @@ impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, 
 }
 
 impl<Key, Val, We, B, L, Plh> CacheShard<Key, Val, We, B, L, Plh> {
+    pub fn memory_used(&self) -> MemoryUsed {
+        MemoryUsed {
+            entries: self.entries.memory_used(),
+            map: self.map.allocation_size(),
+        }
+    }
+
     pub fn weight(&self) -> u64 {
         self.weight_hot + self.weight_cold
     }

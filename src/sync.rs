@@ -11,7 +11,7 @@ use crate::{
     shard::{CacheShard, InsertStrategy},
     shim::rw_lock::RwLock,
     sync_placeholder::SharedPlaceholder,
-    DefaultHashBuilder, Equivalent, Lifecycle, UnitWeighter, Weighter,
+    DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
 };
 
 pub use crate::sync_placeholder::{GuardResult, JoinFuture, PlaceholderGuard};
@@ -475,6 +475,20 @@ impl<
                 Ok(v)
             }
         }
+    }
+
+    /// Get total memory used by cache data structures
+    ///
+    /// It should be noted that if cache key or value is some type like `Vec<T>`,
+    /// the memory allocated in the heap will not be counted.
+    pub fn memory_used(&self) -> MemoryUsed {
+        let mut total = MemoryUsed { entries: 0, map: 0 };
+        self.shards.iter().for_each(|shard| {
+            let shard_memory = shard.read().memory_used();
+            total.entries += shard_memory.entries;
+            total.map += shard_memory.map;
+        });
+        total
     }
 }
 
