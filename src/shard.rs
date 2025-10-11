@@ -816,7 +816,7 @@ impl<
                 enter_state = ResidentState::Hot;
             }
             Entry::Placeholder(ph) => {
-                referenced = 1; // Pretend it's a newly insereted Resident
+                referenced = 1; // Pretend it's a newly inserted Resident
                 enter_state = ph.hot;
             }
         }
@@ -933,12 +933,14 @@ impl<
         if weight > self.weight_target_hot && !self.lifecycle.is_pinned(&key, &value) {
             self.lifecycle.before_evict(lcs, &key, &mut value);
             weight = self.weighter.weight(&key, &value);
+            // check again, it could have changed weight
             if weight > self.weight_target_hot {
                 return self.handle_overweight_replace_placeholder(lcs, placeholder, key, value);
             }
         }
 
-        if self.weight_hot + self.weight_cold + weight <= self.weight_capacity {
+        // cache is filling up, admit as hot if possible
+        if self.weight_hot + weight <= self.weight_target_hot {
             placeholder_hot = ResidentState::Hot;
         }
         *entry = Entry::Resident(Resident {
@@ -995,6 +997,7 @@ impl<
         if weight > self.weight_target_hot && !self.lifecycle.is_pinned(&key, &value) {
             self.lifecycle.before_evict(lcs, &key, &mut value);
             weight = self.weighter.weight(&key, &value);
+            // check again, it could have changed weight
             if weight > self.weight_target_hot {
                 return self.handle_insert_overweight(lcs, hash, key, value, strategy);
             }
