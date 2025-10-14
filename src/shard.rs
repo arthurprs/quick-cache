@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     hash::{BuildHasher, Hash},
     hint::unreachable_unchecked,
     mem::{self, MaybeUninit},
@@ -9,7 +10,7 @@ use hashbrown::HashTable;
 use crate::{
     linked_slab::{LinkedSlab, Token},
     shim::sync::atomic::{self, AtomicU16},
-    Equivalent, Lifecycle, MemoryUsed, Weighter,
+    DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, Weighter,
 };
 
 #[cfg(feature = "stats")]
@@ -724,7 +725,7 @@ impl<
     /// Advance hot ring evicting entries.
     #[must_use]
     fn advance_hot(&mut self, lcs: &mut L::RequestState) -> bool {
-        let mut unpinned = 0usize;
+        let mut unpinned: HashSet<_, DefaultHashBuilder> = HashSet::default();
         let Some(mut idx) = self.hot_head else {
             return false;
         };
@@ -738,13 +739,14 @@ impl<
                 *resident.referenced.get_mut() = (*resident.referenced.get_mut())
                     .min(MAX_F)
                     .saturating_sub(1);
-                if unpinned == 0 && Some(next) == self.hot_head {
+                unpinned.remove(&idx);
+                if unpinned.is_empty() && Some(next) == self.hot_head {
                     return false;
                 }
                 idx = next;
                 continue;
             }
-            unpinned += 1;
+            unpinned.insert(idx);
             if *resident.referenced.get_mut() != 0 {
                 *resident.referenced.get_mut() = (*resident.referenced.get_mut()).min(MAX_F) - 1;
                 idx = next;
