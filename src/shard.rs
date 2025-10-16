@@ -604,6 +604,19 @@ impl<
         self.remove_internal(hash, idx)
     }
 
+    pub fn remove_if<Q, F>(&mut self, hash: u64, key: &Q, f: F) -> Option<(Key, Val)>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+        F: FnOnce(&Val) -> bool,
+    {
+        let (idx, resident) = self.search_resident(hash, key)?;
+        if f(&resident.value) {
+            self.remove_internal(hash, idx)
+        } else {
+            None
+        }
+    }
+
     pub fn remove_token(&mut self, token: Token) -> Option<(Key, Val)> {
         let Some((Entry::Resident(resident), _)) = self.entries.get(token) else {
             return None;

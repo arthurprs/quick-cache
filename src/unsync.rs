@@ -194,6 +194,18 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.remove(self.shard.hash(key), key)
     }
 
+    /// Remove an item from the cache whose key is `key` if `f(&value)` returns `true` for that entry.
+    /// Compared to peek and remove, this method is more efficient as it requires only 1 lookup.
+    ///
+    /// Returns the removed entry, if any.
+    pub fn remove_if<Q, F>(&mut self, key: &Q, f: F) -> Option<(Key, Val)>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+        F: FnOnce(&Val) -> bool,
+    {
+        self.shard.remove_if(self.shard.hash(key), key, f)
+    }
+
     /// Replaces an item in the cache, but only if it already exists.
     /// If `soft` is set, the replace operation won't affect the "hotness" of the key,
     /// even if the value is replaced.
@@ -633,6 +645,32 @@ mod tests {
         for i in 100..150 {
             cache.insert(i, i);
         }
+        cache.validate(false);
+    }
+
+    #[test]
+    fn test_remove_if() {
+        let mut cache = Cache::new(100);
+
+        // Insert test data
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(3, 30);
+
+        // Test removing with predicate that returns true
+        let removed = cache.remove_if(&2, |v| *v == 20);
+        assert_eq!(removed, Some((2, 20)));
+        assert_eq!(cache.get(&2), None);
+
+        // Test removing with predicate that returns false
+        let not_removed = cache.remove_if(&3, |v| *v == 999);
+        assert_eq!(not_removed, None);
+        assert_eq!(cache.get(&3), Some(&30));
+
+        // Test removing non-existent key
+        let not_found = cache.remove_if(&999, |_| true);
+        assert_eq!(not_found, None);
+
         cache.validate(false);
     }
 }

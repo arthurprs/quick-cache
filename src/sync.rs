@@ -274,6 +274,19 @@ impl<
         shard.write().remove(hash, key)
     }
 
+    /// Remove an item from the cache whose key is `key` if `f(&value)` returns `true` for that entry.
+    /// Compared to peek and remove, this method guarantees that no new value was inserted in-between.
+    ///
+    /// Returns the removed entry, if any.
+    pub fn remove_if<Q, F>(&self, key: &Q, f: F) -> Option<(Key, Val)>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+        F: FnOnce(&Val) -> bool,
+    {
+        let (shard, hash) = self.shard_for(key).unwrap();
+        shard.write().remove_if(hash, key, f)
+    }
+
     /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists.
     /// If `soft` is set, the replace operation won't affect the "hotness" of the entry,
     /// even if the value is replaced.
@@ -755,5 +768,29 @@ mod tests {
         }
         assert!(cache.len() <= 180);
         assert!(cache.weight() <= 200);
+    }
+
+    #[test]
+    fn test_remove_if() {
+        let cache = Cache::new(100);
+
+        // Insert test data
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(3, 30);
+
+        // Test removing with predicate that returns true
+        let removed = cache.remove_if(&2, |v| *v == 20);
+        assert_eq!(removed, Some((2, 20)));
+        assert_eq!(cache.get(&2), None);
+
+        // Test removing with predicate that returns false
+        let not_removed = cache.remove_if(&3, |v| *v == 999);
+        assert_eq!(not_removed, None);
+        assert_eq!(cache.get(&3), Some(30));
+
+        // Test removing non-existent key
+        let not_found = cache.remove_if(&999, |_| true);
+        assert_eq!(not_found, None);
     }
 }
