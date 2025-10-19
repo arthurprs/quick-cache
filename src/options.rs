@@ -55,9 +55,9 @@ impl OptionsBuilder {
         Self::default()
     }
 
-    /// Set the number of internal shards. Each shard has independent synchronization
+    /// Set the number of internal shards for the sync cache. Each shard has independent synchronization
     /// and capacity. This means that the Cache can be used from multiple threads
-    /// with little contetion but the capacity of each shard is a portion of the total.
+    /// with little contention but the capacity of each shard is a portion of the total.
     ///
     /// Defaults to: `number of detected cores * 4`
     ///
