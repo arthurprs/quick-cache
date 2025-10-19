@@ -1078,10 +1078,16 @@ impl<
         Ok(())
     }
 
+    /// Upserts a placeholder, optionally validating existing resident values
+    ///
+    /// Returns:
+    /// - `Ok((token, value))` if a valid resident was found
+    /// - `Err((placeholder, is_new))` where `is_new` indicates if this is a newly created placeholder
     pub fn upsert_placeholder<Q>(
         &mut self,
         hash: u64,
         key: &Q,
+        validator: &mut impl FnMut(&Val) -> bool,
     ) -> Result<(Token, &Val), (Plh, bool)>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
@@ -1091,6 +1097,40 @@ impl<
             let (entry, _) = self.entries.get_mut(idx).unwrap();
             match entry {
                 Entry::Resident(resident) => {
+                    if !validator(&resident.value) {
+                        let old_state = resident.state;
+                        let old_key = &resident.key;
+                        let old_value = &resident.value;
+                        let weight = self.weighter.weight(old_key, old_value);
+
+                        let shared = Plh::new(hash, idx);
+                        *entry = Entry::Placeholder(Placeholder {
+                            key: key.to_owned(),
+                            hot: old_state,
+                            shared: shared.clone(),
+                        });
+
+                        match old_state {
+                            ResidentState::Hot => {
+                                self.num_hot -= 1;
+                                self.weight_hot -= weight;
+                                if weight != 0 {
+                                    self.hot_head = self.entries.unlink(idx);
+                                }
+                            }
+                            ResidentState::Cold => {
+                                self.num_cold -= 1;
+                                self.weight_cold -= weight;
+                                if weight != 0 {
+                                    self.cold_head = self.entries.unlink(idx);
+                                }
+                            }
+                        }
+
+                        record_miss_mut!(self);
+                        return Err((shared, false)); // false = replaced existing
+                    }
+
                     if *resident.referenced.get_mut() < MAX_F {
                         *resident.referenced.get_mut() += 1;
                     }
