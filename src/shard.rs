@@ -751,8 +751,13 @@ impl<
                 *resident.referenced.get_mut() = (*resident.referenced.get_mut())
                     .min(MAX_F)
                     .saturating_sub(1);
-                if unpinned == 0 && Some(next) == self.hot_head {
-                    return false;
+                if Some(next) == self.hot_head {
+                    if unpinned == 0 {
+                        // All entries are pinned
+                        return false;
+                    }
+                    // Restart unpinned count
+                    unpinned = 0;
                 }
                 idx = next;
                 continue;

@@ -33,6 +33,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_unsync_cache_pinstate"
+path = "fuzz_targets/fuzz_unsync_cache_pinstate.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_linked_slab"
 path = "fuzz_targets/fuzz_linked_slab.rs"
 test = false
