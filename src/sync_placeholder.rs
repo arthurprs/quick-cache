@@ -558,6 +558,20 @@ impl<
                 let new_waker = cx.waker();
                 if !waker.will_wake(new_waker) {
                     let mut state = shared.state.write();
+                    // Re-check notified after acquiring the lock. A concurrent
+                    // insert may have drained the waiters list between the
+                    // notified check in the match guard above and this point.
+                    if this.notified.load(Ordering::Acquire) {
+                        drop(state);
+                        let JoinFutureState::Pending { shared, .. } =
+                            mem::replace(&mut this.state, JoinFutureState::Done)
+                        else {
+                            unsafe { unreachable_unchecked() }
+                        };
+                        return Poll::Ready(PlaceholderGuard::handle_notification(
+                            lifecycle, shard, shared,
+                        ));
+                    }
                     if let Some(w) = state
                         .waiters
                         .iter_mut()
