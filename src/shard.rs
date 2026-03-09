@@ -8,6 +8,7 @@ use hashbrown::HashTable;
 
 use crate::{
     linked_slab::{LinkedSlab, Token},
+    options::DEFAULT_HOT_ALLOCATION,
     shim::sync::atomic::{self, AtomicU16},
     Equivalent, Lifecycle, MemoryUsed, Weighter,
 };
@@ -1139,15 +1140,23 @@ impl<
     }
 
     pub fn set_capacity(&mut self, new_weight_capacity: u64) {
-        // Calculate the ratio to proportionally adjust ghost capacity
-        let old_new_ratio = new_weight_capacity as f64 / self.weight_capacity as f64;
-        let hot_ratio = self.weight_target_hot as f64 / self.weight_capacity as f64;
+        // Guard against division by zero when old capacity is 0 (produces inf/NaN ratios)
+        if self.weight_capacity == 0 {
+            self.weight_capacity = new_weight_capacity;
+            self.weight_target_hot =
+                ((new_weight_capacity as f64 * DEFAULT_HOT_ALLOCATION) as u64)
+                    .clamp(new_weight_capacity.min(1), new_weight_capacity);
+            // capacity_non_resident stays 0 since we have no basis to estimate
+        } else {
+            let old_new_ratio = new_weight_capacity as f64 / self.weight_capacity as f64;
+            let hot_ratio = self.weight_target_hot as f64 / self.weight_capacity as f64;
 
-        // Update capacities
-        self.weight_capacity = new_weight_capacity;
-        self.weight_target_hot = ((new_weight_capacity as f64 * hot_ratio) as u64)
-            .clamp(new_weight_capacity.min(1), new_weight_capacity);
-        self.capacity_non_resident = (self.capacity_non_resident as f64 * old_new_ratio) as usize;
+            self.weight_capacity = new_weight_capacity;
+            self.weight_target_hot = ((new_weight_capacity as f64 * hot_ratio) as u64)
+                .clamp(new_weight_capacity.min(1), new_weight_capacity);
+            self.capacity_non_resident =
+                (self.capacity_non_resident as f64 * old_new_ratio) as usize;
+        }
 
         // Evict items if we're over the new capacity
         let mut lcs = self.lifecycle.begin_request();
