@@ -298,7 +298,10 @@ impl<
         hash_builder: B,
         lifecycle: L,
     ) -> Self {
-        let weight_target_hot = (weight_capacity as f64 * hot_allocation) as u64;
+        // Clamp to at least 1 when weight_capacity > 0, since the f64 multiplication
+        // can truncate to 0 for small capacities, which would reject all inserts as overweight.
+        let weight_target_hot = ((weight_capacity as f64 * hot_allocation) as u64)
+            .clamp(weight_capacity.min(1), weight_capacity);
         let capacity_non_resident = (estimated_items_capacity as f64 * ghost_allocation) as usize;
         Self {
             hash_builder,
@@ -1142,7 +1145,8 @@ impl<
 
         // Update capacities
         self.weight_capacity = new_weight_capacity;
-        self.weight_target_hot = (new_weight_capacity as f64 * hot_ratio) as u64;
+        self.weight_target_hot = ((new_weight_capacity as f64 * hot_ratio) as u64)
+            .clamp(new_weight_capacity.min(1), new_weight_capacity);
         self.capacity_non_resident = (self.capacity_non_resident as f64 * old_new_ratio) as usize;
 
         // Evict items if we're over the new capacity
