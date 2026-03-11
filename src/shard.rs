@@ -1143,9 +1143,8 @@ impl<
         // Guard against division by zero when old capacity is 0 (produces inf/NaN ratios)
         if self.weight_capacity == 0 {
             self.weight_capacity = new_weight_capacity;
-            self.weight_target_hot =
-                ((new_weight_capacity as f64 * DEFAULT_HOT_ALLOCATION) as u64)
-                    .clamp(new_weight_capacity.min(1), new_weight_capacity);
+            self.weight_target_hot = ((new_weight_capacity as f64 * DEFAULT_HOT_ALLOCATION) as u64)
+                .clamp(new_weight_capacity.min(1), new_weight_capacity);
             // capacity_non_resident stays 0 since we have no basis to estimate
         } else {
             let old_new_ratio = new_weight_capacity as f64 / self.weight_capacity as f64;
