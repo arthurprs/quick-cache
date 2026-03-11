@@ -543,50 +543,48 @@ impl<
                     }
                 }
             }
-            JoinFutureState::Pending { .. } if this.notified.load(Ordering::Acquire) => {
-                let JoinFutureState::Pending { shared, .. } =
-                    mem::replace(&mut this.state, JoinFutureState::Done)
-                else {
-                    unsafe { unreachable_unchecked() }
-                };
-                Poll::Ready(PlaceholderGuard::handle_notification(
-                    lifecycle, shard, shared,
-                ))
-            }
             JoinFutureState::Pending { waker, shared } => {
-                // Update waker in case it changed
-                let new_waker = cx.waker();
-                if !waker.will_wake(new_waker) {
-                    let mut state = shared.state.write();
-                    // Re-check notified after acquiring the lock. A concurrent
-                    // insert may have drained the waiters list between the
-                    // notified check in the match guard above and this point.
+                let notified = 'notified: {
                     if this.notified.load(Ordering::Acquire) {
-                        drop(state);
-                        let JoinFutureState::Pending { shared, .. } =
-                            mem::replace(&mut this.state, JoinFutureState::Done)
-                        else {
-                            unsafe { unreachable_unchecked() }
-                        };
-                        return Poll::Ready(PlaceholderGuard::handle_notification(
-                            lifecycle, shard, shared,
-                        ));
+                        break 'notified true;
                     }
-                    if let Some(w) = state
-                        .waiters
-                        .iter_mut()
-                        .find(|w| w.is_waiter(&this.notified as _))
-                    {
+                    // Update waker in case it changed
+                    let new_waker = cx.waker();
+                    if !waker.will_wake(new_waker) {
+                        let mut state = shared.state.write();
+                        // Re-check notified after acquiring the lock. A concurrent
+                        // insert may have drained the waiters list between the
+                        // notified check above and this point.
+                        if this.notified.load(Ordering::Acquire) {
+                            break 'notified true;
+                        }
+                        let w = unsafe {
+                            state
+                                .waiters
+                                .iter_mut()
+                                .find(|w| w.is_waiter(&this.notified as _))
+                                .unwrap_unchecked()
+                        };
                         *waker = new_waker.clone();
                         *w = Waiter::Task {
                             waker: new_waker.clone(),
                             notified: &this.notified as *const AtomicBool,
                         };
-                    } else {
-                        unsafe { unreachable_unchecked() };
                     }
+                    false
+                };
+                if notified {
+                    let JoinFutureState::Pending { shared, .. } =
+                        mem::replace(&mut this.state, JoinFutureState::Done)
+                    else {
+                        unsafe { unreachable_unchecked() }
+                    };
+                    Poll::Ready(PlaceholderGuard::handle_notification(
+                        lifecycle, shard, shared,
+                    ))
+                } else {
+                    Poll::Pending
                 }
-                Poll::Pending
             }
             JoinFutureState::Done => panic!("Polled after ready"),
         }
