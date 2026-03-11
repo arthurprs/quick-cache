@@ -248,6 +248,31 @@ mod tests {
     }
 
     #[test]
+    fn test_capacity_one() {
+        // Sync cache with capacity 1 should be able to hold one item
+        let cache = sync::Cache::<u64, u64>::new(1);
+        cache.insert(1, 10);
+        assert_eq!(cache.get(&1), Some(10));
+        // Inserting a second key should evict the first
+        cache.insert(2, 20);
+        assert_eq!(cache.get(&2), Some(20));
+        assert_eq!(cache.get(&1), None);
+
+        // Unsync cache with capacity 1 should also work
+        let mut cache = unsync::Cache::<u64, u64>::new(1);
+        cache.insert(1, 10);
+        assert_eq!(cache.get(&1), Some(&10));
+        cache.insert(2, 20);
+        assert_eq!(cache.get(&2), Some(&20));
+        assert_eq!(cache.get(&1), None);
+
+        // Capacity 0 should store nothing
+        let cache = sync::Cache::<u64, u64>::new(0);
+        cache.insert(1, 10);
+        assert_eq!(cache.get(&1), None);
+    }
+
+    #[test]
     fn test_custom_cost() {
         let cache = sync::Cache::with_weighter(100, 100_000, StringWeighter);
         cache.insert(1, "1".to_string());
