@@ -10,6 +10,7 @@ use crate::{
     linked_slab::{LinkedSlab, Token},
     options::DEFAULT_HOT_ALLOCATION,
     shim::sync::atomic::{self, AtomicU16},
+    sync_placeholder::OccupiedAction,
     Equivalent, Lifecycle, MemoryUsed, Weighter,
 };
 
@@ -29,6 +30,20 @@ pub trait SharedPlaceholder: Clone {
 pub enum InsertStrategy {
     Insert,
     Replace { soft: bool },
+}
+
+/// Result of an entry-or-placeholder operation at the shard level.
+pub enum EntryOrPlaceholder<Key, Val, Plh, T> {
+    /// Callback returned `Keep(T)` — entry is still in the cache.
+    Kept(T),
+    /// Callback returned `Remove` — entry was removed.
+    Removed(Key, Val),
+    /// Callback returned `Replace` — entry was replaced with a placeholder.
+    Replaced(Plh),
+    /// Found an existing placeholder (another loader is working on this key).
+    ExistingPlaceholder(Plh),
+    /// No entry existed, a new placeholder was created.
+    NewPlaceholder(Plh),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1082,7 +1097,7 @@ impl<
         Ok(())
     }
 
-    pub fn upsert_placeholder<Q>(
+    pub fn get_or_placeholder<Q>(
         &mut self,
         hash: u64,
         key: &Q,
@@ -1090,28 +1105,127 @@ impl<
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
-        let shared;
-        if let Some(idx) = self.search(hash, key) {
-            let (entry, _) = self.entries.get_mut(idx).unwrap();
-            match entry {
-                Entry::Resident(resident) => {
-                    if *resident.referenced.get_mut() < MAX_F {
-                        *resident.referenced.get_mut() += 1;
-                    }
-                    record_hit_mut!(self);
-                    unsafe {
-                        // Rustc gets insanely confused returning references from mut borrows
-                        // Safety: value will have the same lifetime as `resident`
-                        let value_ptr: *const Val = &resident.value;
-                        return Ok((idx, &*value_ptr));
-                    }
+        let idx = self.search(hash, key);
+        if let Some(idx) = idx {
+            if let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) {
+                if *resident.referenced.get_mut() < MAX_F {
+                    *resident.referenced.get_mut() += 1;
                 }
+                record_hit_mut!(self);
+                unsafe {
+                    // Rustc gets insanely confused returning references from mut borrows
+                    // Safety: value will have the same lifetime as `resident`
+                    let value_ptr: *const Val = &resident.value;
+                    return Ok((idx, &*value_ptr));
+                }
+            }
+        }
+        let (shared, is_new) = unsafe { self.non_resident_to_placeholder(hash, key, idx) };
+        Err((shared, is_new))
+    }
+
+    /// Entry operation on an existing or missing key.
+    ///
+    /// If a `Resident` entry exists, calls `on_occupied` with `&mut Val` to decide what to do.
+    /// On `Keep`, weight is recalculated after the callback returns.
+    /// Otherwise, creates a placeholder or joins an existing one.
+    ///
+    /// `on_occupied` is taken by mutable reference so the caller retains ownership.
+    /// It is called at most once per invocation.
+    pub fn entry_or_placeholder<Q, T, F>(
+        &mut self,
+        hash: u64,
+        key: &Q,
+        on_occupied: &mut F,
+    ) -> EntryOrPlaceholder<Key, Val, Plh, T>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+        F: FnMut(&Key, &mut Val) -> OccupiedAction<T>,
+    {
+        let idx = self.search(hash, key);
+        if let Some(idx) = idx {
+            if let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) {
+                let old_weight = self.weighter.weight(&resident.key, &resident.value);
+                let action = on_occupied(&resident.key, &mut resident.value);
+                return match action {
+                    OccupiedAction::Keep(t) => {
+                        if *resident.referenced.get_mut() < MAX_F {
+                            *resident.referenced.get_mut() += 1;
+                        }
+                        // Recalculate weight as the callback may have mutated the value
+                        let new_weight = self.weighter.weight(&resident.key, &resident.value);
+                        if old_weight != new_weight {
+                            self.cold_change_weight(idx, old_weight, new_weight);
+                        }
+                        record_hit_mut!(self);
+                        EntryOrPlaceholder::Kept(t)
+                    }
+                    OccupiedAction::Remove => {
+                        record_hit_mut!(self);
+                        let (key, val) = self.remove_internal(hash, idx).unwrap();
+                        EntryOrPlaceholder::Removed(key, val)
+                    }
+                    OccupiedAction::Replace => {
+                        record_hit_mut!(self);
+                        let state = resident.state;
+                        let list_head = if state == ResidentState::Hot {
+                            self.num_hot -= 1;
+                            self.weight_hot -= old_weight;
+                            &mut self.hot_head
+                        } else {
+                            self.num_cold -= 1;
+                            self.weight_cold -= old_weight;
+                            &mut self.cold_head
+                        };
+                        // Unlink from list only if linked (weight != 0)
+                        if old_weight != 0 {
+                            let next = self.entries.unlink(idx);
+                            if *list_head == Some(idx) {
+                                *list_head = next;
+                            }
+                        }
+                        // Create placeholder in the same slot
+                        let shared = Plh::new(hash, idx);
+                        let (entry, _) = self.entries.get_mut(idx).unwrap();
+                        *entry = Entry::Placeholder(Placeholder {
+                            key: key.to_owned(),
+                            hot: state,
+                            shared: shared.clone(),
+                        });
+                        EntryOrPlaceholder::Replaced(shared)
+                    }
+                };
+            }
+        }
+        let (shared, is_new) = unsafe { self.non_resident_to_placeholder(hash, key, idx) };
+        if is_new {
+            EntryOrPlaceholder::NewPlaceholder(shared)
+        } else {
+            EntryOrPlaceholder::ExistingPlaceholder(shared)
+        }
+    }
+
+    /// Creates or joins a placeholder for a non-Resident entry (Placeholder, Ghost, or missing).
+    /// Returns `(shared, true)` for new placeholders, `(shared, false)` for existing ones.
+    /// The entry at `idx` must NOT be Resident.
+    unsafe fn non_resident_to_placeholder<Q>(
+        &mut self,
+        hash: u64,
+        key: &Q,
+        idx: Option<Token>,
+    ) -> (Plh, bool)
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
+        if let Some(idx) = idx {
+            let (entry, _) = unsafe { self.entries.get_mut_unchecked(idx) };
+            match entry {
                 Entry::Placeholder(p) => {
                     record_hit_mut!(self);
-                    return Err((p.shared.clone(), false));
+                    (p.shared.clone(), false)
                 }
                 Entry::Ghost(_) => {
-                    shared = Plh::new(hash, idx);
+                    let shared = Plh::new(hash, idx);
                     *entry = Entry::Placeholder(Placeholder {
                         key: key.to_owned(),
                         hot: ResidentState::Hot,
@@ -1122,11 +1236,14 @@ impl<
                     if self.ghost_head == Some(idx) {
                         self.ghost_head = next;
                     }
+                    record_miss_mut!(self);
+                    (shared, true)
                 }
+                Entry::Resident(_) => unsafe { unreachable_unchecked() },
             }
         } else {
             let idx = self.entries.next_free();
-            shared = Plh::new(hash, idx);
+            let shared = Plh::new(hash, idx);
             let idx_ = self.entries.insert(Entry::Placeholder(Placeholder {
                 key: key.to_owned(),
                 hot: ResidentState::Cold,
@@ -1134,9 +1251,9 @@ impl<
             }));
             debug_assert_eq!(idx, idx_);
             self.map_insert(hash, idx);
+            record_miss_mut!(self);
+            (shared, true)
         }
-        record_miss_mut!(self);
-        Err((shared, true))
     }
 
     pub fn set_capacity(&mut self, new_weight_capacity: u64) {

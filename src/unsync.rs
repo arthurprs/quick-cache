@@ -261,7 +261,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
-        let idx = match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+        let idx = match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((idx, _)) => idx,
             Err((plh, _)) => {
                 let v = with()?;
@@ -287,7 +287,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
-        let idx = match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+        let idx = match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((idx, _)) => idx,
             Err((plh, _)) => {
                 let v = with()?;
@@ -309,7 +309,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         // TODO: this could be using a simpler entry API
-        match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+        match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((_, v)) => unsafe {
                 // Rustc gets insanely confused about returning from mut borrows
                 // Safety: v has the same lifetime as self
@@ -337,7 +337,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         // TODO: this could be using a simpler entry API
-        match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+        match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((idx, _)) => Ok(self.shard.peek_token_mut(idx).map(RefMut)),
             Err((placeholder, _)) => Err(Guard {
                 cache: self,

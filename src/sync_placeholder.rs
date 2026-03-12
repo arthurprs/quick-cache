@@ -133,6 +133,33 @@ pub enum GuardResult<'a, Key, Val, We, B, L> {
     Timeout,
 }
 
+/// What to do with an existing entry after inspection/mutation.
+///
+/// Used with the [`Cache::entry`] and [`Cache::entry_async`] family of methods.
+pub enum OccupiedAction<T> {
+    /// Keep the entry (possibly after mutation), returning `T`.
+    Keep(T),
+    /// Remove the entry from the cache.
+    Remove,
+    /// Remove the entry and get a guard for re-insertion.
+    /// This is useful for "validate-or-recompute" patterns.
+    Replace,
+}
+
+/// Result of an entry operation.
+///
+/// See [`Cache::entry`] and [`Cache::entry_async`].
+pub enum EntryResult<'a, Key, Val, We, B, L, T> {
+    /// Callback returned `OccupiedAction::Keep(T)`.
+    Value(T),
+    /// Callback returned `OccupiedAction::Remove`.
+    Removed(Key, Val),
+    /// Key was vacant, or callback returned `OccupiedAction::Replace`.
+    Guard(PlaceholderGuard<'a, Key, Val, We, B, L>),
+    /// Timed out waiting for another loader's placeholder.
+    Timeout,
+}
+
 impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
     pub fn start_loading(
         lifecycle: &'a L,
@@ -224,25 +251,37 @@ impl<
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         let mut shard_guard = shard.write();
-        let shared = match shard_guard.upsert_placeholder(hash, key) {
+        let shared = match shard_guard.get_or_placeholder(hash, key) {
             Ok((_, v)) => return GuardResult::Value(v.clone()),
             Err((shared, true)) => {
                 return GuardResult::Guard(Self::start_loading(lifecycle, shard, shared));
             }
             Err((shared, false)) => shared,
         };
+        Self::wait_for_placeholder(lifecycle, shard, shard_guard, shared, &mut timeout)
+    }
 
-        // Create notified flag on stack - this will live for the entire duration of join
+    /// Waits for an existing placeholder to be filled by another thread.
+    ///
+    /// Registers the current thread as a waiter (consuming the shard guard to avoid
+    /// races with placeholder removal), then parks until notified or timeout.
+    /// The `timeout` is updated in place to reflect elapsed time, so callers that
+    /// retry (e.g. `entry`) see the remaining budget.
+    pub(crate) fn wait_for_placeholder(
+        lifecycle: &'a L,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
+        shard_guard: RwLockWriteGuard<'a, CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
+        shared: SharedPlaceholder<Val>,
+        timeout: &mut Option<Duration>,
+    ) -> GuardResult<'a, Key, Val, We, B, L> {
         let notified = pin::pin!(AtomicBool::new(false));
-        // Set if the thread was added to the waiters list
         let mut parked_thread = None;
         let maybe_val = Self::join_waiters(shard_guard, &shared, || {
             if timeout.is_some_and(|t| t.is_zero()) {
                 None
             } else {
                 let thread = thread::current();
-                let id = thread.id();
-                parked_thread = Some(id);
+                parked_thread = Some(thread.id());
                 Some(Waiter::Thread {
                     thread,
                     notified: &*notified as *const AtomicBool,
@@ -253,17 +292,16 @@ impl<
             return GuardResult::Value(v);
         }
 
-        // Track the start time of the timeout, set lazily
         let mut timeout_start = None;
         loop {
-            if let Some(remaining) = timeout {
+            if let Some(remaining) = *timeout {
                 if remaining.is_zero() {
                     return Self::join_timeout(lifecycle, shard, shared, parked_thread, &notified);
                 }
                 let start = *timeout_start.get_or_insert_with(Instant::now);
                 #[cfg(not(fuzzing))]
                 thread::park_timeout(remaining);
-                timeout = Some(remaining.saturating_sub(start.elapsed()));
+                *timeout = Some(remaining.saturating_sub(start.elapsed()));
             } else {
                 thread::park();
             }
@@ -509,7 +547,7 @@ impl<
             JoinFutureState::Created { hash, key } => {
                 debug_assert!(!this.notified.load(Ordering::Acquire));
                 let mut shard_guard = shard.write();
-                match shard_guard.upsert_placeholder(*hash, *key) {
+                match shard_guard.get_or_placeholder(*hash, *key) {
                     Ok((_, v)) => {
                         this.state = JoinFutureState::Done;
                         Poll::Ready(Ok(v.clone()))
