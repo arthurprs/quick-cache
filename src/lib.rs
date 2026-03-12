@@ -125,18 +125,18 @@ pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 pub trait Weighter<Key, Val> {
     /// Returns the weight of the cache item.
     ///
-    /// For performance reasons this function should be trivially cheap as
+    /// For performance reasons, this function should be trivially cheap as
     /// it's called during the cache eviction routine.
     /// If weight is expensive to calculate, consider caching it alongside the value.
     ///
     /// Zero (0) weight items are allowed and will be ignored when looking for eviction
     /// candidates. Such items can only be manually removed or overwritten.
     ///
-    /// Note that this it's undefined behavior for a cache item to change its weight.
+    /// Note that it's undefined behavior for a cache item to change its weight.
     /// The only exception to this is when Lifecycle::before_evict is called.
     ///
-    /// It's also undefined behavior in release mode if summing of weights overflow,
-    /// although this is unlikely to be a problem in pratice.
+    /// It's also undefined behavior in release mode if the summing of weights overflows,
+    /// although this is unlikely to be a problem in practice.
     fn weight(&self, key: &Key, val: &Val) -> u64;
 }
 
