@@ -544,9 +544,9 @@ impl<
                 }
             }
             JoinFutureState::Pending { waker, shared } => {
-                let notified = 'notified: {
+                'notified: {
                     if this.notified.load(Ordering::Acquire) {
-                        break 'notified true;
+                        break 'notified;
                     }
                     // Update waker in case it changed
                     let new_waker = cx.waker();
@@ -556,7 +556,7 @@ impl<
                         // insert may have drained the waiters list between the
                         // notified check above and this point.
                         if this.notified.load(Ordering::Acquire) {
-                            break 'notified true;
+                            break 'notified;
                         }
                         let w = unsafe {
                             state
@@ -571,20 +571,16 @@ impl<
                             notified: &this.notified as *const AtomicBool,
                         };
                     }
-                    false
+                    return Poll::Pending;
                 };
-                if notified {
-                    let JoinFutureState::Pending { shared, .. } =
-                        mem::replace(&mut this.state, JoinFutureState::Done)
-                    else {
-                        unsafe { unreachable_unchecked() }
-                    };
-                    Poll::Ready(PlaceholderGuard::handle_notification(
-                        lifecycle, shard, shared,
-                    ))
-                } else {
-                    Poll::Pending
-                }
+                let JoinFutureState::Pending { shared, .. } =
+                    mem::replace(&mut this.state, JoinFutureState::Done)
+                else {
+                    unsafe { unreachable_unchecked() }
+                };
+                Poll::Ready(PlaceholderGuard::handle_notification(
+                    lifecycle, shard, shared,
+                ))
             }
             JoinFutureState::Done => panic!("Polled after ready"),
         }

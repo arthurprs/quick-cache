@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::task::Poll;
+
 use crate::{
     shim::{
         sync::{self, atomic, Arc},
@@ -10,6 +13,13 @@ use shuttle::{
     future::spawn,
     rand::{self, Rng},
 };
+
+fn noop_waker(id: usize) -> std::task::Waker {
+    use std::task::{RawWaker, RawWakerVTable};
+    const VTABLE: RawWakerVTable =
+        RawWakerVTable::new(|data| RawWaker::new(data, &VTABLE), |_| {}, |_| {}, |_| {});
+    unsafe { std::task::Waker::from_raw(RawWaker::new(id as *const (), &VTABLE)) }
+}
 
 #[test]
 fn test_guard_works() {
@@ -145,4 +155,64 @@ async fn test_guard_works_stub_async() {
         task.join().unwrap()
     }
     assert_eq!(cache_.get(&0), Some(1));
+}
+
+#[test]
+fn test_waker_change_race() {
+    let mut config = shuttle::Config::default();
+    config.max_steps = shuttle::MaxSteps::None;
+    if let Ok(seed) = std::env::var("SEED") {
+        let seed = std::fs::read_to_string(&seed).unwrap_or(seed.clone());
+        let scheduler = shuttle::scheduler::ReplayScheduler::new_from_encoded(&seed);
+        let runner = shuttle::Runner::new(scheduler, config);
+        runner.run(test_waker_change_race_stub);
+    } else {
+        let max_iterations: usize = std::env::var("MAX_ITERATIONS")
+            .map(|s| s.parse().unwrap())
+            .unwrap_or(1000);
+        let scheduler = shuttle::scheduler::RandomScheduler::new(max_iterations);
+        let runner = shuttle::Runner::new(scheduler, config);
+        runner.run(test_waker_change_race_stub);
+    }
+}
+
+fn test_waker_change_race_stub() {
+    let cache = Arc::new(crate::sync::Cache::<u64, u64>::new(100));
+
+    // Acquire a placeholder guard so the next async access becomes a waiter.
+    let guard = match cache.get_value_or_guard(&0, None) {
+        GuardResult::Guard(g) => g,
+        _ => unreachable!(),
+    };
+
+    // Create the async future for the same key — will register as a waiter.
+    let mut fut = std::pin::pin!(cache.get_value_or_guard_async(&0));
+
+    // First poll with waker W1 → Pending (registered in waiters list).
+    let w1 = noop_waker(1);
+    let mut cx1 = std::task::Context::from_waker(&w1);
+    assert!(fut.as_mut().poll(&mut cx1).is_pending());
+
+    // Use a scoped thread so we can move the guard (which borrows cache)
+    // into a separate thread while re-polling with a different waker.
+    thread::scope(|s| {
+        s.spawn(|| {
+            let _ = guard.insert(42);
+        });
+
+        // Re-poll with a different waker W2 — exercises the will_wake() == false path.
+        let w2 = noop_waker(2);
+        let mut cx2 = std::task::Context::from_waker(&w2);
+        loop {
+            match fut.as_mut().poll(&mut cx2) {
+                Poll::Ready(result) => {
+                    assert_eq!(result.unwrap(), 42);
+                    break;
+                }
+                Poll::Pending => {
+                    shuttle::thread::yield_now();
+                }
+            }
+        }
+    });
 }
