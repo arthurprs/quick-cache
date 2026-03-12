@@ -529,7 +529,7 @@ impl<
             .is_some()
     }
 
-    pub fn get<Q>(&self, hash: u64, key: &Q) -> Option<&Val>
+    pub fn get_key_value<Q>(&self, hash: u64, key: &Q) -> Option<(&Key, &Val)>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
@@ -542,11 +542,19 @@ impl<
                 resident.referenced.fetch_add(1, atomic::Ordering::Relaxed);
             }
             record_hit!(self);
-            Some(&resident.value)
+            Some((&resident.key, &resident.value))
         } else {
             record_miss!(self);
             None
         }
+    }
+
+    #[inline]
+    pub fn get<Q>(&self, hash: u64, key: &Q) -> Option<&Val>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        self.get_key_value(hash, key).map(|(_k, v)| v)
     }
 
     pub fn get_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>>
