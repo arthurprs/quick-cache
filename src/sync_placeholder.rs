@@ -224,7 +224,7 @@ impl<
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         let mut shard_guard = shard.write();
-        let shared = match shard_guard.upsert_placeholder(hash, key) {
+        let shared = match shard_guard.upsert_placeholder(hash, key, &mut |_| true) {
             Ok((_, v)) => return GuardResult::Value(v.clone()),
             Err((shared, true)) => {
                 return GuardResult::Guard(Self::start_loading(lifecycle, shard, shared));
@@ -413,11 +413,12 @@ impl<Key, Val, We, B, L> std::fmt::Debug for PlaceholderGuard<'_, Key, Val, We, 
 }
 
 /// Future that results in an Ok(Value) or Err(Guard)
-pub struct JoinFuture<'a, 'b, Q: ?Sized, Key, Val, We, B, L> {
+pub struct JoinFuture<'a, 'b, Q: ?Sized, Key, Val, We, B, L, F: FnMut(&'a Val) -> bool> {
     lifecycle: &'a L,
     shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
     state: JoinFutureState<'b, Q, Val>,
     notified: AtomicBool,
+    validation: F,
 }
 
 enum JoinFutureState<'b, Q: ?Sized, Val> {
@@ -432,18 +433,22 @@ enum JoinFutureState<'b, Q: ?Sized, Val> {
     Done,
 }
 
-impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
+impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L, F: FnMut(&'a Val) -> bool>
+    JoinFuture<'a, 'b, Q, Key, Val, We, B, L, F>
+{
     pub fn new(
         lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         hash: u64,
         key: &'b Q,
-    ) -> JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
+        validation: F,
+    ) -> JoinFuture<'a, 'b, Q, Key, Val, We, B, L, F> {
         Self {
             lifecycle,
             shard,
             state: JoinFutureState::Created { hash, key },
             notified: Default::default(),
+            validation,
         }
     }
 
@@ -480,7 +485,10 @@ impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, 
     }
 }
 
-impl<Q: ?Sized, Key, Val, We, B, L> Drop for JoinFuture<'_, '_, Q, Key, Val, We, B, L> {
+impl<'a, Q: ?Sized, Key, Val, We, B, L, F> Drop for JoinFuture<'a, '_, Q, Key, Val, We, B, L, F>
+where
+    F: FnMut(&'a Val) -> bool,
+{
     #[inline]
     fn drop(&mut self) {
         if matches!(self.state, JoinFutureState::Pending { .. }) {
@@ -497,7 +505,8 @@ impl<
         We: Weighter<Key, Val>,
         B: BuildHasher,
         L: Lifecycle<Key, Val>,
-    > Future for JoinFuture<'a, '_, Q, Key, Val, We, B, L>
+        F: FnMut(&Val) -> bool + Unpin,
+    > Future for JoinFuture<'a, '_, Q, Key, Val, We, B, L, F>
 {
     type Output = Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>;
 
@@ -509,7 +518,7 @@ impl<
             JoinFutureState::Created { hash, key } => {
                 debug_assert!(!this.notified.load(Ordering::Acquire));
                 let mut shard_guard = shard.write();
-                match shard_guard.upsert_placeholder(*hash, *key) {
+                match shard_guard.upsert_placeholder(*hash, *key, &mut this.validation) {
                     Ok((_, v)) => {
                         this.state = JoinFutureState::Done;
                         Poll::Ready(Ok(v.clone()))
