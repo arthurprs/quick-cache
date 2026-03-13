@@ -10,7 +10,6 @@ use crate::{
     linked_slab::{LinkedSlab, Token},
     options::DEFAULT_HOT_ALLOCATION,
     shim::sync::atomic::{self, AtomicU16},
-    sync_placeholder::OccupiedAction,
     Equivalent, Lifecycle, MemoryUsed, Weighter,
 };
 
@@ -32,14 +31,30 @@ pub enum InsertStrategy {
     Replace { soft: bool },
 }
 
+/// What to do with an existing entry after inspection/mutation.
+///
+/// Used with [`Cache::entry`](crate::sync::Cache::entry) and
+/// [`Cache::entry_async`](crate::sync::Cache::entry_async).
+pub enum OccupiedAction<T> {
+    /// Keep the entry, returning `T`.
+    /// The value may have been mutated in place before returning `Keep`.
+    Keep(T),
+    /// Remove the entry from the cache.
+    Remove,
+    /// Remove the entry and get a guard for re-insertion.
+    /// This is useful for "validate-or-recompute" patterns.
+    Replace,
+}
+
 /// Result of an entry-or-placeholder operation at the shard level.
-pub enum EntryOrPlaceholder<Key, Val, Plh, T> {
+pub(crate) enum EntryOrPlaceholder<Key, Val, Plh, T> {
     /// Callback returned `Keep(T)` — entry is still in the cache.
     Kept(T),
     /// Callback returned `Remove` — entry was removed.
     Removed(Key, Val),
     /// Callback returned `Replace` — entry was replaced with a placeholder.
-    Replaced(Plh),
+    /// The old value is returned so it can be dropped outside the lock.
+    Replaced(Plh, Val),
     /// Found an existing placeholder (another loader is working on this key).
     ExistingPlaceholder(Plh),
     /// No entry existed, a new placeholder was created.
@@ -1155,6 +1170,7 @@ impl<
             if let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) {
                 let old_weight = self.weighter.weight(&resident.key, &resident.value);
                 let action = on_occupied(&resident.key, &mut resident.value);
+                record_hit_mut!(self);
                 return match action {
                     OccupiedAction::Keep(t) => {
                         if *resident.referenced.get_mut() < MAX_F {
@@ -1165,16 +1181,13 @@ impl<
                         if old_weight != new_weight {
                             self.cold_change_weight(idx, old_weight, new_weight);
                         }
-                        record_hit_mut!(self);
                         EntryOrPlaceholder::Kept(t)
                     }
                     OccupiedAction::Remove => {
-                        record_hit_mut!(self);
                         let (key, val) = self.remove_internal(hash, idx).unwrap();
                         EntryOrPlaceholder::Removed(key, val)
                     }
                     OccupiedAction::Replace => {
-                        record_hit_mut!(self);
                         let state = resident.state;
                         let list_head = if state == ResidentState::Hot {
                             self.num_hot -= 1;
@@ -1192,15 +1205,18 @@ impl<
                                 *list_head = next;
                             }
                         }
-                        // Create placeholder in the same slot
+                        // Create placeholder in the same slot, reusing the existing key.
                         let shared = Plh::new(hash, idx);
-                        let (entry, _) = self.entries.get_mut(idx).unwrap();
+                        let (entry, _) = unsafe { self.entries.get_mut_unchecked(idx) };
+                        let Entry::Resident(r) = mem::replace(entry, Entry::Ghost(0)) else {
+                            unsafe { unreachable_unchecked() }
+                        };
                         *entry = Entry::Placeholder(Placeholder {
-                            key: key.to_owned(),
+                            key: r.key,
                             hot: state,
                             shared: shared.clone(),
                         });
-                        EntryOrPlaceholder::Replaced(shared)
+                        EntryOrPlaceholder::Replaced(shared, r.value)
                     }
                 };
             }

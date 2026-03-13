@@ -135,13 +135,13 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.hits()
     }
 
-    /// Reserver additional space for `additional` entries.
+    /// Reserve additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&mut self, additional: usize) {
         self.shard.reserve(additional);
     }
 
-    /// Check if a key exist in the cache.
+    /// Checks if a key exists in the cache.
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -302,7 +302,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     }
 
     /// Gets an item from the cache with key `key` .
-    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// If the corresponding value isn't present in the cache, this function returns a guard
     /// that can be used to insert the value once it's computed.
     pub fn get_ref_or_guard<Q>(&mut self, key: &Q) -> Result<&Val, Guard<'_, Key, Val, We, B, L>>
     where
@@ -325,7 +325,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     }
 
     /// Gets an item from the cache with key `key` .
-    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// If the corresponding value isn't present in the cache, this function returns a guard
     /// that can be used to insert the value once it's computed.
     ///
     /// Note: Leaking the returned RefMut might cause cache weight tracking to be inaccurate.

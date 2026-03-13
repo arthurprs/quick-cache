@@ -272,7 +272,7 @@ async fn test_entry_works_stub_async() {
                     }
                 });
                 let action = rand::thread_rng().gen_range(0..3u8);
-                let cache_fut = std::pin::pin!(cache.entry_mut_async(&0, move |_k, v| {
+                let cache_fut = std::pin::pin!(cache.entry_async(&0, move |_k, v| {
                     // Always keep the terminal value to ensure termination
                     if *v == 1 {
                         return OccupiedAction::Keep(*v);
@@ -332,7 +332,7 @@ async fn test_entry_works_stub_async() {
                     _ => Some(std::time::Duration::from_millis(100)),
                 };
                 let action = rand::thread_rng().gen_range(0..3u8);
-                match cache.entry_mut(&0, timeout, |_k, v| {
+                match cache.entry(&0, timeout, |_k, v| {
                     if *v == 1 {
                         return OccupiedAction::Keep(*v);
                     }
@@ -402,15 +402,15 @@ fn test_entry_waker_change_race() {
 fn test_entry_waker_change_race_stub() {
     let cache = Arc::new(crate::sync::Cache::<u64, u64>::new(100));
 
-    // Acquire a placeholder guard via entry_mut() on a vacant key.
-    let guard = match cache.entry_mut(&0, None, |_k, _v| -> OccupiedAction<()> { unreachable!() }) {
+    // Acquire a placeholder guard via entry() on a vacant key.
+    let guard = match cache.entry(&0, None, |_k, _v| -> OccupiedAction<()> { unreachable!() }) {
         EntryResult::Guard(g) => g,
         _ => unreachable!(),
     };
 
-    // Create entry_mut_async future — will find existing placeholder and wait.
-    // When the value arrives, entry_mut_async loops back and the callback runs.
-    let mut fut = std::pin::pin!(cache.entry_mut_async(&0, |_k, v| OccupiedAction::Keep(*v)));
+    // Create entry_async future — will find existing placeholder and wait.
+    // When the value arrives, entry_async loops back and the callback runs.
+    let mut fut = std::pin::pin!(cache.entry_async(&0, |_k, v| OccupiedAction::Keep(*v)));
 
     // First poll with waker W1 → Pending (registered in waiters list).
     let w1 = noop_waker(1);

@@ -12,6 +12,7 @@ Lightweight and high performance concurrent cache optimized for low cache overhe
 * Scales well with the number of threads
 * Atomic operations with `get_or_insert` and `get_value_or_guard` functions
 * Atomic async operations with `get_or_insert_async` and `get_value_or_guard_async` functions
+* Closure-based `entry` API for atomic inspect-and-act patterns (keep, remove, replace)
 * Supports item pinning
 * Iteration and draining
 * Handles zero weight items efficiently
@@ -50,7 +51,7 @@ struct StringWeighter;
 
 impl Weighter<u64, String> for StringWeighter {
     fn weight(&self, _key: &u64, val: &String) -> u64 {
-        // Be cautions out about zero weights!
+        // Be cautious about zero weights!
         val.len() as u64
     }
 }
@@ -61,6 +62,39 @@ fn main() {
     cache.insert(54, "54".to_string());
     cache.insert(1000, "1000".to_string());
     assert_eq!(cache.get(&1000).unwrap(), "1000");
+}
+```
+
+Atomic inspect-and-act with the `entry` API
+
+```rust
+use quick_cache::sync::{Cache, OccupiedAction, EntryResult};
+
+fn main() {
+    let cache: Cache<u64, u64> = Cache::new(100);
+
+    // Insert-or-get: if absent, compute and insert; if present, return cached
+    let result = cache.entry(&0, None, |_key, val| OccupiedAction::Keep(*val));
+    let value = match result {
+        EntryResult::Value(v) => v,
+        EntryResult::Guard(guard) => {
+            let v = 42; // expensive computation
+            guard.insert(v).unwrap();
+            v
+        }
+        _ => unreachable!(),
+    };
+    assert_eq!(value, 42);
+
+    // Conditionally remove: evict entries below a threshold
+    let result = cache.entry(&0, None, |_key, val| {
+        if *val < 100 {
+            OccupiedAction::<()>::Remove
+        } else {
+            OccupiedAction::Keep(())
+        }
+    });
+    assert!(matches!(result, EntryResult::Removed(0, 42)));
 }
 ```
 
