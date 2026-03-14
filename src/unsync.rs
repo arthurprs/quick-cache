@@ -135,13 +135,13 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.hits()
     }
 
-    /// Reserver additional space for `additional` entries.
+    /// Reserve additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&mut self, additional: usize) {
         self.shard.reserve(additional);
     }
 
-    /// Check if a key exist in the cache.
+    /// Checks if a key exists in the cache.
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -261,7 +261,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
-        let idx = match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+        let idx = match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((idx, _)) => idx,
             Err((plh, _)) => {
                 let v = with()?;
@@ -287,7 +287,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
-        let idx = match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+        let idx = match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((idx, _)) => idx,
             Err((plh, _)) => {
                 let v = with()?;
@@ -302,14 +302,14 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     }
 
     /// Gets an item from the cache with key `key` .
-    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// If the corresponding value isn't present in the cache, this function returns a guard
     /// that can be used to insert the value once it's computed.
     pub fn get_ref_or_guard<Q>(&mut self, key: &Q) -> Result<&Val, Guard<'_, Key, Val, We, B, L>>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         // TODO: this could be using a simpler entry API
-        match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+        match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((_, v)) => unsafe {
                 // Rustc gets insanely confused about returning from mut borrows
                 // Safety: v has the same lifetime as self
@@ -325,7 +325,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     }
 
     /// Gets an item from the cache with key `key` .
-    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// If the corresponding value isn't present in the cache, this function returns a guard
     /// that can be used to insert the value once it's computed.
     ///
     /// Note: Leaking the returned RefMut might cause cache weight tracking to be inaccurate.
@@ -337,7 +337,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         // TODO: this could be using a simpler entry API
-        match self.shard.upsert_placeholder(self.shard.hash(key), key) {
+        match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((idx, _)) => Ok(self.shard.peek_token_mut(idx).map(RefMut)),
             Err((placeholder, _)) => Err(Guard {
                 cache: self,
