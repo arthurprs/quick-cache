@@ -31,6 +31,42 @@ pub enum InsertStrategy {
     Replace { soft: bool },
 }
 
+/// What to do with an existing entry after inspection/mutation.
+///
+/// Used with [`Cache::entry`](crate::sync::Cache::entry) and
+/// [`Cache::entry_async`](crate::sync::Cache::entry_async).
+pub enum EntryAction<T> {
+    /// Retain the entry in the cache. The value may have been mutated in place
+    /// before returning this variant.
+    ///
+    /// Returns [`EntryResult::Retained(T)`](crate::sync::EntryResult::Retained).
+    Retain(T),
+    /// Remove the entry from the cache.
+    ///
+    /// Returns [`EntryResult::Removed(Key, Val)`](crate::sync::EntryResult::Removed).
+    Remove,
+    /// Remove the entry and get a [`PlaceholderGuard`](crate::sync::PlaceholderGuard)
+    /// for re-insertion. This is useful for "validate-or-recompute" patterns.
+    ///
+    /// Returns [`EntryResult::Replaced(PlaceholderGuard, Val)`](crate::sync::EntryResult::Replaced).
+    ReplaceWithGuard,
+}
+
+/// Result of an entry-or-placeholder operation at the shard level.
+pub enum EntryOrPlaceholder<Key, Val, Plh, T> {
+    /// Callback returned `Retain(T)` — entry is still in the cache.
+    Kept(T),
+    /// Callback returned `Remove` — entry was removed.
+    Removed(Key, Val),
+    /// Callback returned `ReplaceWithGuard` — entry was replaced with a placeholder.
+    /// The old value is returned so it can be dropped outside the lock.
+    Replaced(Plh, Val),
+    /// Found an existing placeholder (another loader is working on this key).
+    ExistingPlaceholder(Plh),
+    /// No entry existed, a new placeholder was created.
+    NewPlaceholder(Plh),
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ResidentState {
     Hot,
@@ -514,7 +550,7 @@ impl<
             .is_some()
     }
 
-    pub fn get<Q>(&self, hash: u64, key: &Q) -> Option<&Val>
+    pub fn get_key_value<Q>(&self, hash: u64, key: &Q) -> Option<(&Key, &Val)>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
@@ -527,11 +563,19 @@ impl<
                 resident.referenced.fetch_add(1, atomic::Ordering::Relaxed);
             }
             record_hit!(self);
-            Some(&resident.value)
+            Some((&resident.key, &resident.value))
         } else {
             record_miss!(self);
             None
         }
+    }
+
+    #[inline]
+    pub fn get<Q>(&self, hash: u64, key: &Q) -> Option<&Val>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        self.get_key_value(hash, key).map(|(_k, v)| v)
     }
 
     pub fn get_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>>
@@ -553,9 +597,12 @@ impl<
 
         let old_weight = self.weighter.weight(&resident.key, &resident.value);
         Some(RefMut {
-            idx,
-            old_weight,
-            cache: self,
+            guard: WeightGuard {
+                shard: self as *mut _,
+                idx,
+                old_weight,
+            },
+            _phantom: std::marker::PhantomData,
         })
     }
 
@@ -573,9 +620,12 @@ impl<
         if let Some((Entry::Resident(resident), _)) = self.entries.get_mut(token) {
             let old_weight = self.weighter.weight(&resident.key, &resident.value);
             Some(RefMut {
-                old_weight,
-                idx: token,
-                cache: self,
+                guard: WeightGuard {
+                    shard: self as *mut _,
+                    idx: token,
+                    old_weight,
+                },
+                _phantom: std::marker::PhantomData,
             })
         } else {
             None
@@ -1082,7 +1132,7 @@ impl<
         Ok(())
     }
 
-    pub fn upsert_placeholder<Q>(
+    pub fn get_or_placeholder<Q>(
         &mut self,
         hash: u64,
         key: &Q,
@@ -1090,28 +1140,143 @@ impl<
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
-        let shared;
-        if let Some(idx) = self.search(hash, key) {
-            let (entry, _) = self.entries.get_mut(idx).unwrap();
-            match entry {
-                Entry::Resident(resident) => {
-                    if *resident.referenced.get_mut() < MAX_F {
-                        *resident.referenced.get_mut() += 1;
-                    }
-                    record_hit_mut!(self);
-                    unsafe {
-                        // Rustc gets insanely confused returning references from mut borrows
-                        // Safety: value will have the same lifetime as `resident`
-                        let value_ptr: *const Val = &resident.value;
-                        return Ok((idx, &*value_ptr));
-                    }
+        let idx = self.search(hash, key);
+        if let Some(idx) = idx {
+            if let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) {
+                if *resident.referenced.get_mut() < MAX_F {
+                    *resident.referenced.get_mut() += 1;
                 }
+                record_hit_mut!(self);
+                unsafe {
+                    // Rustc gets insanely confused returning references from mut borrows
+                    // Safety: value will have the same lifetime as `resident`
+                    let value_ptr: *const Val = &resident.value;
+                    return Ok((idx, &*value_ptr));
+                }
+            }
+        }
+        let (shared, is_new) = unsafe { self.non_resident_to_placeholder(hash, key, idx) };
+        Err((shared, is_new))
+    }
+
+    /// Entry operation on an existing or missing key.
+    ///
+    /// If a `Resident` entry exists, calls `on_occupied` with `&mut Val` to decide what to do.
+    /// On `Retain`, weight is recalculated after the callback returns.
+    /// Otherwise, creates a placeholder or joins an existing one.
+    ///
+    /// `on_occupied` is taken by mutable reference so the caller retains ownership.
+    /// It is called at most once per invocation.
+    pub fn entry_or_placeholder<Q, T, F>(
+        &mut self,
+        hash: u64,
+        key: &Q,
+        on_occupied: &mut F,
+    ) -> EntryOrPlaceholder<Key, Val, Plh, T>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+        F: FnMut(&Key, &mut Val) -> EntryAction<T>,
+    {
+        let idx = self.search(hash, key);
+        if let Some(idx) = idx {
+            let shard = self as *mut _;
+            if let Some((Entry::Resident(r), _)) = self.entries.get_mut(idx) {
+                // Call the callback inside a WeightGuard scope: if it panics
+                // after mutating the value, the guard recomputes weight on drop.
+                // SAFETY: key/value point into the Resident entry at idx, alive
+                // for the duration of the callback.
+                let action = {
+                    let (key_ptr, val_ptr) = (&r.key as *const Key, &mut r.value as *mut Val);
+                    let _guard = WeightGuard::<Key, Val, We, B, L, Plh> {
+                        idx,
+                        old_weight: self.weighter.weight(&r.key, &r.value),
+                        shard,
+                    };
+                    on_occupied(unsafe { &*key_ptr }, unsafe { &mut *val_ptr })
+                };
+
+                return match action {
+                    EntryAction::Retain(t) => {
+                        record_hit_mut!(self);
+                        let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
+                            // SAFETY: we had a mut reference to the Resident under `idx` until the previous line
+                            unsafe { unreachable_unchecked() };
+                        };
+                        if *resident.referenced.get_mut() < MAX_F {
+                            *resident.referenced.get_mut() += 1;
+                        }
+                        EntryOrPlaceholder::Kept(t)
+                    }
+                    EntryAction::Remove => {
+                        let (key, val) = self.remove_internal(hash, idx).unwrap();
+                        EntryOrPlaceholder::Removed(key, val)
+                    }
+                    EntryAction::ReplaceWithGuard => {
+                        let Some((Entry::Resident(r), _)) = self.entries.get_mut(idx) else {
+                            // SAFETY: we had a mut reference to the Resident under `idx` until the previous line
+                            unsafe { unreachable_unchecked() };
+                        };
+                        let state = r.state;
+                        let current_weight = self.weighter.weight(&r.key, &r.value);
+                        let list_head = if state == ResidentState::Hot {
+                            self.num_hot -= 1;
+                            self.weight_hot -= current_weight;
+                            &mut self.hot_head
+                        } else {
+                            self.num_cold -= 1;
+                            self.weight_cold -= current_weight;
+                            &mut self.cold_head
+                        };
+                        if current_weight != 0 {
+                            let next = self.entries.unlink(idx);
+                            if *list_head == Some(idx) {
+                                *list_head = next;
+                            }
+                        }
+                        let shared = Plh::new(hash, idx);
+                        let (entry, _) = unsafe { self.entries.get_mut_unchecked(idx) };
+                        let Entry::Resident(r) = mem::replace(entry, Entry::Ghost(0)) else {
+                            unsafe { unreachable_unchecked() }
+                        };
+                        *entry = Entry::Placeholder(Placeholder {
+                            key: r.key,
+                            hot: state,
+                            shared: shared.clone(),
+                        });
+                        EntryOrPlaceholder::Replaced(shared, r.value)
+                    }
+                };
+            }
+        }
+        let (shared, is_new) = unsafe { self.non_resident_to_placeholder(hash, key, idx) };
+        if is_new {
+            EntryOrPlaceholder::NewPlaceholder(shared)
+        } else {
+            EntryOrPlaceholder::ExistingPlaceholder(shared)
+        }
+    }
+
+    /// Creates or joins a placeholder for a non-Resident entry (Placeholder, Ghost, or missing).
+    /// Returns `(shared, true)` for new placeholders, `(shared, false)` for existing ones.
+    /// The entry at `idx` must NOT be Resident.
+    unsafe fn non_resident_to_placeholder<Q>(
+        &mut self,
+        hash: u64,
+        key: &Q,
+        idx: Option<Token>,
+    ) -> (Plh, bool)
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
+        if let Some(idx) = idx {
+            let (entry, _) = unsafe { self.entries.get_mut_unchecked(idx) };
+            match entry {
                 Entry::Placeholder(p) => {
                     record_hit_mut!(self);
-                    return Err((p.shared.clone(), false));
+                    (p.shared.clone(), false)
                 }
                 Entry::Ghost(_) => {
-                    shared = Plh::new(hash, idx);
+                    let shared = Plh::new(hash, idx);
                     *entry = Entry::Placeholder(Placeholder {
                         key: key.to_owned(),
                         hot: ResidentState::Hot,
@@ -1122,11 +1287,14 @@ impl<
                     if self.ghost_head == Some(idx) {
                         self.ghost_head = next;
                     }
+                    record_miss_mut!(self);
+                    (shared, true)
                 }
+                Entry::Resident(_) => unsafe { unreachable_unchecked() },
             }
         } else {
             let idx = self.entries.next_free();
-            shared = Plh::new(hash, idx);
+            let shared = Plh::new(hash, idx);
             let idx_ = self.entries.insert(Entry::Placeholder(Placeholder {
                 key: key.to_owned(),
                 hot: ResidentState::Cold,
@@ -1134,9 +1302,9 @@ impl<
             }));
             debug_assert_eq!(idx, idx_);
             self.map_insert(hash, idx);
+            record_miss_mut!(self);
+            (shared, true)
         }
-        record_miss_mut!(self);
-        Err((shared, true))
     }
 
     pub fn set_capacity(&mut self, new_weight_capacity: u64) {
@@ -1170,55 +1338,66 @@ impl<
     }
 }
 
-/// Structure wrapping a mutable reference to a cached item.
-pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> {
-    cache: &'cache mut CacheShard<Key, Val, We, B, L, Plh>,
+/// Drop guard for `entry_or_placeholder`: if the user callback panics after
+/// mutating the value, recomputes weight to keep shard accounting consistent.
+struct WeightGuard<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> {
+    shard: *mut CacheShard<Key, Val, We, B, L, Plh>,
     idx: Token,
     old_weight: u64,
+}
+
+impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
+    for WeightGuard<Key, Val, We, B, L, Plh>
+{
+    fn drop(&mut self) {
+        // SAFETY: shard pointer is valid — guard is created and dropped within
+        // entry_or_placeholder which holds &mut CacheShard.
+        unsafe {
+            let shard = &mut *self.shard;
+            let (entry, _) = shard.entries.get_unchecked(self.idx);
+            let Entry::Resident(r) = entry else {
+                unreachable_unchecked()
+            };
+            let new_weight = shard.weighter.weight(&r.key, &r.value);
+            if self.old_weight != new_weight {
+                shard.cold_change_weight(self.idx, self.old_weight, new_weight);
+            }
+        }
+    }
+}
+
+/// Structure wrapping a mutable reference to a cached item.
+/// On drop, recomputes weight via the inner [`WeightGuard`].
+pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> {
+    guard: WeightGuard<Key, Val, We, B, L, Plh>,
+    _phantom: std::marker::PhantomData<&'cache mut CacheShard<Key, Val, We, B, L, Plh>>,
 }
 
 impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
     RefMut<'_, Key, Val, We, B, L, Plh>
 {
     pub(crate) fn pair(&self) -> (&Key, &Val) {
-        // Safety: RefMut was constructed correctly from a Resident entry in get_mut or peek_token_mut
-        // and it couldn't be modified as we're holding a mutable reference to the cache
+        // SAFETY: RefMut is only constructed from a valid &mut CacheShard with a
+        // Resident entry at idx, and we hold exclusive access via the lifetime.
         unsafe {
-            if let (Entry::Resident(Resident { key, value, .. }), _) =
-                self.cache.entries.get_unchecked(self.idx)
-            {
-                (key, value)
-            } else {
+            let shard = &*self.guard.shard;
+            let (entry, _) = shard.entries.get_unchecked(self.guard.idx);
+            let Entry::Resident(Resident { key, value, .. }) = entry else {
                 core::hint::unreachable_unchecked()
-            }
+            };
+            (key, value)
         }
     }
 
     pub(crate) fn value_mut(&mut self) -> &mut Val {
-        // Safety: RefMut was constructed correctly from a Resident entry in get_mut or peek_token_mut
-        // and it couldn't be modified as we're holding a mutable reference to the cache
+        // SAFETY: same as pair(), plus we have &mut self so exclusive access is guaranteed.
         unsafe {
-            if let (Entry::Resident(Resident { value, .. }), _) =
-                self.cache.entries.get_mut_unchecked(self.idx)
-            {
-                value
-            } else {
+            let shard = &mut *self.guard.shard;
+            let (entry, _) = shard.entries.get_mut_unchecked(self.guard.idx);
+            let Entry::Resident(Resident { value, .. }) = entry else {
                 core::hint::unreachable_unchecked()
-            }
-        }
-    }
-}
-
-impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
-    for RefMut<'_, Key, Val, We, B, L, Plh>
-{
-    #[inline]
-    fn drop(&mut self) {
-        let (key, value) = self.pair();
-        let new_weight = self.cache.weighter.weight(key, value);
-        if self.old_weight != new_weight {
-            self.cache
-                .cold_change_weight(self.idx, self.old_weight, new_weight);
+            };
+            value
         }
     }
 }

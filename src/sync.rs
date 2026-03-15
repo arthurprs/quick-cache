@@ -14,7 +14,9 @@ use crate::{
     DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
 };
 
-pub use crate::sync_placeholder::{GuardResult, JoinFuture, PlaceholderGuard};
+use crate::shard::EntryOrPlaceholder;
+pub use crate::sync_placeholder::{EntryAction, EntryResult, GuardResult, PlaceholderGuard};
+use crate::sync_placeholder::{JoinFuture, JoinResult};
 
 /// A concurrent cache
 ///
@@ -28,7 +30,7 @@ pub use crate::sync_placeholder::{GuardResult, JoinFuture, PlaceholderGuard};
 /// `Arc<Mutex<_>>` or `Arc<RwLock<_>>` can also be used.
 ///
 /// # Thread Safety and Concurrency
-/// The cache instance can wrapped with an `Arc` (or equivalent) and shared between threads.
+/// The cache instance can be wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
 pub struct Cache<
     Key,
@@ -226,7 +228,7 @@ impl<
         self.shards.get(shard_idx).map(|s| (s, hash))
     }
 
-    /// Reserver additional space for `additional` entries.
+    /// Reserve additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&self, additional: usize) {
         let additional_per_shard =
@@ -236,7 +238,7 @@ impl<
         }
     }
 
-    /// Check if a key exist in the cache.
+    /// Checks if a key exists in the cache.
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -403,10 +405,10 @@ impl<
 
     /// Gets an item from the cache with key `key` .
     ///
-    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// If the corresponding value isn't present in the cache, this function returns a guard
     /// that can be used to insert the value once it's computed.
     /// While the returned guard is alive, other calls with the same key using the
-    /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
+    /// `get_value_or_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
     ///
     /// A `None` `timeout` means waiting forever.
@@ -451,10 +453,10 @@ impl<
 
     /// Gets an item from the cache with key `key`.
     ///
-    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// If the corresponding value isn't present in the cache, this function returns a guard
     /// that can be used to insert the value once it's computed.
     /// While the returned guard is alive, other calls with the same key using the
-    /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
+    /// `get_value_or_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
     pub async fn get_value_or_guard_async<'a, Q>(
         &'a self,
@@ -464,10 +466,20 @@ impl<
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         let (shard, hash) = self.shard_for(key).unwrap();
-        if let Some(v) = shard.read().get(hash, key) {
-            return Ok(v.clone());
+        loop {
+            if let Some(v) = shard.read().get(hash, key) {
+                return Ok(v.clone());
+            }
+            match JoinFuture::new(&self.lifecycle, shard, hash, key).await {
+                JoinResult::Filled(Some(shared)) => {
+                    // SAFETY: Filled means the value was set by the loader.
+                    return Ok(unsafe { shared.value().unwrap_unchecked().clone() });
+                }
+                JoinResult::Filled(None) => continue,
+                JoinResult::Guard(g) => return Err(g),
+                JoinResult::Timeout => unsafe { unreachable_unchecked() },
+            }
         }
-        JoinFuture::new(&self.lifecycle, shard, hash, key).await
     }
 
     /// Gets or inserts an item in the cache with key `key`.
@@ -485,6 +497,166 @@ impl<
                 let v = with.await?;
                 let _ = g.insert(v.clone());
                 Ok(v)
+            }
+        }
+    }
+
+    /// Atomically accesses an existing entry, or gets a guard for insertion.
+    ///
+    /// If a value exists for `key`, `on_occupied` is called with a mutable reference
+    /// to the key and value. The callback returns an [`EntryAction`] to decide what to do:
+    /// - [`EntryAction::Retain`]`(T)` — keep the entry, return `T`.
+    ///   Weight is recalculated after the callback returns.
+    /// - [`EntryAction::Remove`] — remove the entry from the cache.
+    /// - [`EntryAction::ReplaceWithGuard`] — remove the entry and get a guard for re-insertion.
+    ///
+    /// If no value exists, a [`PlaceholderGuard`] is returned for inserting a new value.
+    /// If another thread is already loading this key, waits up to `timeout` for the value
+    /// to arrive, then calls `on_occupied` on the result.
+    ///
+    /// A `None` `timeout` means waiting forever.
+    /// A `Some(<zero>)` timeout will return a Timeout immediately if a guard is alive elsewhere.
+    ///
+    /// The callback is `FnOnce` and runs **at most once**.
+    ///
+    /// # Performance
+    ///
+    /// Always acquires a **write lock** on the shard. For read-only lookups where
+    /// contention matters, prefer [`get`](Self::get), [`get_value_or_guard`](Self::get_value_or_guard)
+    /// or similar.
+    ///
+    /// The callback runs under the shard write lock — keep it short to avoid blocking
+    /// other operations on the same shard. **Do not** call back into the cache from the
+    /// callback, as this will deadlock when the same shard is accessed.
+    ///
+    /// # Panics
+    ///
+    /// If the callback panics, weight accounting is automatically corrected.
+    /// However, any partial mutation to the value will remain.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use quick_cache::sync::{Cache, EntryAction, EntryResult};
+    ///
+    /// let cache: Cache<String, u64> = Cache::new(5);
+    /// cache.insert("counter".to_string(), 0);
+    ///
+    /// // Mutate in place: increment a counter
+    /// let result = cache.entry("counter", None, |_k, v| {
+    ///     *v += 1;
+    ///     EntryAction::Retain(*v)
+    /// });
+    /// assert!(matches!(result, EntryResult::Retained(1)));
+    /// assert_eq!(cache.get("counter"), Some(1));
+    /// ```
+    pub fn entry<Q, T>(
+        &self,
+        key: &Q,
+        timeout: Option<Duration>,
+        on_occupied: impl FnOnce(&Key, &mut Val) -> EntryAction<T>,
+    ) -> EntryResult<'_, Key, Val, We, B, L, T>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
+        let (shard, hash) = self.shard_for(key).unwrap();
+        // Wrap FnOnce in Option so we can pass &mut FnMut to entry_or_placeholder
+        // in a loop. The loop retries only on ExistingPlaceholder (another thread is
+        // loading), which does not invoke the callback — so the Option is still Some
+        // on retry and the callback runs at most once.
+        let mut on_occupied = Some(on_occupied);
+        let mut callback = |k: &Key, v: &mut Val| on_occupied.take().unwrap()(k, v);
+        let mut deadline = timeout.map(Ok);
+
+        loop {
+            let mut shard_guard = shard.write();
+            match shard_guard.entry_or_placeholder(hash, key, &mut callback) {
+                EntryOrPlaceholder::Kept(t) => return EntryResult::Retained(t),
+                EntryOrPlaceholder::Removed(k, v) => return EntryResult::Removed(k, v),
+                EntryOrPlaceholder::Replaced(shared, old_val) => {
+                    drop(shard_guard);
+                    return EntryResult::Replaced(
+                        PlaceholderGuard::start_loading(&self.lifecycle, shard, shared),
+                        old_val,
+                    );
+                }
+                EntryOrPlaceholder::NewPlaceholder(shared) => {
+                    drop(shard_guard);
+                    return EntryResult::Vacant(PlaceholderGuard::start_loading(
+                        &self.lifecycle,
+                        shard,
+                        shared,
+                    ));
+                }
+                EntryOrPlaceholder::ExistingPlaceholder(shared) => {
+                    match PlaceholderGuard::wait_for_placeholder(
+                        &self.lifecycle,
+                        shard,
+                        shard_guard,
+                        shared,
+                        deadline.as_mut(),
+                    ) {
+                        JoinResult::Filled(_) => continue,
+                        JoinResult::Guard(g) => return EntryResult::Vacant(g),
+                        JoinResult::Timeout => return EntryResult::Timeout,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Async version of [`Self::entry`].
+    ///
+    /// Atomically accesses an existing entry, or gets a guard for insertion.
+    /// If another task is already loading this key, waits asynchronously for the value.
+    ///
+    /// See [`entry`](Self::entry) for full documentation.
+    pub async fn entry_async<'a, Q, T>(
+        &'a self,
+        key: &Q,
+        on_occupied: impl FnOnce(&Key, &mut Val) -> EntryAction<T>,
+    ) -> EntryResult<'a, Key, Val, We, B, L, T>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
+        let (shard, hash) = self.shard_for(key).unwrap();
+        // See entry() for explanation of the Option::take pattern.
+        let mut on_occupied = Some(on_occupied);
+        let mut callback = |k: &Key, v: &mut Val| on_occupied.take().unwrap()(k, v);
+
+        loop {
+            // Scope the write guard so it doesn't appear in the async state machine,
+            // which would make the future !Send.
+            let result = {
+                let mut shard_guard = shard.write();
+                match shard_guard.entry_or_placeholder(hash, key, &mut callback) {
+                    EntryOrPlaceholder::Kept(t) => Ok(EntryResult::Retained(t)),
+                    EntryOrPlaceholder::Removed(k, v) => Ok(EntryResult::Removed(k, v)),
+                    EntryOrPlaceholder::Replaced(shared, old_val) => {
+                        drop(shard_guard);
+                        Ok(EntryResult::Replaced(
+                            PlaceholderGuard::start_loading(&self.lifecycle, shard, shared),
+                            old_val,
+                        ))
+                    }
+                    EntryOrPlaceholder::NewPlaceholder(shared) => {
+                        drop(shard_guard);
+                        Ok(EntryResult::Vacant(PlaceholderGuard::start_loading(
+                            &self.lifecycle,
+                            shard,
+                            shared,
+                        )))
+                    }
+                    EntryOrPlaceholder::ExistingPlaceholder(_) => Err(()),
+                }
+            };
+            match result {
+                Ok(entry_result) => return entry_result,
+                Err(()) => match JoinFuture::new(&self.lifecycle, shard, hash, key).await {
+                    JoinResult::Filled(_) => continue,
+                    JoinResult::Guard(g) => return EntryResult::Vacant(g),
+                    JoinResult::Timeout => unsafe { unreachable_unchecked() },
+                },
             }
         }
     }
@@ -792,5 +964,539 @@ mod tests {
         // Test removing non-existent key
         let not_found = cache.remove_if(&999, |_| true);
         assert_eq!(not_found, None);
+    }
+
+    /// Tests all basic entry actions: Retain, Remove, ReplaceWithGuard, Vacant, mutate+Retain
+    #[test]
+    fn test_entry_actions() {
+        let cache = Cache::new(100);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+
+        // Retain returns the value via callback, entry stays
+        let result = cache.entry(&1, None, |_k, v| EntryAction::Retain(*v));
+        assert!(matches!(result, EntryResult::Retained(10)));
+        assert_eq!(cache.get(&1), Some(10));
+
+        // Mutate in place via Retain
+        let result = cache.entry(&1, None, |_k, v| {
+            *v += 5;
+            EntryAction::Retain(())
+        });
+        assert!(matches!(result, EntryResult::Retained(())));
+        assert_eq!(cache.get(&1), Some(15));
+
+        // Remove
+        let result = cache.entry(&1, None, |_k, _v| EntryAction::<()>::Remove);
+        assert!(matches!(result, EntryResult::Removed(1, 15)));
+        assert_eq!(cache.get(&1), None);
+
+        // Remove then re-enter same key → Vacant
+        let result = cache.entry(&1, None, |_k, v| EntryAction::Retain(*v));
+        match result {
+            EntryResult::Vacant(g) => {
+                let _ = g.insert(99);
+                assert_eq!(cache.get(&1), Some(99));
+            }
+            _ => panic!("expected Vacant for removed key"),
+        }
+
+        // ReplaceWithGuard: capture old value, get guard, insert new
+        let mut old_val = 0;
+        let result = cache.entry(&2, None, |_k, v| {
+            old_val = *v;
+            EntryAction::<()>::ReplaceWithGuard
+        });
+        assert_eq!(old_val, 20);
+        match result {
+            EntryResult::Replaced(g, old) => {
+                assert_eq!(old, 20);
+                let _ = g.insert(old_val + 100);
+                assert_eq!(cache.get(&2), Some(120));
+            }
+            _ => panic!("expected Replaced"),
+        }
+
+        // ReplaceWithGuard then abandon guard → entry gone
+        let result = cache.entry(&2, None, |_k, _v| EntryAction::<()>::ReplaceWithGuard);
+        match result {
+            EntryResult::Replaced(g, _old) => {
+                drop(g);
+                assert_eq!(cache.get(&2), None);
+            }
+            _ => panic!("expected Replaced"),
+        }
+
+        // Vacant key → guard
+        let result = cache.entry(&3, None, |_k, v| EntryAction::Retain(*v));
+        match result {
+            EntryResult::Vacant(g) => {
+                let _ = g.insert(30);
+                assert_eq!(cache.get(&3), Some(30));
+            }
+            _ => panic!("expected Vacant"),
+        }
+    }
+
+    /// Tests weight tracking across all entry actions using a string-length weighter
+    #[test]
+    fn test_entry_weight_tracking() {
+        #[derive(Clone)]
+        struct StringWeighter;
+        impl crate::Weighter<u64, String> for StringWeighter {
+            fn weight(&self, _key: &u64, val: &String) -> u64 {
+                val.len() as u64
+            }
+        }
+
+        let cache = Cache::with_weighter(100, 100_000, StringWeighter);
+        cache.insert(1, "hello".to_string());
+        cache.insert(2, "world".to_string());
+        assert_eq!(cache.weight(), 10);
+
+        // Retain without mutation — weight unchanged
+        let result = cache.entry(&1, None, |_k, _v| EntryAction::Retain(()));
+        assert!(matches!(result, EntryResult::Retained(())));
+        assert_eq!(cache.weight(), 10);
+
+        // Mutate to longer string — weight increases
+        let result = cache.entry(&1, None, |_k, v| {
+            v.push_str(" world");
+            EntryAction::Retain(())
+        });
+        assert!(matches!(result, EntryResult::Retained(())));
+        assert_eq!(cache.weight(), 16); // "hello world" (11) + "world" (5)
+        assert_eq!(cache.get(&1).unwrap(), "hello world");
+
+        // Mutate to empty string — weight to zero, entry stays
+        let result = cache.entry(&1, None, |_k, v| {
+            v.clear();
+            EntryAction::Retain(())
+        });
+        assert!(matches!(result, EntryResult::Retained(())));
+        assert_eq!(cache.weight(), 5); // "" (0) + "world" (5)
+        assert_eq!(cache.get(&1).unwrap(), "");
+
+        // Remove — weight decremented
+        let result = cache.entry(&2, None, |_k, _v| EntryAction::<()>::Remove);
+        assert!(matches!(result, EntryResult::Removed(2, _)));
+        assert_eq!(cache.weight(), 0);
+        assert_eq!(cache.len(), 1);
+
+        // ReplaceWithGuard — old weight gone, new weight after insert
+        cache.insert(3, "hello".to_string());
+        assert_eq!(cache.weight(), 5);
+        let result = cache.entry(&3, None, |_k, _v| EntryAction::<()>::ReplaceWithGuard);
+        match result {
+            EntryResult::Replaced(g, _old) => {
+                assert_eq!(cache.weight(), 0);
+                let _ = g.insert("hello world!!".to_string());
+                assert_eq!(cache.weight(), 13);
+            }
+            _ => panic!("expected Replaced"),
+        }
+    }
+
+    /// Tests eviction and zero-capacity edge cases
+    #[test]
+    fn test_entry_eviction() {
+        // Cache with capacity for ~2 items — insert 3rd triggers eviction
+        let cache = Cache::new(2);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        assert_eq!(cache.len(), 2);
+
+        let result = cache.entry(&3, None, |_k, v| EntryAction::Retain(*v));
+        match result {
+            EntryResult::Vacant(g) => {
+                let _ = g.insert(30);
+                assert!(cache.len() <= 2);
+                assert_eq!(cache.get(&3), Some(30));
+            }
+            _ => panic!("expected Vacant"),
+        }
+
+        // Zero-capacity cache — insert evicts immediately
+        let cache = Cache::new(0);
+        let result = cache.entry(&1, None, |_k, v| EntryAction::Retain(*v));
+        match result {
+            EntryResult::Vacant(g) => {
+                let _ = g.insert(10);
+                assert_eq!(cache.get(&1), None);
+            }
+            _ => panic!("expected Vacant"),
+        }
+    }
+
+    /// Tests entry() waiting on existing placeholder: value arrives, guard abandoned
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_entry_concurrent_placeholder_wait() {
+        let cache = Arc::new(Cache::new(100));
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Thread holds guard, inserts after delay
+        let cache2 = cache.clone();
+        let barrier2 = barrier.clone();
+        let handle = thread::spawn(move || match cache2.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => {
+                barrier2.wait();
+                std::thread::sleep(Duration::from_millis(50));
+                let _ = g.insert(42);
+            }
+            _ => panic!("expected guard"),
+        });
+
+        barrier.wait();
+        let result = cache.entry(&1, None, |_k, v| EntryAction::Retain(*v));
+        assert!(matches!(result, EntryResult::Retained(42)));
+        handle.join().unwrap();
+    }
+
+    /// Tests entry() getting guard when placeholder loader abandons
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_entry_concurrent_placeholder_guard_abandoned() {
+        let cache = Arc::new(Cache::new(100));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let cache2 = cache.clone();
+        let barrier2 = barrier.clone();
+        let handle = thread::spawn(move || match cache2.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => {
+                barrier2.wait();
+                std::thread::sleep(Duration::from_millis(50));
+                drop(g);
+            }
+            _ => panic!("expected guard"),
+        });
+
+        barrier.wait();
+        let result = cache.entry(&1, None, |_k, v| EntryAction::Retain(*v));
+        match result {
+            EntryResult::Vacant(g) => {
+                let _ = g.insert(99);
+                assert_eq!(cache.get(&1), Some(99));
+            }
+            _ => panic!("expected Vacant after abandoned placeholder"),
+        }
+        handle.join().unwrap();
+    }
+
+    /// Tests zero and nonzero timeouts
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_entry_timeout() {
+        let cache = Cache::new(100);
+
+        // Zero timeout — immediate Timeout when placeholder exists
+        let guard = match cache.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => g,
+            _ => panic!("expected guard"),
+        };
+        let result = cache.entry(&1, Some(Duration::ZERO), |_k, v| EntryAction::Retain(*v));
+        assert!(matches!(result, EntryResult::Timeout));
+        let _ = guard.insert(1);
+
+        // Nonzero timeout — guard held longer than timeout
+        let cache = Arc::new(Cache::new(100));
+        let barrier = Arc::new(Barrier::new(2));
+        let cache2 = cache.clone();
+        let barrier2 = barrier.clone();
+        let holder = thread::spawn(move || {
+            let guard = match cache2.get_value_or_guard(&1, None) {
+                GuardResult::Guard(g) => g,
+                _ => panic!("expected guard"),
+            };
+            barrier2.wait();
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = guard.insert(1);
+        });
+
+        barrier.wait();
+        let result = cache.entry(&1, Some(Duration::from_millis(50)), |_k, v| {
+            EntryAction::Retain(*v)
+        });
+        assert!(matches!(result, EntryResult::Timeout));
+        holder.join().unwrap();
+    }
+
+    /// Tests multiple waiters all receiving the value
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_entry_concurrent_multiple_waiters() {
+        let cache = Arc::new(Cache::new(100));
+        let barrier = Arc::new(Barrier::new(4)); // 1 loader + 3 waiters
+
+        let cache1 = cache.clone();
+        let barrier1 = barrier.clone();
+        let loader = thread::spawn(move || match cache1.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => {
+                barrier1.wait();
+                std::thread::sleep(Duration::from_millis(50));
+                let _ = g.insert(42);
+            }
+            _ => panic!("expected guard"),
+        });
+
+        let mut waiters = Vec::new();
+        for _ in 0..3 {
+            let cache_c = cache.clone();
+            let barrier_c = barrier.clone();
+            waiters.push(thread::spawn(move || {
+                barrier_c.wait();
+                let result = cache_c.entry(&1, None, |_k, v| EntryAction::Retain(*v));
+                match result {
+                    EntryResult::Retained(v) => v,
+                    _ => panic!("expected Value"),
+                }
+            }));
+        }
+
+        loader.join().unwrap();
+        for w in waiters {
+            assert_eq!(w.join().unwrap(), 42);
+        }
+    }
+
+    /// Tests ReplaceWithGuard and Remove actions after waiting for a placeholder
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_entry_concurrent_action_after_wait() {
+        // ReplaceWithGuard after wait
+        let cache = Arc::new(Cache::new(100));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let cache1 = cache.clone();
+        let barrier1 = barrier.clone();
+        let loader = thread::spawn(move || match cache1.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => {
+                barrier1.wait();
+                std::thread::sleep(Duration::from_millis(50));
+                let _ = g.insert(42);
+            }
+            _ => panic!("expected guard"),
+        });
+
+        barrier.wait();
+        let result = cache.entry(&1, None, |_k, _v| EntryAction::<()>::ReplaceWithGuard);
+        match result {
+            EntryResult::Replaced(g, old) => {
+                assert_eq!(old, 42);
+                let _ = g.insert(100);
+                assert_eq!(cache.get(&1), Some(100));
+            }
+            _ => panic!("expected Replaced"),
+        }
+        loader.join().unwrap();
+
+        // Remove after wait
+        let cache = Arc::new(Cache::new(100));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let cache1 = cache.clone();
+        let barrier1 = barrier.clone();
+        let loader = thread::spawn(move || match cache1.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => {
+                barrier1.wait();
+                std::thread::sleep(Duration::from_millis(50));
+                let _ = g.insert(42);
+            }
+            _ => panic!("expected guard"),
+        });
+
+        barrier.wait();
+        let result = cache.entry(&1, None, |_k, _v| EntryAction::<()>::Remove);
+        assert!(matches!(result, EntryResult::Removed(1, 42)));
+        assert_eq!(cache.get(&1), None);
+        loader.join().unwrap();
+    }
+
+    /// Multi-thread stress test for entry()
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_entry_concurrent_stress() {
+        const N_THREADS: usize = 8;
+        const N_KEYS: usize = 50;
+        const N_OPS: usize = 500;
+
+        let cache = Arc::new(Cache::new(1000));
+        let barrier = Arc::new(Barrier::new(N_THREADS));
+
+        let mut handles = Vec::new();
+        for t in 0..N_THREADS {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for i in 0..N_OPS {
+                    let key = (t * N_OPS + i) % N_KEYS;
+                    let result = cache.entry(&key, Some(Duration::from_millis(10)), |_k, v| {
+                        EntryAction::Retain(*v)
+                    });
+                    match result {
+                        EntryResult::Retained(_) => {}
+                        EntryResult::Vacant(g) => {
+                            let _ = g.insert(key * 10);
+                        }
+                        EntryResult::Replaced(g, _) => {
+                            let _ = g.insert(key * 10);
+                        }
+                        EntryResult::Timeout => {}
+                        EntryResult::Removed(_, _) => {}
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(cache.len() <= N_KEYS);
+        for key in 0..N_KEYS {
+            if let Some(v) = cache.get(&key) {
+                assert_eq!(v, key * 10);
+            }
+        }
+    }
+
+    // --- Async tests ---
+
+    /// Tests all basic async entry actions in one test
+    #[tokio::test]
+    async fn test_entry_async_actions() {
+        let cache = Cache::new(100);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+
+        // Retain
+        let result = cache.entry_async(&1, |_k, v| EntryAction::Retain(*v)).await;
+        assert!(matches!(result, EntryResult::Retained(10)));
+        assert_eq!(cache.get(&1), Some(10));
+
+        // Remove
+        let result = cache
+            .entry_async(&1, |_k, _v| EntryAction::<()>::Remove)
+            .await;
+        assert!(matches!(result, EntryResult::Removed(1, 10)));
+        assert_eq!(cache.get(&1), None);
+
+        // ReplaceWithGuard
+        let result = cache
+            .entry_async(&2, |_k, _v| EntryAction::<()>::ReplaceWithGuard)
+            .await;
+        match result {
+            EntryResult::Replaced(g, old) => {
+                assert_eq!(old, 20);
+                let _ = g.insert(42);
+                assert_eq!(cache.get(&2), Some(42));
+            }
+            _ => panic!("expected Replaced"),
+        }
+
+        // Vacant
+        let result = cache.entry_async(&3, |_k, v| EntryAction::Retain(*v)).await;
+        match result {
+            EntryResult::Vacant(g) => {
+                let _ = g.insert(99);
+                assert_eq!(cache.get(&3), Some(99));
+            }
+            _ => panic!("expected Vacant"),
+        }
+    }
+
+    /// Tests async entry waiting on placeholder: value arrives, guard abandoned
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_entry_async_concurrent_wait() {
+        let cache = Arc::new(Cache::new(100));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let cache1 = cache.clone();
+        let barrier1 = barrier.clone();
+        let holder = thread::spawn(move || {
+            let guard = match cache1.get_value_or_guard(&1, None) {
+                GuardResult::Guard(g) => g,
+                _ => panic!("expected guard"),
+            };
+            barrier1.wait();
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = guard.insert(42);
+        });
+
+        barrier.wait();
+        let result = cache.entry_async(&1, |_k, v| EntryAction::Retain(*v)).await;
+        assert!(matches!(result, EntryResult::Retained(42)));
+        holder.join().unwrap();
+    }
+
+    /// Tests async entry getting guard when placeholder loader abandons
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_entry_async_concurrent_guard_abandoned() {
+        let cache = Arc::new(Cache::new(100));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let cache1 = cache.clone();
+        let barrier1 = barrier.clone();
+        let holder = thread::spawn(move || {
+            let guard = match cache1.get_value_or_guard(&1, None) {
+                GuardResult::Guard(g) => g,
+                _ => panic!("expected guard"),
+            };
+            barrier1.wait();
+            std::thread::sleep(Duration::from_millis(50));
+            drop(guard);
+        });
+
+        barrier.wait();
+        let result = cache.entry_async(&1, |_k, v| EntryAction::Retain(*v)).await;
+        match result {
+            EntryResult::Vacant(g) => {
+                let _ = g.insert(99);
+            }
+            _ => panic!("expected Vacant after abandoned placeholder"),
+        }
+        assert_eq!(cache.get(&1), Some(99));
+        holder.join().unwrap();
+    }
+
+    /// Multi-task async stress test
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn test_entry_async_concurrent_stress() {
+        const N_TASKS: usize = 16;
+        const N_KEYS: usize = 50;
+        const N_OPS: usize = 200;
+
+        let cache = Arc::new(Cache::new(1000));
+        let barrier = Arc::new(tokio::sync::Barrier::new(N_TASKS));
+
+        let mut handles = Vec::new();
+        for t in 0..N_TASKS {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                for i in 0..N_OPS {
+                    let key = (t * N_OPS + i) % N_KEYS;
+                    // Use get_or_insert_async instead of entry_async to avoid
+                    // lifetime issues with tokio::spawn (entry_async borrows &self)
+                    let _ = cache
+                        .get_or_insert_async(&key, async { Ok::<_, ()>(key * 10) })
+                        .await;
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert!(cache.len() <= N_KEYS);
+        for key in 0..N_KEYS {
+            if let Some(v) = cache.get(&key) {
+                assert_eq!(v, key * 10);
+            }
+        }
     }
 }
