@@ -2,6 +2,7 @@ use std::{
     future::Future,
     hash::{BuildHasher, Hash},
     hint::unreachable_unchecked,
+    marker::PhantomPinned,
     mem, pin,
     task::{self, Poll},
     time::{Duration, Instant},
@@ -58,6 +59,14 @@ pub struct Placeholder<Val> {
     idx: Token,
     state: RwLock<State>,
     value: OnceLock<Val>,
+}
+
+impl<Val> Placeholder<Val> {
+    /// Returns the filled value, if any.
+    #[inline]
+    pub(crate) fn value(&self) -> Option<&Val> {
+        self.value.get()
+    }
 }
 
 #[derive(Debug)]
@@ -126,14 +135,59 @@ impl Waiter {
     }
 }
 
+/// Result of [`Cache::get_value_or_guard`](crate::sync::Cache::get_value_or_guard).
+///
+/// See also [`Cache::get_value_or_guard_async`](crate::sync::Cache::get_value_or_guard_async)
+/// which returns `Result<Val, PlaceholderGuard>` instead.
 #[derive(Debug)]
 pub enum GuardResult<'a, Key, Val, We, B, L> {
+    /// The value was found in the cache.
     Value(Val),
+    /// The key was absent; use the guard to insert a value.
     Guard(PlaceholderGuard<'a, Key, Val, We, B, L>),
+    /// Timed out waiting for another loader's placeholder.
+    Timeout,
+}
+
+// Re-export from shard where it's defined.
+pub use crate::shard::EntryAction;
+
+/// Result of waiting for a placeholder or [`JoinFuture`].
+pub(crate) enum JoinResult<'a, Key, Val, We, B, L> {
+    /// Value is available — either found directly in the cache (`None`) or
+    /// inside the shared placeholder (`Some`).
+    Filled(Option<SharedPlaceholder<Val>>),
+    /// Got the guard — caller should load the value.
+    Guard(PlaceholderGuard<'a, Key, Val, We, B, L>),
+    /// Timed out waiting (sync paths only).
+    Timeout,
+}
+
+/// Result of an [`entry`](crate::sync::Cache::entry) or
+/// [`entry_async`](crate::sync::Cache::entry_async) operation.
+#[derive(Debug)]
+pub enum EntryResult<'a, Key, Val, We, B, L, T> {
+    /// The key existed and the callback returned [`EntryAction::Retain`].
+    /// Contains the value `T` returned by the callback.
+    Retained(T),
+    /// The key existed and the callback returned [`EntryAction::Remove`].
+    /// Contains the removed key and value.
+    Removed(Key, Val),
+    /// The key existed and the callback returned [`EntryAction::ReplaceWithGuard`].
+    /// Contains a [`PlaceholderGuard`] for re-insertion and the old value.
+    Replaced(PlaceholderGuard<'a, Key, Val, We, B, L>, Val),
+    /// The key was absent. Contains a [`PlaceholderGuard`] for inserting a new value.
+    Vacant(PlaceholderGuard<'a, Key, Val, We, B, L>),
+    /// Timed out waiting for another loader's placeholder.
+    ///
+    /// Only returned by [`Cache::entry`](crate::sync::Cache::entry),
+    /// which accepts a `timeout` parameter. For the async variant, use an external
+    /// timeout mechanism (e.g. `tokio::time::timeout`).
     Timeout,
 }
 
 impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
+    #[inline]
     pub fn start_loading(
         lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
@@ -158,14 +212,11 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
         lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         shared: SharedPlaceholder<Val>,
-    ) -> Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>
-    where
-        Val: Clone,
-    {
+    ) -> Result<SharedPlaceholder<Val>, PlaceholderGuard<'a, Key, Val, We, B, L>> {
         // Check if the value was loaded, and if it wasn't it means we got the
         // guard and need to start loading the value.
-        if let Some(v) = shared.value.get() {
-            Ok(v.clone())
+        if shared.value().is_some() {
+            Ok(shared)
         } else {
             Err(PlaceholderGuard::start_loading(lifecycle, shard, shared))
         }
@@ -179,10 +230,7 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
         shared: &SharedPlaceholder<Val>,
         // a function that returns a waiter if it should be added
         waiter_new: impl FnOnce() -> Option<Waiter>,
-    ) -> Option<Val>
-    where
-        Val: Clone,
-    {
+    ) -> bool {
         let mut state = shared.state.write();
         // _locked_shard could be released here, it would be sufficient to synchronize with the holder
         // of the guard trying to remove the placeholder from the cache. But if this placeholder is hot,
@@ -193,13 +241,9 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
                 if let Some(waiter) = waiter_new() {
                     state.waiters.push(waiter);
                 }
-                None
+                false
             }
-            LoadingState::Inserted => unsafe {
-                // SAFETY: The value is guaranteed to be set at this point
-                drop(state); // Allow cloning outside the lock
-                Some(shared.value.get().unwrap_unchecked().clone())
-            },
+            LoadingState::Inserted => true,
         }
     }
 }
@@ -218,59 +262,94 @@ impl<
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         hash: u64,
         key: &Q,
-        mut timeout: Option<Duration>,
+        timeout: Option<Duration>,
     ) -> GuardResult<'a, Key, Val, We, B, L>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         let mut shard_guard = shard.write();
-        let shared = match shard_guard.upsert_placeholder(hash, key) {
+        let shared = match shard_guard.get_or_placeholder(hash, key) {
             Ok((_, v)) => return GuardResult::Value(v.clone()),
             Err((shared, true)) => {
                 return GuardResult::Guard(Self::start_loading(lifecycle, shard, shared));
             }
             Err((shared, false)) => shared,
         };
+        let mut deadline = timeout.map(Ok);
+        match Self::wait_for_placeholder(lifecycle, shard, shard_guard, shared, deadline.as_mut()) {
+            JoinResult::Filled(shared) => unsafe {
+                // SAFETY: Filled means the value was set by the loader.
+                GuardResult::Value(shared.unwrap_unchecked().value().unwrap_unchecked().clone())
+            },
+            JoinResult::Guard(g) => GuardResult::Guard(g),
+            JoinResult::Timeout => GuardResult::Timeout,
+        }
+    }
 
-        // Create notified flag on stack - this will live for the entire duration of join
+    /// Waits for an existing placeholder to be filled by another thread.
+    ///
+    /// Registers the current thread as a waiter (consuming the shard guard to avoid
+    /// races with placeholder removal), then parks until notified or timeout.
+    ///
+    /// `deadline` is `None` for no timeout, or `Some(&mut Ok(duration))` on the first
+    /// call. On first use the duration is converted in-place to `Err(instant)` so that
+    /// callers that retry (e.g. `entry`) preserve the original deadline across calls.
+    pub(crate) fn wait_for_placeholder(
+        lifecycle: &'a L,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
+        shard_guard: RwLockWriteGuard<'a, CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
+        shared: SharedPlaceholder<Val>,
+        deadline: Option<&mut Result<Duration, Instant>>,
+    ) -> JoinResult<'a, Key, Val, We, B, L> {
         let notified = pin::pin!(AtomicBool::new(false));
-        // Set if the thread was added to the waiters list
         let mut parked_thread = None;
-        let maybe_val = Self::join_waiters(shard_guard, &shared, || {
-            if timeout.is_some_and(|t| t.is_zero()) {
+        let already_filled = Self::join_waiters(shard_guard, &shared, || {
+            // Skip registering a waiter if the timeout is zero.
+            // An already-elapsed Err(instant) deadline is not checked here;
+            // the loop below handles it and join_timeout cleans up the waiter.
+            if matches!(deadline.as_deref(), Some(Ok(d)) if d.is_zero()) {
                 None
             } else {
                 let thread = thread::current();
-                let id = thread.id();
-                parked_thread = Some(id);
+                parked_thread = Some(thread.id());
                 Some(Waiter::Thread {
                     thread,
                     notified: &*notified as *const AtomicBool,
                 })
             }
         });
-        if let Some(v) = maybe_val {
-            return GuardResult::Value(v);
+        if already_filled {
+            return JoinResult::Filled(Some(shared));
         }
 
-        // Track the start time of the timeout, set lazily
-        let mut timeout_start = None;
+        // Lazily convert the duration to a deadline on first call;
+        // subsequent retries from entry() reuse the same deadline.
+        let deadline = deadline.and_then(|d| match *d {
+            Ok(dur) => match Instant::now().checked_add(dur) {
+                Some(instant) => {
+                    *d = Err(instant);
+                    Some(instant)
+                }
+                None => None, // overflow → treat as no timeout (wait forever)
+            },
+            Err(instant) => Some(instant),
+        });
         loop {
-            if let Some(remaining) = timeout {
+            if let Some(instant) = deadline {
+                let remaining = instant.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     return Self::join_timeout(lifecycle, shard, shared, parked_thread, &notified);
                 }
-                let start = *timeout_start.get_or_insert_with(Instant::now);
                 #[cfg(not(fuzzing))]
                 thread::park_timeout(remaining);
-                timeout = Some(remaining.saturating_sub(start.elapsed()));
             } else {
+                #[cfg(not(fuzzing))]
                 thread::park();
             }
             if notified.load(Ordering::Acquire) {
                 return match Self::handle_notification(lifecycle, shard, shared) {
-                    Ok(v) => GuardResult::Value(v),
-                    Err(g) => GuardResult::Guard(g),
+                    Ok(shared) => JoinResult::Filled(Some(shared)),
+                    Err(g) => JoinResult::Guard(g),
                 };
             }
         }
@@ -284,12 +363,12 @@ impl<
         // when timeout is zero, the thread may have not been added to the waiters list
         parked_thread: Option<thread::ThreadId>,
         notified: &AtomicBool,
-    ) -> GuardResult<'a, Key, Val, We, B, L> {
+    ) -> JoinResult<'a, Key, Val, We, B, L> {
         let mut state = shared.state.write();
         match state.loading {
             LoadingState::Loading if notified.load(Ordering::Acquire) => {
                 drop(state); // Drop state guard to avoid a deadlock with start_loading
-                GuardResult::Guard(PlaceholderGuard::start_loading(lifecycle, shard, shared))
+                JoinResult::Guard(PlaceholderGuard::start_loading(lifecycle, shard, shared))
             }
             LoadingState::Loading => {
                 if parked_thread.is_some() {
@@ -304,12 +383,12 @@ impl<
                         unsafe { unreachable_unchecked() };
                     }
                 }
-                GuardResult::Timeout
+                JoinResult::Timeout
             }
-            LoadingState::Inserted => unsafe {
-                // SAFETY: The value is guaranteed to be set at this point
-                GuardResult::Value(shared.value.get().unwrap_unchecked().clone())
-            },
+            LoadingState::Inserted => {
+                drop(state);
+                JoinResult::Filled(Some(shared))
+            }
         }
     }
 }
@@ -412,19 +491,29 @@ impl<Key, Val, We, B, L> std::fmt::Debug for PlaceholderGuard<'_, Key, Val, We, 
     }
 }
 
-/// Future that results in an Ok(Value) or Err(Guard)
-pub struct JoinFuture<'a, 'b, Q: ?Sized, Key, Val, We, B, L> {
+/// Future that checks for an existing placeholder and waits for it to be filled.
+///
+/// The shard lock is acquired as a local variable inside `poll`, never stored
+/// in the future state, so the future remains `Send`.
+///
+/// # Pin safety
+///
+/// This future is `!Unpin` because `poll` registers `&self.notified` as a raw
+/// pointer in the placeholder's waiter list. `Pin` guarantees the future won't
+/// be moved after the first poll, keeping that pointer valid. The pointer is
+/// cleaned up in `drop_pending_waiter` before the struct is destroyed.
+pub(crate) struct JoinFuture<'a, 'b, Q: ?Sized, Key, Val, We, B, L> {
     lifecycle: &'a L,
     shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
-    state: JoinFutureState<'b, Q, Val>,
+    hash: u64,
+    key: &'b Q,
+    state: JoinFutureState<Val>,
     notified: AtomicBool,
+    _pin: PhantomPinned,
 }
 
-enum JoinFutureState<'b, Q: ?Sized, Val> {
-    Created {
-        hash: u64,
-        key: &'b Q,
-    },
+enum JoinFutureState<Val> {
+    Created,
     Pending {
         shared: SharedPlaceholder<Val>,
         waker: task::Waker,
@@ -433,20 +522,25 @@ enum JoinFutureState<'b, Q: ?Sized, Val> {
 }
 
 impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
-    pub fn new(
+    pub(crate) fn new(
         lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         hash: u64,
         key: &'b Q,
-    ) -> JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
+    ) -> Self {
         Self {
             lifecycle,
             shard,
-            state: JoinFutureState::Created { hash, key },
+            hash,
+            key,
+            state: JoinFutureState::Created,
             notified: Default::default(),
+            _pin: PhantomPinned,
         }
     }
+}
 
+impl<Q: ?Sized, Key, Val, We, B, L> JoinFuture<'_, '_, Q, Key, Val, We, B, L> {
     #[cold]
     fn drop_pending_waiter(&mut self) {
         let JoinFutureState::Pending { shared, .. } =
@@ -475,7 +569,7 @@ impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, 
                     unsafe { unreachable_unchecked() }
                 }
             }
-            LoadingState::Inserted => (), // We were notified but didn't get polled - nothing to do
+            LoadingState::Inserted => (), // Notified but didn't get polled - nothing to do
         }
     }
 }
@@ -493,35 +587,41 @@ impl<
         'a,
         Key: Eq + Hash,
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
-        Val: Clone,
+        Val,
         We: Weighter<Key, Val>,
         B: BuildHasher,
         L: Lifecycle<Key, Val>,
     > Future for JoinFuture<'a, '_, Q, Key, Val, We, B, L>
 {
-    type Output = Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>;
+    type Output = JoinResult<'a, Key, Val, We, B, L>;
 
-    fn poll(mut self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        let this = &mut *self;
+    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: We never move the struct out of the Pin — only read/write individual
+        // fields. The `notified` field's address (registered in the waiter list) stays
+        // stable because Pin guarantees the future won't be moved.
+        let this = unsafe { self.get_unchecked_mut() };
         let lifecycle = this.lifecycle;
         let shard = this.shard;
         match &mut this.state {
-            JoinFutureState::Created { hash, key } => {
-                debug_assert!(!this.notified.load(Ordering::Acquire));
+            JoinFutureState::Created => {
                 let mut shard_guard = shard.write();
-                match shard_guard.upsert_placeholder(*hash, *key) {
-                    Ok((_, v)) => {
+                match shard_guard.get_or_placeholder(this.hash, this.key) {
+                    Ok(_) => {
                         this.state = JoinFutureState::Done;
-                        Poll::Ready(Ok(v.clone()))
+                        Poll::Ready(JoinResult::Filled(None))
                     }
                     Err((shared, true)) => {
-                        let guard = PlaceholderGuard::start_loading(lifecycle, shard, shared);
                         this.state = JoinFutureState::Done;
-                        Poll::Ready(Err(guard))
+                        drop(shard_guard);
+                        Poll::Ready(JoinResult::Guard(PlaceholderGuard::start_loading(
+                            lifecycle, shard, shared,
+                        )))
                     }
                     Err((shared, false)) => {
+                        // Register as waiter while holding shard lock — prevents
+                        // race with drop_uninserted_slow removing the placeholder.
                         let mut waker = None;
-                        let maybe_val =
+                        let already_filled =
                             PlaceholderGuard::join_waiters(shard_guard, &shared, || {
                                 let waker_ = cx.waker().clone();
                                 waker = Some(waker_.clone());
@@ -530,34 +630,29 @@ impl<
                                     notified: &this.notified as *const AtomicBool,
                                 })
                             });
-                        if let Some(v) = maybe_val {
-                            debug_assert!(waker.is_none());
-                            debug_assert!(!this.notified.load(Ordering::Acquire));
+                        if already_filled {
                             this.state = JoinFutureState::Done;
-                            Poll::Ready(Ok(v))
+                            Poll::Ready(JoinResult::Filled(Some(shared)))
                         } else {
-                            let waker = waker.unwrap();
-                            this.state = JoinFutureState::Pending { shared, waker };
+                            this.state = JoinFutureState::Pending {
+                                shared,
+                                waker: waker.unwrap(),
+                            };
                             Poll::Pending
                         }
                     }
                 }
             }
             JoinFutureState::Pending { waker, shared } => {
-                'notified: {
-                    if this.notified.load(Ordering::Acquire) {
-                        break 'notified;
-                    }
-                    // Update waker in case it changed
+                if !this.notified.load(Ordering::Acquire) {
                     let new_waker = cx.waker();
-                    if !waker.will_wake(new_waker) {
-                        let mut state = shared.state.write();
-                        // Re-check notified after acquiring the lock. A concurrent
-                        // insert may have drained the waiters list between the
-                        // notified check above and this point.
-                        if this.notified.load(Ordering::Acquire) {
-                            break 'notified;
-                        }
+                    if waker.will_wake(new_waker) {
+                        return Poll::Pending;
+                    }
+                    let mut state = shared.state.write();
+                    // Re-check after acquiring the lock — a concurrent insert
+                    // may have drained the waiters list in the meantime.
+                    if !this.notified.load(Ordering::Acquire) {
                         let w = unsafe {
                             state
                                 .waiters
@@ -570,17 +665,20 @@ impl<
                             waker: new_waker.clone(),
                             notified: &this.notified as *const AtomicBool,
                         };
+                        return Poll::Pending;
                     }
-                    return Poll::Pending;
-                };
+                }
                 let JoinFutureState::Pending { shared, .. } =
                     mem::replace(&mut this.state, JoinFutureState::Done)
                 else {
                     unsafe { unreachable_unchecked() }
                 };
-                Poll::Ready(PlaceholderGuard::handle_notification(
-                    lifecycle, shard, shared,
-                ))
+                Poll::Ready(
+                    match PlaceholderGuard::handle_notification(lifecycle, shard, shared) {
+                        Ok(shared) => JoinResult::Filled(Some(shared)),
+                        Err(g) => JoinResult::Guard(g),
+                    },
+                )
             }
             JoinFutureState::Done => panic!("Polled after ready"),
         }

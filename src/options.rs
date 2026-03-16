@@ -122,7 +122,7 @@ impl OptionsBuilder {
         self
     }
 
-    /// Builds an `Option` struct which can be used in the `Cache::with_options` constructor.
+    /// Builds an `Options` struct which can be used in the `Cache::with_options` constructor.
     #[inline]
     pub fn build(&self) -> Result<Options, Error> {
         let shards = self.shards.unwrap_or_else(|| available_parallelism() * 4);

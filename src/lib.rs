@@ -17,8 +17,8 @@
 //! # Equivalent keys
 //!
 //! The cache uses the [`Equivalent`](https://docs.rs/equivalent/1.0.1/equivalent/trait.Equivalent.html) trait
-//! for gets/removals. It can helps work around the `Borrow` limitations.
-//! For example, if the cache key is a tuple `(K, Q)`, you wouldn't be access to access such keys without
+//! for gets/removals. It can help work around the `Borrow` limitations.
+//! For example, if the cache key is a tuple `(K, Q)`, you wouldn't be able to access such keys without
 //! building a `&(K, Q)` and thus potentially cloning `K` and/or `Q`.
 //!
 //! # User defined weight
@@ -30,6 +30,10 @@
 //! By using the `get_or_insert` or `get_value_or_guard` family of functions (both sync and async variants
 //! are available, they can be mix and matched) the user can coordinate the insertion of entries, so only
 //! one value is "computed" and inserted after a cache miss.
+//!
+//! The `entry` family of functions provide a closure-based API for atomically
+//! inspecting and acting on existing entries (keep, remove, or replace) while also coordinating
+//! insertion on cache misses.
 //!
 //! # Lifecycle hooks
 //!
@@ -114,7 +118,7 @@ pub type DefaultHashBuilder = std::collections::hash_map::RandomState;
 ///
 /// impl Weighter<u64, String> for StringWeighter {
 ///     fn weight(&self, _key: &u64, val: &String) -> u64 {
-///         // Be cautious out about zero weights!
+///         // Be cautious about zero weights!
 ///         val.len() as u64
 ///     }
 /// }
