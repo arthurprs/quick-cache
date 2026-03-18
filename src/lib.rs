@@ -83,11 +83,7 @@
 #![allow(clippy::type_complexity)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(all(
-    not(feature = "shuttle"),
-    feature = "parking_lot",
-    feature = "crossbeam"
-))]
+#[cfg(all(feature = "parking_lot", feature = "crossbeam"))]
 compile_error!("features `parking_lot` and `crossbeam` are mutually exclusive");
 
 #[cfg(not(fuzzing))]
