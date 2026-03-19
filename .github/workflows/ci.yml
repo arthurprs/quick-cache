@@ -26,7 +26,7 @@ jobs:
       - run: cargo check --all-targets
       - run: cargo check --all-targets --features stats
       - run: cargo check --all-targets --no-default-features
-      - run: cargo check --all-targets --no-default-features --features crossbeam
+      - run: cargo check --all-targets --no-default-features --features sharded-lock
       - run: cargo check --all-targets --features shuttle
 
   test:
@@ -44,7 +44,7 @@ jobs:
           override: true
       - run: cargo test
       - run: cargo test --no-default-features
-      - run: cargo test --no-default-features --features crossbeam
+      - run: cargo test --no-default-features --features sharded-lock
       # no run because of shuttle feature and non-shuttle tests
       - run: cargo test --features shuttle --no-run
 

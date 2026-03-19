@@ -2,23 +2,23 @@ use std::ops::{Deref, DerefMut};
 
 #[cfg(feature = "parking_lot")]
 type InnerRwLock<T> = parking_lot::RwLock<T>;
-#[cfg(all(not(feature = "parking_lot"), feature = "crossbeam"))]
+#[cfg(all(not(feature = "parking_lot"), feature = "sharded-lock"))]
 type InnerRwLock<T> = crossbeam_utils::sync::ShardedLock<T>;
-#[cfg(all(not(feature = "parking_lot"), not(feature = "crossbeam")))]
+#[cfg(all(not(feature = "parking_lot"), not(feature = "sharded-lock")))]
 type InnerRwLock<T> = std::sync::RwLock<T>;
 
 #[cfg(feature = "parking_lot")]
 type InnerRwLockReadGuard<'rwlock, T> = parking_lot::RwLockReadGuard<'rwlock, T>;
-#[cfg(all(not(feature = "parking_lot"), feature = "crossbeam"))]
+#[cfg(all(not(feature = "parking_lot"), feature = "sharded-lock"))]
 type InnerRwLockReadGuard<'rwlock, T> = crossbeam_utils::sync::ShardedLockReadGuard<'rwlock, T>;
-#[cfg(all(not(feature = "parking_lot"), not(feature = "crossbeam")))]
+#[cfg(all(not(feature = "parking_lot"), not(feature = "sharded-lock")))]
 type InnerRwLockReadGuard<'rwlock, T> = std::sync::RwLockReadGuard<'rwlock, T>;
 
 #[cfg(feature = "parking_lot")]
 type InnerRwLockWriteGuard<'rwlock, T> = parking_lot::RwLockWriteGuard<'rwlock, T>;
-#[cfg(all(not(feature = "parking_lot"), feature = "crossbeam"))]
+#[cfg(all(not(feature = "parking_lot"), feature = "sharded-lock"))]
 type InnerRwLockWriteGuard<'rwlock, T> = crossbeam_utils::sync::ShardedLockWriteGuard<'rwlock, T>;
-#[cfg(all(not(feature = "parking_lot"), not(feature = "crossbeam")))]
+#[cfg(all(not(feature = "parking_lot"), not(feature = "sharded-lock")))]
 type InnerRwLockWriteGuard<'rwlock, T> = std::sync::RwLockWriteGuard<'rwlock, T>;
 
 /// A reader-writer lock.
@@ -58,7 +58,7 @@ pub struct RwLockReadGuard<'rwlock, T: ?Sized>(InnerRwLockReadGuard<'rwlock, T>)
 #[must_use = "if unused the RwLock will immediately unlock"]
 pub struct RwLockWriteGuard<'rwlock, T: ?Sized>(InnerRwLockWriteGuard<'rwlock, T>);
 
-#[cfg(not(feature = "crossbeam"))]
+#[cfg(not(feature = "sharded-lock"))]
 impl<T> RwLock<T> {
     /// Creates a new instance of an `RwLock<T>` which is unlocked.
     pub const fn new(t: T) -> Self {
@@ -66,7 +66,7 @@ impl<T> RwLock<T> {
     }
 }
 
-#[cfg(feature = "crossbeam")]
+#[cfg(feature = "sharded-lock")]
 impl<T> RwLock<T> {
     /// Creates a new instance of an `RwLock<T>` which is unlocked.
     pub fn new(t: T) -> Self {
