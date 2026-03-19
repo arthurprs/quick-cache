@@ -66,25 +66,25 @@
 //! # Synchronization primitives
 //!
 //! By default the crate uses [parking_lot](https://crates.io/crates/parking_lot), which is enabled (by default) via
-//! a crate feature with the same name. If `parking_lot` is disabled and `crossbeam` is enabled, the crate uses
+//! a crate feature with the same name. If `parking_lot` is disabled and `sharded-lock` is enabled, the crate uses
 //! [`crossbeam_utils::sync::ShardedLock`](https://docs.rs/crossbeam-utils/latest/crossbeam_utils/sync/struct.ShardedLock.html)
 //! from [crossbeam-utils](https://crates.io/crates/crossbeam-utils) instead. If both are disabled the crate defaults
-//! to the std lib implementation. The `parking_lot` and `crossbeam` features are mutually exclusive.
+//! to the std lib implementation. The `parking_lot` and `sharded-lock` features are mutually exclusive.
 //!
 //! # Cargo Features
 //!
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `ahash` | ✓ | Use [ahash](https://crates.io/crates/ahash) as the default hasher. When disabled, falls back to std lib's `RandomState` (currently SipHash-1-3). |
-//! | `parking_lot` | ✓ | Use [parking_lot](https://crates.io/crates/parking_lot) for synchronization primitives. Mutually exclusive with `crossbeam`. |
-//! | `crossbeam` | | Use [`crossbeam_utils::sync::ShardedLock`](https://docs.rs/crossbeam-utils/latest/crossbeam_utils/sync/struct.ShardedLock.html) for synchronization primitives. Mutually exclusive with `parking_lot`. |
+//! | `parking_lot` | ✓ | Use [parking_lot](https://crates.io/crates/parking_lot) for synchronization primitives. Mutually exclusive with `sharded-lock`. |
+//! | `sharded-lock` | | Use [`crossbeam_utils::sync::ShardedLock`](https://docs.rs/crossbeam-utils/latest/crossbeam_utils/sync/struct.ShardedLock.html) for synchronization primitives. Mutually exclusive with `parking_lot`. |
 //! | `shuttle` | | Enable [shuttle](https://crates.io/crates/shuttle) testing support for concurrency testing. |
 //! | `stats` | | Enable cache statistics tracking via the `hits()` and `misses()` methods. |
 #![allow(clippy::type_complexity)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(all(feature = "parking_lot", feature = "crossbeam"))]
-compile_error!("features `parking_lot` and `crossbeam` are mutually exclusive");
+#[cfg(all(feature = "parking_lot", feature = "sharded-lock"))]
+compile_error!("features `parking_lot` and `sharded-lock` are mutually exclusive");
 
 #[cfg(not(fuzzing))]
 mod linked_slab;
