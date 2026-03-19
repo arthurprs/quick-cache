@@ -14,11 +14,13 @@ rust-version = "1.71"
 
 [features]
 default = ["ahash", "parking_lot"]
+crossbeam = ["dep:crossbeam-utils"]
 shuttle = ["dep:shuttle"]
 stats = []
 
 [dependencies]
 ahash = { optional = true, version = "0.8" }
+crossbeam-utils = { optional = true, version = "0.8" }
 equivalent = "1.0"
 hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
 parking_lot = { optional = true, version = "0.12" }
