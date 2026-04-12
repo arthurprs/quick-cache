@@ -105,6 +105,40 @@ impl<T: ?Sized> RwLock<T> {
         })
     }
 
+    /// Attempts to acquire this `RwLock` with shared read access without blocking.
+    ///
+    /// Returns `Some(guard)` if the lock was acquired, or `None` if it is already
+    /// held by a writer.
+    #[cfg(feature = "non-blocking")]
+    #[inline]
+    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
+        #[cfg(feature = "parking_lot")]
+        {
+            self.0.try_read().map(RwLockReadGuard)
+        }
+        #[cfg(not(feature = "parking_lot"))]
+        {
+            self.0.try_read().ok().map(RwLockReadGuard)
+        }
+    }
+
+    /// Attempts to acquire this `RwLock` with exclusive write access without blocking.
+    ///
+    /// Returns `Some(guard)` if the lock was acquired, or `None` if it is already
+    /// held by any readers or a writer.
+    #[cfg(feature = "non-blocking")]
+    #[inline]
+    pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
+        #[cfg(feature = "parking_lot")]
+        {
+            self.0.try_write().map(RwLockWriteGuard)
+        }
+        #[cfg(not(feature = "parking_lot"))]
+        {
+            self.0.try_write().ok().map(RwLockWriteGuard)
+        }
+    }
+
     /// Locks this `RwLock` with exclusive write access, blocking the current
     /// thread until it can be acquired.
     ///

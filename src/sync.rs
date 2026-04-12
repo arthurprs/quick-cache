@@ -18,6 +18,7 @@ use crate::shard::EntryOrPlaceholder;
 pub use crate::sync_placeholder::{EntryAction, EntryResult, GuardResult, PlaceholderGuard};
 use crate::sync_placeholder::{JoinFuture, JoinResult};
 
+#[cfg(feature = "non-blocking")]
 /// The result of a non-blocking cache operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContendedResult<Val> {
@@ -28,9 +29,13 @@ pub enum ContendedResult<Val> {
     Contended,
 }
 
+#[cfg(feature = "non-blocking")]
 impl<Val> ContendedResult<Val> {
-    pub fn is_ok(&self) -> bool {
-        matches!(self, ContendedResult::Ok(_))
+    pub fn ok(self) -> Option<Val> {
+        match self {
+            ContendedResult::Ok(val) => Some(val),
+            ContendedResult::Contended => None,
+        }
     }
 
     pub fn is_contended(&self) -> bool {
@@ -270,6 +275,7 @@ impl<
     /// Attempts to check if a key exists in the cache without blocking.
     /// Returns [`ContendedResult::Ok(true)`] if present, [`ContendedResult::Ok(false)`] if absent,
     /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
+    #[cfg(feature = "non-blocking")]
     pub fn try_contains_key<Q>(&self, key: &Q) -> ContendedResult<bool>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -296,6 +302,7 @@ impl<
     /// Attempts to fetch an item from the cache whose key is `key`.
     /// Returns [`ContendedResult::Ok(Some(val))`] if the key is present, [`ContendedResult::Ok(None)`] if absent,
     /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
+    #[cfg(feature = "non-blocking")]
     pub fn try_get<Q>(&self, key: &Q) -> ContendedResult<Option<Val>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -323,6 +330,7 @@ impl<
     /// Contrary to gets, peeks don't alter the key "hotness".
     /// Returns [`ContendedResult::Ok(Some(val))`] if the key is present, [`ContendedResult::Ok(None)`] if absent,
     /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
+    #[cfg(feature = "non-blocking")]
     pub fn try_peek<Q>(&self, key: &Q) -> ContendedResult<Option<Val>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -349,6 +357,7 @@ impl<
     /// Attempts to remove an item from the cache whose key is `key`.
     /// Returns [`ContendedResult::Ok(Some(entry))`] with the removed entry if present, [`ContendedResult::Ok(None)`] if absent,
     /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
+    #[cfg(feature = "non-blocking")]
     pub fn try_remove<Q>(&self, key: &Q) -> ContendedResult<Option<(Key, Val)>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -426,6 +435,7 @@ impl<
 
     /// Attempts to insert an item in the cache with key `key`.
     /// Returns [`ContendedResult::Ok`] if the item was inserted, or [`ContendedResult::Contended`] if the shard lock was contended.
+    #[cfg(feature = "non-blocking")]
     pub fn try_insert(&self, key: Key, value: Val) -> ContendedResult<()> {
         match self.try_insert_with_lifecycle(key, value) {
             ContendedResult::Ok(lcs) => {
@@ -451,6 +461,7 @@ impl<
     /// Attempts to insert an item in the cache with key `key`.
     /// Returns [`ContendedResult::Ok`] with the lifecycle request state if the item was inserted,
     /// or [`ContendedResult::Contended`] if the shard lock was contended.
+    #[cfg(feature = "non-blocking")]
     pub fn try_insert_with_lifecycle(
         &self,
         key: Key,
