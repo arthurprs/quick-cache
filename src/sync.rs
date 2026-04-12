@@ -209,6 +209,22 @@ impl<
     }
 
     #[inline]
+    pub fn shard_index<Q>(&self, key: &Q) -> usize
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        // When choosing the shard, rotate the hash bits usize::BITS / 2 so that we
+        // give preference to the bits in the middle of the hash.
+        // Internally hashbrown uses the lower bits for start of probing + the 7 highest,
+        // so by picking something else we improve the real entropy available to each hashbrown shard.
+        (self
+            .hash_builder
+            .hash_one(key)
+            .rotate_right(usize::BITS / 2)
+            & self.shards_mask) as usize
+    }
+
+    #[inline]
     fn shard_for<Q>(
         &self,
         key: &Q,
