@@ -19,11 +19,9 @@ pub use crate::sync_placeholder::{EntryAction, EntryResult, GuardResult, Placeho
 use crate::sync_placeholder::{JoinFuture, JoinResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TryResult<Val> {
+pub enum ContendedResult<Val> {
     /// The value was found and is returned.
-    Found(Val),
-    /// The value was not found, but the shard lock was successfully acquired.
-    NotFound,
+    Ok(Val),
     /// The shard lock could not be acquired without blocking.
     Contended,
 }
@@ -260,22 +258,18 @@ impl<
     /// Attempts to check if a key exists in the cache without blocking.
     /// Returns [`TryResult::Found(true)`] if present, [`TryResult::NotFound`] if absent,
     /// or [`TryResult::Contended`] if the shard lock could not be acquired without blocking.
-    pub fn try_contains_key<Q>(&self, key: &Q) -> TryResult<bool>
+    pub fn try_contains_key<Q>(&self, key: &Q) -> ContendedResult<bool>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         let Some((shard, hash)) = self.shard_for(key) else {
-            return TryResult::NotFound;
+            return ContendedResult::Ok(false);
         };
+
         shard
             .try_read()
-            .map(|guard| {
-                guard
-                    .contains(hash, key)
-                    .then(|| TryResult::Found(true))
-                    .unwrap_or(TryResult::NotFound)
-            })
-            .unwrap_or(TryResult::Contended)
+            .map(|guard| ContendedResult::Ok(guard.contains(hash, key)))
+            .unwrap_or(ContendedResult::Contended)
     }
 
     /// Fetches an item from the cache whose key is `key`.
@@ -290,23 +284,17 @@ impl<
     /// Attempts to fetch an item from the cache whose key is `key`.
     /// Returns [`TryResult::Found`] if the key is present, [`TryResult::NotFound`] if absent,
     /// or [`TryResult::Contended`] if the shard lock could not be acquired without blocking.
-    pub fn try_get<Q>(&self, key: &Q) -> TryResult<Val>
+    pub fn try_get<Q>(&self, key: &Q) -> ContendedResult<Option<Val>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         let Some((shard, hash)) = self.shard_for(key) else {
-            return TryResult::NotFound;
+            return ContendedResult::Ok(None);
         };
         shard
             .try_read()
-            .map(|guard| {
-                guard
-                    .get(hash, key)
-                    .cloned()
-                    .map(TryResult::Found)
-                    .unwrap_or(TryResult::NotFound)
-            })
-            .unwrap_or(TryResult::Contended)
+            .map(|guard| ContendedResult::Ok(guard.get(hash, key).cloned()))
+            .unwrap_or(ContendedResult::Contended)
     }
 
     /// Peeks an item from the cache whose key is `key`.
@@ -323,23 +311,17 @@ impl<
     /// Contrary to gets, peeks don't alter the key "hotness".
     /// Returns [`TryResult::Found`] if the key is present, [`TryResult::NotFound`] if absent,
     /// or [`TryResult::Contended`] if the shard lock could not be acquired without blocking.
-    pub fn try_peek<Q>(&self, key: &Q) -> TryResult<Val>
+    pub fn try_peek<Q>(&self, key: &Q) -> ContendedResult<Option<Val>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         let Some((shard, hash)) = self.shard_for(key) else {
-            return TryResult::NotFound;
+            return ContendedResult::Ok(None);
         };
         shard
             .try_read()
-            .map(|guard| {
-                guard
-                    .peek(hash, key)
-                    .cloned()
-                    .map(TryResult::Found)
-                    .unwrap_or(TryResult::NotFound)
-            })
-            .unwrap_or(TryResult::Contended)
+            .map(|guard| ContendedResult::Ok(guard.peek(hash, key).cloned()))
+            .unwrap_or(ContendedResult::Contended)
     }
 
     /// Remove an item from the cache whose key is `key`.
@@ -355,23 +337,18 @@ impl<
     /// Attempts to remove an item from the cache whose key is `key`.
     /// Returns [`TryResult::Found`] with the removed entry if present, [`TryResult::NotFound`] if absent,
     /// or [`TryResult::Contended`] if the shard lock could not be acquired without blocking.
-    pub fn try_remove<Q>(&self, key: &Q) -> TryResult<(Key, Val)>
+    pub fn try_remove<Q>(&self, key: &Q) -> ContendedResult<Option<(Key, Val)>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         let Some((shard, hash)) = self.shard_for(key) else {
-            return TryResult::NotFound;
+            return ContendedResult::Ok(None);
         };
 
         shard
             .try_write()
-            .map(|mut guard| {
-                guard
-                    .remove(hash, key)
-                    .map(TryResult::Found)
-                    .unwrap_or(TryResult::NotFound)
-            })
-            .unwrap_or(TryResult::Contended)
+            .map(|mut guard| ContendedResult::Ok(guard.remove(hash, key)))
+            .unwrap_or(ContendedResult::Contended)
     }
 
     /// Remove an item from the cache whose key is `key` if `f(&value)` returns `true` for that entry.
@@ -437,13 +414,14 @@ impl<
 
     /// Attempts to insert an item in the cache with key `key`.
     /// Returns `true` if the item was inserted, or `false` if the shard lock was contended.
-    pub fn try_insert(&self, key: Key, value: Val) -> bool {
-        if let TryResult::Found(lcs) = self.try_insert_with_lifecycle(key, value) {
-            self.lifecycle.end_request(lcs);
-            return true;
+    pub fn try_insert(&self, key: Key, value: Val) -> ContendedResult<()> {
+        match self.try_insert_with_lifecycle(key, value) {
+            ContendedResult::Ok(lcs) => {
+                self.lifecycle.end_request(lcs);
+                ContendedResult::Ok(())
+            }
+            ContendedResult::Contended => ContendedResult::Contended,
         }
-
-        false
     }
 
     /// Inserts an item in the cache with key `key`.
@@ -460,10 +438,12 @@ impl<
 
     /// Attempts to insert an item in the cache with key `key`.
     /// Returns [`TryResult::Found`] if the item was inserted, or [`TryResult::Contended`] if the shard lock was contended.
-    pub fn try_insert_with_lifecycle(&self, key: Key, value: Val) -> TryResult<L::RequestState> {
-        let Some((shard, hash)) = self.shard_for(&key) else {
-            return TryResult::NotFound;
-        };
+    pub fn try_insert_with_lifecycle(
+        &self,
+        key: Key,
+        value: Val,
+    ) -> ContendedResult<L::RequestState> {
+        let (shard, hash) = self.shard_for(&key).unwrap();
 
         shard
             .try_write()
@@ -472,9 +452,9 @@ impl<
                 let result = guard.insert(&mut lcs, hash, key, value, InsertStrategy::Insert);
                 // result cannot err with the Insert strategy
                 debug_assert!(result.is_ok());
-                TryResult::Found(lcs)
+                ContendedResult::Ok(lcs)
             })
-            .unwrap_or(TryResult::Contended)
+            .unwrap_or(ContendedResult::Contended)
     }
 
     /// Clear all items from the cache
