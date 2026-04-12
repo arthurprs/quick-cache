@@ -210,10 +210,10 @@ impl<
 
     #[inline]
     fn compute_shard_index(&self, hash: u64) -> u64 {
-        // give preference to the bits in the middle of the hash.
-        // When choosing the shard, rotate the hash bits usize::BITS / 2 so that we
-        // Internally hashbrown uses the lower bits for start of probing + the 7 highest,
-        // so by picking something else we improve the real entropy available to each hashbrown shard.
+        // Give preference to the bits in the middle of the hash. When choosing the
+        // shard, rotate the hash by usize::BITS / 2 so we avoid the lower bits and
+        // the highest 7 bits that hashbrown uses internally for probing, improving
+        // the real entropy available to each hashbrown shard.
         hash.rotate_right(usize::BITS / 2) & self.shards_mask
     }
 
