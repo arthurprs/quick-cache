@@ -18,11 +18,13 @@ use crate::shard::EntryOrPlaceholder;
 pub use crate::sync_placeholder::{EntryAction, EntryResult, GuardResult, PlaceholderGuard};
 use crate::sync_placeholder::{JoinFuture, JoinResult};
 
+/// The result of a non-blocking cache operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContendedResult<Val> {
-    /// The value was found and is returned.
+    /// The operation succeeded. For read operations the inner value holds the lookup result;
+    /// for write operations it holds the lifecycle request state (or `()` for [`Cache::try_insert`]).
     Ok(Val),
-    /// The shard lock could not be acquired without blocking.
+    /// The shard lock could not be acquired without blocking. The operation was not performed.
     Contended,
 }
 
