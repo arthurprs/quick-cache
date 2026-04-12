@@ -234,7 +234,7 @@ impl<
     ///
     /// [`BuildHasher`]: std::hash::BuildHasher
     #[inline]
-    pub fn shard_index<Q: Hash + ?Sized>(&self, key: &Q) -> usize {
+    pub fn shard_index<Q: Hash + Equivalent<Key> + ?Sized>(&self, key: &Q) -> usize {
         let hash = self.hash_builder.hash_one(key);
         self.compute_shard_index(hash) as usize
     }
