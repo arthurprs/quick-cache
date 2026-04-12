@@ -18,6 +18,16 @@ use crate::shard::EntryOrPlaceholder;
 pub use crate::sync_placeholder::{EntryAction, EntryResult, GuardResult, PlaceholderGuard};
 use crate::sync_placeholder::{JoinFuture, JoinResult};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryResult<Val> {
+    /// The value was found and is returned.
+    Found(Val),
+    /// The value was not found, but the shard lock was successfully acquired.
+    NotFound,
+    /// The shard lock could not be acquired without blocking.
+    Contended,
+}
+
 /// A concurrent cache
 ///
 /// The concurrent cache is internally composed of equally sized shards, each of which is independently
@@ -257,17 +267,23 @@ impl<
     }
 
     /// Attempts to fetch an item from the cache whose key is `key`.
-    /// Returns `None` if the key is not present or the shard lock is contended.
-    pub fn try_get<Q>(&self, key: &Q) -> Option<Val>
+    /// Returns `Ok(Some(value))` if found, `Ok(None)` if the key is absent,
+    /// or `Err(Contended)` if the shard lock could not be acquired without blocking.
+    pub fn try_get<Q>(&self, key: &Q) -> TryResult<Val>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        let (shard, hash) = self.shard_for(key)?;
-        shard
-            .try_read()
-            .as_ref()
-            .and_then(|r| r.get(hash, key))
-            .cloned()
+        let Some((shard, hash)) = self.shard_for(key) else {
+            return TryResult::NotFound;
+        };
+        match shard.try_read() {
+            Some(guard) => guard
+                .get(hash, key)
+                .cloned()
+                .map(TryResult::Found)
+                .unwrap_or(TryResult::NotFound),
+            None => TryResult::Contended,
+        }
     }
 
     /// Peeks an item from the cache whose key is `key`.
@@ -282,17 +298,23 @@ impl<
 
     /// Attempts to peek an item from the cache whose key is `key`.
     /// Contrary to gets, peeks don't alter the key "hotness".
-    /// Returns `None` if the key is not present or the shard lock is contended.
-    pub fn try_peek<Q>(&self, key: &Q) -> Option<Val>
+    /// Returns `Ok(Some(value))` if found, `Ok(None)` if the key is absent,
+    /// or `Err(Contended)` if the shard lock could not be acquired without blocking.
+    pub fn try_peek<Q>(&self, key: &Q) -> TryResult<Val>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        let (shard, hash) = self.shard_for(key)?;
-        shard
-            .try_read()
-            .as_ref()
-            .and_then(|r| r.peek(hash, key))
-            .cloned()
+        let Some((shard, hash)) = self.shard_for(key) else {
+            return TryResult::NotFound;
+        };
+        match shard.try_read() {
+            Some(guard) => guard
+                .peek(hash, key)
+                .cloned()
+                .map(TryResult::Found)
+                .unwrap_or(TryResult::NotFound),
+            None => TryResult::Contended,
+        }
     }
 
     /// Remove an item from the cache whose key is `key`.
@@ -303,6 +325,22 @@ impl<
     {
         let (shard, hash) = self.shard_for(key).unwrap();
         shard.write().remove(hash, key)
+    }
+
+    pub fn try_remove<Q>(&self, key: &Q) -> TryResult<(Key, Val)>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        let (shard, hash) = self.shard_for(key).unwrap();
+        shard
+            .try_write()
+            .map(|mut guard| {
+                guard
+                    .remove(hash, key)
+                    .map(TryResult::Found)
+                    .unwrap_or(TryResult::NotFound)
+            })
+            .unwrap_or(TryResult::Contended)
     }
 
     /// Remove an item from the cache whose key is `key` if `f(&value)` returns `true` for that entry.
