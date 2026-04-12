@@ -118,7 +118,11 @@ impl<T: ?Sized> RwLock<T> {
         }
         #[cfg(not(feature = "parking_lot"))]
         {
-            self.0.try_read().ok().map(RwLockReadGuard)
+            match self.0.try_read() {
+                Ok(guard) => Some(RwLockReadGuard(guard)),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+                Err(std::sync::TryLockError::Poisoned(err)) => panic!("{}", err),
+            }
         }
     }
 
@@ -135,7 +139,11 @@ impl<T: ?Sized> RwLock<T> {
         }
         #[cfg(not(feature = "parking_lot"))]
         {
-            self.0.try_write().ok().map(RwLockWriteGuard)
+            match self.0.try_write() {
+                Ok(guard) => Some(RwLockWriteGuard(guard)),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+                Err(std::sync::TryLockError::Poisoned(err)) => panic!("{}", err),
+            }
         }
     }
 
