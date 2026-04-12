@@ -26,6 +26,16 @@ pub enum ContendedResult<Val> {
     Contended,
 }
 
+impl<Val> ContendedResult<Val> {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, ContendedResult::Ok(_))
+    }
+
+    pub fn is_contended(&self) -> bool {
+        matches!(self, ContendedResult::Contended)
+    }
+}
+
 /// A concurrent cache
 ///
 /// The concurrent cache is internally composed of equally sized shards, each of which is independently
@@ -256,8 +266,8 @@ impl<
     }
 
     /// Attempts to check if a key exists in the cache without blocking.
-    /// Returns [`TryResult::Found(true)`] if present, [`TryResult::NotFound`] if absent,
-    /// or [`TryResult::Contended`] if the shard lock could not be acquired without blocking.
+    /// Returns [`ContendedResult::Ok(true)`] if present, [`ContendedResult::Ok(false)`] if absent,
+    /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
     pub fn try_contains_key<Q>(&self, key: &Q) -> ContendedResult<bool>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -282,8 +292,8 @@ impl<
     }
 
     /// Attempts to fetch an item from the cache whose key is `key`.
-    /// Returns [`TryResult::Found`] if the key is present, [`TryResult::NotFound`] if absent,
-    /// or [`TryResult::Contended`] if the shard lock could not be acquired without blocking.
+    /// Returns [`ContendedResult::Ok(Some(val))`] if the key is present, [`ContendedResult::Ok(None)`] if absent,
+    /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
     pub fn try_get<Q>(&self, key: &Q) -> ContendedResult<Option<Val>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -309,8 +319,8 @@ impl<
 
     /// Attempts to peek an item from the cache whose key is `key`.
     /// Contrary to gets, peeks don't alter the key "hotness".
-    /// Returns [`TryResult::Found`] if the key is present, [`TryResult::NotFound`] if absent,
-    /// or [`TryResult::Contended`] if the shard lock could not be acquired without blocking.
+    /// Returns [`ContendedResult::Ok(Some(val))`] if the key is present, [`ContendedResult::Ok(None)`] if absent,
+    /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
     pub fn try_peek<Q>(&self, key: &Q) -> ContendedResult<Option<Val>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -335,8 +345,8 @@ impl<
     }
 
     /// Attempts to remove an item from the cache whose key is `key`.
-    /// Returns [`TryResult::Found`] with the removed entry if present, [`TryResult::NotFound`] if absent,
-    /// or [`TryResult::Contended`] if the shard lock could not be acquired without blocking.
+    /// Returns [`ContendedResult::Ok(Some(entry))`] with the removed entry if present, [`ContendedResult::Ok(None)`] if absent,
+    /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
     pub fn try_remove<Q>(&self, key: &Q) -> ContendedResult<Option<(Key, Val)>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -413,7 +423,7 @@ impl<
     }
 
     /// Attempts to insert an item in the cache with key `key`.
-    /// Returns `true` if the item was inserted, or `false` if the shard lock was contended.
+    /// Returns [`ContendedResult::Ok`] if the item was inserted, or [`ContendedResult::Contended`] if the shard lock was contended.
     pub fn try_insert(&self, key: Key, value: Val) -> ContendedResult<()> {
         match self.try_insert_with_lifecycle(key, value) {
             ContendedResult::Ok(lcs) => {
@@ -437,7 +447,8 @@ impl<
     }
 
     /// Attempts to insert an item in the cache with key `key`.
-    /// Returns [`TryResult::Found`] if the item was inserted, or [`TryResult::Contended`] if the shard lock was contended.
+    /// Returns [`ContendedResult::Ok`] with the lifecycle request state if the item was inserted,
+    /// or [`ContendedResult::Contended`] if the shard lock was contended.
     pub fn try_insert_with_lifecycle(
         &self,
         key: Key,

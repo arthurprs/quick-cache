@@ -131,34 +131,6 @@ impl<T: ?Sized> RwLock<T> {
             self.0.write().unwrap()
         })
     }
-
-    /// Attempts to acquire this lock with shared read access.
-    ///
-    /// Returns `Some(guard)` if the lock was acquired, or `None` if it is
-    /// currently held by a writer.
-    #[inline]
-    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
-        #[cfg(feature = "parking_lot")]
-        {
-            self.0.try_read().map(RwLockReadGuard)
-        }
-        #[cfg(not(feature = "parking_lot"))]
-        self.0.try_read().ok().map(RwLockReadGuard)
-    }
-
-    /// Attempts to acquire this lock with exclusive write access.
-    ///
-    /// Returns `Some(guard)` if the lock was acquired, or `None` if it is
-    /// currently held by any readers or a writer.
-    #[inline]
-    pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
-        #[cfg(feature = "parking_lot")]
-        {
-            self.0.try_write().map(RwLockWriteGuard)
-        }
-        #[cfg(not(feature = "parking_lot"))]
-        self.0.try_write().ok().map(RwLockWriteGuard)
-    }
 }
 
 impl<T: ?Sized> Deref for RwLockReadGuard<'_, T> {
