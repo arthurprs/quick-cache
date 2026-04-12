@@ -256,6 +256,19 @@ impl<
         shard.read().get(hash, key).cloned()
     }
 
+    /// Try fetches an item from the cache whose key is `key`.
+    pub fn try_get<Q>(&self, key: &Q) -> Option<Val>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        let (shard, hash) = self.shard_for(key)?;
+        shard
+            .try_read()
+            .as_ref()
+            .and_then(|r| r.get(hash, key))
+            .cloned()
+    }
+
     /// Peeks an item from the cache whose key is `key`.
     /// Contrary to gets, peeks don't alter the key "hotness".
     pub fn peek<Q>(&self, key: &Q) -> Option<Val>
@@ -264,6 +277,20 @@ impl<
     {
         let (shard, hash) = self.shard_for(key)?;
         shard.read().peek(hash, key).cloned()
+    }
+
+    /// Try peeks an item from the cache whose key is `key`.
+    /// Contrary to gets, peeks don't alter the key "hotness".
+    pub fn try_peek<Q>(&self, key: &Q) -> Option<Val>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        let (shard, hash) = self.shard_for(key)?;
+        shard
+            .try_read()
+            .as_ref()
+            .and_then(|r| r.peek(hash, key))
+            .cloned()
     }
 
     /// Remove an item from the cache whose key is `key`.
@@ -337,6 +364,16 @@ impl<
         self.lifecycle.end_request(lcs);
     }
 
+    /// Try inserts an item in the cache with key `key`.
+    pub fn try_insert(&self, key: Key, value: Val) -> bool {
+        if let Some(lcs) = self.try_insert_with_lifecycle(key, value) {
+            self.lifecycle.end_request(lcs);
+            return true;
+        }
+
+        false
+    }
+
     /// Inserts an item in the cache with key `key`.
     pub fn insert_with_lifecycle(&self, key: Key, value: Val) -> L::RequestState {
         let mut lcs = self.lifecycle.begin_request();
@@ -347,6 +384,21 @@ impl<
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
         lcs
+    }
+
+    /// Try inserts an item in the cache with key `key`.
+    pub fn try_insert_with_lifecycle(&self, key: Key, value: Val) -> Option<L::RequestState> {
+        let mut lcs = self.lifecycle.begin_request();
+        let (shard, hash) = self.shard_for(&key).unwrap();
+
+        if let Some(mut guard) = shard.try_write() {
+            let result = guard.insert(&mut lcs, hash, key, value, InsertStrategy::Insert);
+            // result cannot err with the Insert strategy
+            debug_assert!(result.is_ok());
+            return Some(lcs);
+        }
+
+        None
     }
 
     /// Clear all items from the cache
