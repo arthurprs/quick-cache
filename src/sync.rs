@@ -209,10 +209,7 @@ impl<
     }
 
     #[inline]
-    pub fn shard_index<Q>(&self, key: &Q) -> usize
-    where
-        Q: Hash + Equivalent<Key> + ?Sized,
-    {
+    pub fn shard_index<Q: Hash>(&self, key: &Q) -> usize {
         // When choosing the shard, rotate the hash bits usize::BITS / 2 so that we
         // give preference to the bits in the middle of the hash.
         // Internally hashbrown uses the lower bits for start of probing + the 7 highest,
