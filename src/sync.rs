@@ -209,16 +209,34 @@ impl<
     }
 
     #[inline]
-    pub fn shard_index<Q: Hash>(&self, key: &Q) -> usize {
-        // When choosing the shard, rotate the hash bits usize::BITS / 2 so that we
+    fn compute_shard_index(&self, hash: u64) -> u64 {
         // give preference to the bits in the middle of the hash.
+        // When choosing the shard, rotate the hash bits usize::BITS / 2 so that we
         // Internally hashbrown uses the lower bits for start of probing + the 7 highest,
         // so by picking something else we improve the real entropy available to each hashbrown shard.
-        (self
-            .hash_builder
-            .hash_one(key)
-            .rotate_right(usize::BITS / 2)
-            & self.shards_mask) as usize
+        hash.rotate_right(usize::BITS / 2) & self.shards_mask
+    }
+
+    /// Returns the shard index for the given key.
+    ///
+    /// The returned index is guaranteed to be in `[0, num_shards())`.
+    ///
+    /// # Use cases
+    ///
+    /// - **Batching**: group keys by shard index before acquiring shard locks, so
+    ///   each lock is taken only once per batch instead of once per key.
+    ///
+    /// # Notes
+    ///
+    /// The mapping from key to shard index depends on the [`BuildHasher`] supplied
+    /// at construction time. If two `Cache` instances are built with different
+    /// hashers, the same key may map to different shard indices.
+    ///
+    /// [`BuildHasher`]: std::hash::BuildHasher
+    #[inline]
+    pub fn shard_index<Q: Hash + ?Sized>(&self, key: &Q) -> usize {
+        let hash = self.hash_builder.hash_one(key);
+        self.compute_shard_index(hash) as usize
     }
 
     #[inline]
@@ -233,11 +251,7 @@ impl<
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         let hash = self.hash_builder.hash_one(key);
-        // When choosing the shard, rotate the hash bits usize::BITS / 2 so that we
-        // give preference to the bits in the middle of the hash.
-        // Internally hashbrown uses the lower bits for start of probing + the 7 highest,
-        // so by picking something else we improve the real entropy available to each hashbrown shard.
-        let shard_idx = (hash.rotate_right(usize::BITS / 2) & self.shards_mask) as usize;
+        let shard_idx = self.compute_shard_index(hash) as usize;
         self.shards.get(shard_idx).map(|s| (s, hash))
     }
 
