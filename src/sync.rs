@@ -256,7 +256,8 @@ impl<
         shard.read().get(hash, key).cloned()
     }
 
-    /// Try fetches an item from the cache whose key is `key`.
+    /// Attempts to fetch an item from the cache whose key is `key`.
+    /// Returns `None` if the key is not present or the shard lock is contended.
     pub fn try_get<Q>(&self, key: &Q) -> Option<Val>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -279,8 +280,9 @@ impl<
         shard.read().peek(hash, key).cloned()
     }
 
-    /// Try peeks an item from the cache whose key is `key`.
+    /// Attempts to peek an item from the cache whose key is `key`.
     /// Contrary to gets, peeks don't alter the key "hotness".
+    /// Returns `None` if the key is not present or the shard lock is contended.
     pub fn try_peek<Q>(&self, key: &Q) -> Option<Val>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -364,7 +366,8 @@ impl<
         self.lifecycle.end_request(lcs);
     }
 
-    /// Try inserts an item in the cache with key `key`.
+    /// Attempts to insert an item in the cache with key `key`.
+    /// Returns `true` if the item was inserted, or `false` if the shard lock was contended.
     pub fn try_insert(&self, key: Key, value: Val) -> bool {
         if let Some(lcs) = self.try_insert_with_lifecycle(key, value) {
             self.lifecycle.end_request(lcs);
@@ -386,12 +389,13 @@ impl<
         lcs
     }
 
-    /// Try inserts an item in the cache with key `key`.
+    /// Attempts to insert an item in the cache with key `key`.
+    /// Returns `Some(RequestState)` if the item was inserted, or `None` if the shard lock was contended.
     pub fn try_insert_with_lifecycle(&self, key: Key, value: Val) -> Option<L::RequestState> {
-        let mut lcs = self.lifecycle.begin_request();
         let (shard, hash) = self.shard_for(&key).unwrap();
 
         if let Some(mut guard) = shard.try_write() {
+            let mut lcs = self.lifecycle.begin_request();
             let result = guard.insert(&mut lcs, hash, key, value, InsertStrategy::Insert);
             // result cannot err with the Insert strategy
             debug_assert!(result.is_ok());
