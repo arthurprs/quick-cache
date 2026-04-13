@@ -109,7 +109,6 @@ impl<T: ?Sized> RwLock<T> {
     ///
     /// Returns `Some(guard)` if the lock was acquired, or `None` if it is already
     /// held by a writer.
-    #[cfg(feature = "non-blocking")]
     #[inline]
     pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
         #[cfg(feature = "parking_lot")]
@@ -130,7 +129,6 @@ impl<T: ?Sized> RwLock<T> {
     ///
     /// Returns `Some(guard)` if the lock was acquired, or `None` if it is already
     /// held by any readers or a writer.
-    #[cfg(feature = "non-blocking")]
     #[inline]
     pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
         #[cfg(feature = "parking_lot")]

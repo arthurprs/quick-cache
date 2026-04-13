@@ -18,7 +18,6 @@ use crate::shard::EntryOrPlaceholder;
 pub use crate::sync_placeholder::{EntryAction, EntryResult, GuardResult, PlaceholderGuard};
 use crate::sync_placeholder::{JoinFuture, JoinResult};
 
-#[cfg(feature = "non-blocking")]
 /// The result of a non-blocking cache operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContendedResult<Val> {
@@ -29,7 +28,6 @@ pub enum ContendedResult<Val> {
     Contended,
 }
 
-#[cfg(feature = "non-blocking")]
 impl<Val> ContendedResult<Val> {
     pub fn ok(self) -> Option<Val> {
         match self {
@@ -275,7 +273,6 @@ impl<
     /// Attempts to check if a key exists in the cache without blocking.
     /// Returns [`ContendedResult::Ok(true)`] if present, [`ContendedResult::Ok(false)`] if absent,
     /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
-    #[cfg(feature = "non-blocking")]
     pub fn try_contains_key<Q>(&self, key: &Q) -> ContendedResult<bool>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -302,7 +299,6 @@ impl<
     /// Attempts to fetch an item from the cache whose key is `key`.
     /// Returns [`ContendedResult::Ok(Some(val))`] if the key is present, [`ContendedResult::Ok(None)`] if absent,
     /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
-    #[cfg(feature = "non-blocking")]
     pub fn try_get<Q>(&self, key: &Q) -> ContendedResult<Option<Val>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -330,7 +326,6 @@ impl<
     /// Contrary to gets, peeks don't alter the key "hotness".
     /// Returns [`ContendedResult::Ok(Some(val))`] if the key is present, [`ContendedResult::Ok(None)`] if absent,
     /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
-    #[cfg(feature = "non-blocking")]
     pub fn try_peek<Q>(&self, key: &Q) -> ContendedResult<Option<Val>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -357,7 +352,6 @@ impl<
     /// Attempts to remove an item from the cache whose key is `key`.
     /// Returns [`ContendedResult::Ok(Some(entry))`] with the removed entry if present, [`ContendedResult::Ok(None)`] if absent,
     /// or [`ContendedResult::Contended`] if the shard lock could not be acquired without blocking.
-    #[cfg(feature = "non-blocking")]
     pub fn try_remove<Q>(&self, key: &Q) -> ContendedResult<Option<(Key, Val)>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -435,7 +429,6 @@ impl<
 
     /// Attempts to insert an item in the cache with key `key`.
     /// Returns [`ContendedResult::Ok`] if the item was inserted, or [`ContendedResult::Contended`] if the shard lock was contended.
-    #[cfg(feature = "non-blocking")]
     pub fn try_insert(&self, key: Key, value: Val) -> ContendedResult<()> {
         match self.try_insert_with_lifecycle(key, value) {
             ContendedResult::Ok(lcs) => {
@@ -461,7 +454,6 @@ impl<
     /// Attempts to insert an item in the cache with key `key`.
     /// Returns [`ContendedResult::Ok`] with the lifecycle request state if the item was inserted,
     /// or [`ContendedResult::Contended`] if the shard lock was contended.
-    #[cfg(feature = "non-blocking")]
     pub fn try_insert_with_lifecycle(
         &self,
         key: Key,
@@ -1630,5 +1622,134 @@ mod tests {
                 assert_eq!(v, key * 10);
             }
         }
+    }
+
+    // --- Non-blocking method tests ---
+
+    #[test]
+    fn test_contended_result_helpers() {
+        let ok: ContendedResult<i32> = ContendedResult::Ok(42);
+        assert!(!ok.is_contended());
+        assert_eq!(ok.ok(), Some(42));
+
+        let contended: ContendedResult<i32> = ContendedResult::Contended;
+        assert!(contended.is_contended());
+        assert_eq!(contended.ok(), None);
+    }
+
+    #[test]
+    fn test_try_contains_key() {
+        let cache = Cache::new(100);
+        cache.insert(1, 10);
+
+        assert_eq!(cache.try_contains_key(&1), ContendedResult::Ok(true));
+        assert_eq!(cache.try_contains_key(&2), ContendedResult::Ok(false));
+    }
+
+    #[test]
+    fn test_try_contains_key_contended() {
+        let cache = Cache::new(100);
+        cache.insert(1, 10);
+        // Hold write locks on all shards so try_read is blocked.
+        let _guards: Vec<_> = cache.shards.iter().map(|s| s.write()).collect();
+        assert_eq!(cache.try_contains_key(&1), ContendedResult::Contended);
+    }
+
+    #[test]
+    fn test_try_get() {
+        let cache = Cache::new(100);
+        cache.insert(1, 10);
+
+        assert_eq!(cache.try_get(&1), ContendedResult::Ok(Some(10)));
+        assert_eq!(cache.try_get(&2), ContendedResult::Ok(None));
+    }
+
+    #[test]
+    fn test_try_get_contended() {
+        let cache = Cache::new(100);
+        cache.insert(1, 10);
+        let _guards: Vec<_> = cache.shards.iter().map(|s| s.write()).collect();
+        assert_eq!(cache.try_get(&1), ContendedResult::Contended);
+    }
+
+    #[test]
+    fn test_try_peek() {
+        let cache = Cache::new(100);
+        cache.insert(1, 10);
+
+        assert_eq!(cache.try_peek(&1), ContendedResult::Ok(Some(10)));
+        assert_eq!(cache.try_peek(&2), ContendedResult::Ok(None));
+    }
+
+    #[test]
+    fn test_try_peek_contended() {
+        let cache = Cache::new(100);
+        cache.insert(1, 10);
+        let _guards: Vec<_> = cache.shards.iter().map(|s| s.write()).collect();
+        assert_eq!(cache.try_peek(&1), ContendedResult::Contended);
+    }
+
+    #[test]
+    fn test_try_remove() {
+        let cache = Cache::new(100);
+        cache.insert(1, 10);
+
+        assert_eq!(cache.try_remove(&1), ContendedResult::Ok(Some((1, 10))));
+        assert_eq!(cache.try_remove(&1), ContendedResult::Ok(None));
+        assert_eq!(cache.try_remove(&99), ContendedResult::Ok(None));
+    }
+
+    #[test]
+    fn test_try_remove_contended() {
+        let cache = Cache::new(100);
+        cache.insert(1, 10);
+        // Hold read locks on all shards so try_write is blocked.
+        let guards: Vec<_> = cache.shards.iter().map(|s| s.read()).collect();
+        assert_eq!(cache.try_remove(&1), ContendedResult::Contended);
+        drop(guards);
+        // Item must still be present since the remove did not happen.
+        assert_eq!(cache.get(&1), Some(10));
+    }
+
+    #[test]
+    fn test_try_insert() {
+        let cache = Cache::new(100);
+
+        assert_eq!(cache.try_insert(1, 10), ContendedResult::Ok(()));
+        assert_eq!(cache.get(&1), Some(10));
+
+        // Insert same key overwrites the previous value.
+        assert_eq!(cache.try_insert(1, 20), ContendedResult::Ok(()));
+        assert_eq!(cache.get(&1), Some(20));
+    }
+
+    #[test]
+    fn test_try_insert_contended() {
+        let cache = Cache::new(100);
+        let guards: Vec<_> = cache.shards.iter().map(|s| s.read()).collect();
+        assert_eq!(cache.try_insert(1, 10), ContendedResult::Contended);
+        drop(guards);
+        assert_eq!(cache.get(&1), None);
+    }
+
+    #[test]
+    fn test_try_insert_with_lifecycle() {
+        let cache = Cache::new(100);
+
+        // Successful insert returns the lifecycle request state.
+        let result = cache.try_insert_with_lifecycle(1, 10);
+        assert!(!result.is_contended());
+        let lcs = result.ok().unwrap();
+        cache.lifecycle.end_request(lcs);
+        assert_eq!(cache.get(&1), Some(10));
+
+        // Contended when a read lock is held.
+        let guards: Vec<_> = cache.shards.iter().map(|s| s.read()).collect();
+        assert_eq!(
+            cache.try_insert_with_lifecycle(2, 20),
+            ContendedResult::Contended
+        );
+        drop(guards);
+        assert_eq!(cache.get(&2), None);
     }
 }

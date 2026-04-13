@@ -14,7 +14,6 @@ rust-version = "1.71"
 
 [features]
 default = ["ahash", "parking_lot"]
-non-blocking = []
 sharded-lock = ["dep:crossbeam-utils"]
 shuttle = ["dep:shuttle"]
 stats = []
