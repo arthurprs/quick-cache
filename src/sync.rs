@@ -428,15 +428,20 @@ impl<
     }
 
     /// Attempts to insert an item in the cache with key `key`.
-    /// Returns [`ContendedResult::Ok`] if the item was inserted, or [`ContendedResult::Contended`] if the shard lock was contended.
-    pub fn try_insert(&self, key: Key, value: Val) -> ContendedResult<()> {
-        match self.try_insert_with_lifecycle(key, value) {
-            ContendedResult::Ok(lcs) => {
-                self.lifecycle.end_request(lcs);
-                ContendedResult::Ok(())
-            }
-            ContendedResult::Contended => ContendedResult::Contended,
-        }
+    /// Returns `Ok(())` if the item was inserted, or `Err((key, value))` if the shard lock
+    /// was contended before the insert could be performed.
+    pub fn try_insert(&self, key: Key, value: Val) -> Result<(), (Key, Val)> {
+        let (shard, hash) = self.shard_for(&key).unwrap();
+        let Some(mut shard) = shard.try_write() else {
+            return Err((key, value));
+        };
+
+        let mut lcs = self.lifecycle.begin_request();
+        let result = shard.insert(&mut lcs, hash, key, value, InsertStrategy::Insert);
+        // result cannot err with the Insert strategy
+        debug_assert!(result.is_ok());
+        self.lifecycle.end_request(lcs);
+        Ok(())
     }
 
     /// Inserts an item in the cache with key `key`.
