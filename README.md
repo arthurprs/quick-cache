@@ -12,7 +12,7 @@ Lightweight and high performance concurrent cache optimized for low cache overhe
 * Scales well with the number of threads
 * Atomic operations with `get_or_insert` and `get_value_or_guard` functions
 * Atomic async operations with `get_or_insert_async` and `get_value_or_guard_async` functions
-* Non-blocking `try_get`, `try_insert`, `try_remove`, and related methods that return an error instead of blocking: typically `Err(LockContention)`, or `Err((Key, Val))` for `try_insert`/`try_insert_with_lifecycle` so inputs are preserved
+* Non-blocking methods that return immediately on lock contention.
 * Closure-based `entry` API for atomic inspect-and-act patterns (keep, remove, replace)
 * Supports item pinning
 * Iteration and draining
