@@ -477,11 +477,13 @@ impl<
         key: Key,
         value: Val,
     ) -> Result<L::RequestState, (Key, Val)> {
+        // Tradeoff: begin_request is called before acquiring the shard lock to avoid holding
+        // the lock during potentially expensive lifecycle initialization.
+        let mut lcs = self.lifecycle.begin_request();
         let (shard, hash) = self.shard_for(&key).unwrap();
 
         match shard.try_write() {
             Some(mut shard) => {
-                let mut lcs = self.lifecycle.begin_request();
                 let result = shard.insert(&mut lcs, hash, key, value, InsertStrategy::Insert);
                 // result cannot err with the Insert strategy
                 debug_assert!(result.is_ok());
