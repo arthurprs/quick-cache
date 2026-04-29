@@ -22,8 +22,9 @@ use crate::sync_placeholder::{JoinFuture, JoinResult};
 /// inputs when the relevant shard lock could not be acquired immediately.
 ///
 /// This is used by borrowed-key/read-path operations. Non-blocking operations
-/// that consume owned inputs may instead return those inputs on contention.
-#[derive(Debug)]
+/// that consume owned inputs (e.g. `try_insert`) instead return those inputs
+/// on contention so the caller can retry or discard without losing data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LockContention;
 
 impl std::fmt::Display for LockContention {
@@ -450,7 +451,8 @@ impl<
 
     /// Attempts to insert an item in the cache with key `key` without blocking.
     /// Returns `Ok(())` if the item was inserted, or `Err((key, value))` if the shard lock
-    /// could not be acquired without blocking.
+    /// could not be acquired without blocking. Lock contention is the only failure
+    /// mode: the inputs are returned so the caller can retry or discard them.
     pub fn try_insert(&self, key: Key, value: Val) -> Result<(), (Key, Val)> {
         let lcs = self.try_insert_with_lifecycle(key, value)?;
         self.lifecycle.end_request(lcs);
@@ -472,6 +474,8 @@ impl<
     /// Attempts to insert an item in the cache with key `key` without blocking.
     /// Returns `Ok(lcs)` with the lifecycle request state if the item was inserted,
     /// or `Err((key, value))` if the shard lock could not be acquired without blocking.
+    /// Lock contention is the only failure mode: the inputs are returned so the
+    /// caller can retry or discard them.
     pub fn try_insert_with_lifecycle(
         &self,
         key: Key,
