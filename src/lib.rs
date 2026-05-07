@@ -94,6 +94,7 @@ mod options;
 #[cfg(not(feature = "shuttle"))]
 mod rw_lock;
 mod shard;
+pub use shard::{Resident, ResidentState};
 mod shim;
 /// Concurrent cache variants that can be used from multiple threads.
 pub mod sync;
