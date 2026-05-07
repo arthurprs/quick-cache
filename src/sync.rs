@@ -729,9 +729,9 @@ where
         while self.current_shard < self.shards.len() {
             let shard = &self.shards[self.current_shard];
             let lock = shard.read();
-            if let Some((new_last, key, val)) = lock.iter_from(self.last).next() {
+            if let Some((new_last, r)) = lock.iter_from(self.last).next() {
                 self.last = Some(new_last);
-                return Some((key.clone(), val.clone()));
+                return Some((r.key.clone(), r.value.clone()));
             }
             self.last = None;
             self.current_shard += 1;

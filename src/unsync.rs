@@ -1,7 +1,7 @@
 use crate::{
     linked_slab::Token,
     options::*,
-    shard::{self, CacheShard, InsertStrategy},
+    shard::{self, CacheShard, InsertStrategy, Resident},
     DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
@@ -374,7 +374,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     }
 
     /// Iterator for the items in the cache
-    pub fn iter(&self) -> impl Iterator<Item = (&'_ Key, &'_ Val)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = &'_ Resident<Key, Val>> + '_ {
         // TODO: add a concrete type, impl trait in the public api is really bad.
         self.shard.iter()
     }

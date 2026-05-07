@@ -68,16 +68,16 @@ pub enum EntryOrPlaceholder<Key, Val, Plh, T> {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum ResidentState {
+pub enum ResidentState {
     Hot,
     Cold,
 }
 
 #[derive(Debug)]
 pub struct Resident<Key, Val> {
-    key: Key,
-    value: Val,
-    state: ResidentState,
+    pub key: Key,
+    pub value: Val,
+    pub state: ResidentState,
     referenced: AtomicU16,
 }
 
@@ -297,9 +297,9 @@ impl<Key, Val, We, B, L, Plh> CacheShard<Key, Val, We, B, L, Plh> {
         })
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&'_ Key, &'_ Val)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = &'_ Resident<Key, Val>> + '_ {
         self.entries.iter().filter_map(|i| match i {
-            Entry::Resident(r) => Some((&r.key, &r.value)),
+            Entry::Resident(r) => Some(r),
             Entry::Placeholder(_) | Entry::Ghost(_) => None,
         })
     }
@@ -307,11 +307,11 @@ impl<Key, Val, We, B, L, Plh> CacheShard<Key, Val, We, B, L, Plh> {
     pub fn iter_from(
         &self,
         continuation: Option<Token>,
-    ) -> impl Iterator<Item = (Token, &'_ Key, &'_ Val)> + '_ {
+    ) -> impl Iterator<Item = (Token, &'_ Resident<Key, Val>)> + '_ {
         self.entries
             .iter_from(continuation)
             .filter_map(|(token, i)| match i {
-                Entry::Resident(r) => Some((token, &r.key, &r.value)),
+                Entry::Resident(r) => Some((token, r)),
                 Entry::Placeholder(_) | Entry::Ghost(_) => None,
             })
     }
