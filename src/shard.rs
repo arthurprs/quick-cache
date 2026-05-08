@@ -783,7 +783,8 @@ impl<
             if self.num_non_resident > self.capacity_non_resident {
                 self.advance_ghost();
             }
-            self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
+            self.lifecycle
+                .on_evict_cold(lcs, evicted.key, evicted.value);
             return true;
         }
     }
@@ -835,7 +836,7 @@ impl<
                     unsafe { core::hint::unreachable_unchecked() };
                 };
                 self.hot_head = next;
-                self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
+                self.lifecycle.on_evict_hot(lcs, evicted.key, evicted.value);
                 self.map_remove(hash, idx);
             }
             return true;
@@ -920,7 +921,15 @@ impl<
                 } else if evicted_weight != 0 && weight == 0 {
                     *list_head = self.entries.unlink(idx);
                 }
-                self.lifecycle.on_evict(lcs, evicted.key, evicted.value);
+                match enter_state {
+                    ResidentState::Hot => {
+                        self.lifecycle.on_evict_hot(lcs, evicted.key, evicted.value)
+                    }
+                    ResidentState::Cold => {
+                        self.lifecycle
+                            .on_evict_cold(lcs, evicted.key, evicted.value)
+                    }
+                }
             }
             Entry::Ghost(_) => {
                 self.weight_hot += weight;
@@ -1052,7 +1061,7 @@ impl<
     ) -> Result<(), Val> {
         self.entries.remove(placeholder.idx());
         self.map_remove(placeholder.hash(), placeholder.idx());
-        self.lifecycle.on_evict(lcs, key, value);
+        self.lifecycle.on_evict_hot(lcs, key, value);
         Ok(())
     }
 
@@ -1122,13 +1131,13 @@ impl<
         // Make sure to remove any existing entry
         if let Some((idx, _)) = self.search_resident(hash, &key) {
             if let Some((ek, ev)) = self.remove_internal(hash, idx) {
-                self.lifecycle.on_evict(lcs, ek, ev);
+                self.lifecycle.on_evict_hot(lcs, ek, ev);
             }
         }
         if matches!(strategy, InsertStrategy::Replace { .. }) {
             return Err((key, value));
         }
-        self.lifecycle.on_evict(lcs, key, value);
+        self.lifecycle.on_evict_hot(lcs, key, value);
         Ok(())
     }
 

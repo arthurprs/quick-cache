@@ -196,7 +196,25 @@ pub trait Lifecycle<Key, Val> {
     fn before_evict(&self, state: &mut Self::RequestState, key: &Key, val: &mut Val) {}
 
     /// Called when an item is evicted.
+    #[deprecated(
+        since = "0.6.22",
+        note = "Use `on_evict_hot` or `on_evict_cold` instead, depending on the desired semantics. This method will still be called by default to preserve backwards compatibility, but it won't be called if either of the new methods are implemented."
+    )]
     fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val);
+
+    /// Called when an item is evicted from the cold queue.
+    #[inline]
+    fn on_evict_cold(&self, state: &mut Self::RequestState, key: Key, val: Val) {
+        #[allow(deprecated)]
+        self.on_evict(state, key, val)
+    }
+
+    /// Called when an item is evicted from the hot queue.
+    #[inline]
+    fn on_evict_hot(&self, state: &mut Self::RequestState, key: Key, val: Val) {
+        #[allow(deprecated)]
+        self.on_evict(state, key, val)
+    }
 
     /// Called after a request finishes, e.g.: insert, replace.
     ///
