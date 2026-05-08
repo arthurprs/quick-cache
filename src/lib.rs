@@ -200,7 +200,8 @@ pub trait Lifecycle<Key, Val> {
         since = "0.6.22",
         note = "Use `on_evict_hot` or `on_evict_cold` instead, depending on the desired semantics. This method will still be called by default to preserve backwards compatibility, but it won't be called if either of the new methods are implemented."
     )]
-    fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val);
+    #[allow(unused_variables)]
+    fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val) {}
 
     /// Called when an item is evicted from the cold queue.
     #[inline]
