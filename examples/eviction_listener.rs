@@ -9,11 +9,7 @@ impl Lifecycle<u64, u64> for EvictionListener {
 
     fn begin_request(&self) -> Self::RequestState {}
 
-    fn on_evict_hot(&self, _state: &mut Self::RequestState, key: u64, val: u64) {
-        let _ = self.0.send((key, val));
-    }
-
-    fn on_evict_cold(&self, _state: &mut Self::RequestState, key: u64, val: u64) {
+    fn on_evict(&self, _state: &mut Self::RequestState, key: u64, val: u64) {
         let _ = self.0.send((key, val));
     }
 }

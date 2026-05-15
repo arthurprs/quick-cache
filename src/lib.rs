@@ -197,35 +197,33 @@ pub trait Lifecycle<Key, Val> {
 
     /// Called when an item is evicted.
     ///
-    /// To receive eviction notifications, implement at least one of `on_evict_hot`
-    /// or `on_evict_cold`, or this deprecated `on_evict` (for backwards compatibility).
-    /// If none are implemented, evictions are silently dropped.
-    #[deprecated(
-        since = "0.6.22",
-        note = "Use `on_evict_hot` and `on_evict_cold` instead. By default, each of the new methods falls back to `on_evict` individually; overriding only one (e.g. `on_evict_hot`) leaves the other still delegating to `on_evict`."
-    )]
+    /// To distinguish evictions from the hot vs cold queues, override
+    /// [`Lifecycle::on_evict_hot`] and/or [`Lifecycle::on_evict_cold`] instead;
+    /// they default to delegating here.
+    ///
+    /// If none of `on_evict`, `on_evict_hot`, or `on_evict_cold` is overridden,
+    /// eviction notifications are silently dropped.
     #[allow(unused_variables)]
+    #[inline]
     fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val) {}
 
     /// Called when an item is evicted from the cold queue.
     ///
-    /// By default delegates to the deprecated `on_evict`.
+    /// By default delegates to [`Lifecycle::on_evict`].
+    ///
+    /// Note: items that are rejected without ever being admitted to the cache
+    /// (oversized inserts and oversized placeholder values) are also reported
+    /// via this method.
     #[inline]
     fn on_evict_cold(&self, state: &mut Self::RequestState, key: Key, val: Val) {
-        #[allow(deprecated)]
         self.on_evict(state, key, val)
     }
 
     /// Called when an item is evicted from the hot queue.
     ///
-    /// By default delegates to the deprecated `on_evict`.
-    ///
-    /// Note: items that are rejected without ever being admitted to the cache
-    /// (oversized inserts and oversized placeholder values) are reported via this
-    /// method, since new admissions target the hot queue first.
+    /// By default delegates to [`Lifecycle::on_evict`].
     #[inline]
     fn on_evict_hot(&self, state: &mut Self::RequestState, key: Key, val: Val) {
-        #[allow(deprecated)]
         self.on_evict(state, key, val)
     }
 

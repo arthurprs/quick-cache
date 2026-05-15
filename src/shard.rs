@@ -1061,7 +1061,7 @@ impl<
     ) -> Result<(), Val> {
         self.entries.remove(placeholder.idx());
         self.map_remove(placeholder.hash(), placeholder.idx());
-        self.lifecycle.on_evict_hot(lcs, key, value);
+        self.lifecycle.on_evict_cold(lcs, key, value);
         Ok(())
     }
 
@@ -1141,7 +1141,7 @@ impl<
         if matches!(strategy, InsertStrategy::Replace { .. }) {
             return Err((key, value));
         }
-        self.lifecycle.on_evict_hot(lcs, key, value);
+        self.lifecycle.on_evict_cold(lcs, key, value);
         Ok(())
     }
 
