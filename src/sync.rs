@@ -809,6 +809,19 @@ impl<Key, Val> Clone for DefaultLifecycle<Key, Val> {
     }
 }
 
+impl<Key, Val> DefaultLifecycle<Key, Val> {
+    #[inline]
+    fn record_evict(&self, state: &mut [Option<(Key, Val)>; 2], key: Key, val: Val) {
+        if std::mem::needs_drop::<(Key, Val)>() {
+            if state[0].is_none() {
+                state[0] = Some((key, val));
+            } else if state[1].is_none() {
+                state[1] = Some((key, val));
+            }
+        }
+    }
+}
+
 impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
     // Why two items?
     // Because assuming the cache has roughly similarly weighted items,
@@ -823,14 +836,13 @@ impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
     }
 
     #[inline]
-    fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val) {
-        if std::mem::needs_drop::<(Key, Val)>() {
-            if state[0].is_none() {
-                state[0] = Some((key, val));
-            } else if state[1].is_none() {
-                state[1] = Some((key, val));
-            }
-        }
+    fn on_evict_hot(&self, state: &mut Self::RequestState, key: Key, val: Val) {
+        self.record_evict(state, key, val);
+    }
+
+    #[inline]
+    fn on_evict_cold(&self, state: &mut Self::RequestState, key: Key, val: Val) {
+        self.record_evict(state, key, val);
     }
 }
 

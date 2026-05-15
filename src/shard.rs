@@ -1129,9 +1129,13 @@ impl<
         strategy: InsertStrategy,
     ) -> Result<(), (Key, Val)> {
         // Make sure to remove any existing entry
-        if let Some((idx, _)) = self.search_resident(hash, &key) {
+        if let Some((idx, resident)) = self.search_resident(hash, &key) {
+            let prev_state = resident.state;
             if let Some((ek, ev)) = self.remove_internal(hash, idx) {
-                self.lifecycle.on_evict_hot(lcs, ek, ev);
+                match prev_state {
+                    ResidentState::Hot => self.lifecycle.on_evict_hot(lcs, ek, ev),
+                    ResidentState::Cold => self.lifecycle.on_evict_cold(lcs, ek, ev),
+                }
             }
         }
         if matches!(strategy, InsertStrategy::Replace { .. }) {
