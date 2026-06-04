@@ -224,6 +224,7 @@ impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, 
         }) {
             entry.remove();
         }
+        self.entries.remove(placeholder.idx());
     }
 
     #[cold]

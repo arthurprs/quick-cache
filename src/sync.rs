@@ -958,6 +958,7 @@ impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shard::SharedPlaceholder as _;
     use std::{
         sync::{Arc, Barrier},
         thread,
@@ -1762,5 +1763,23 @@ mod tests {
         assert_eq!(cache.try_insert_with_lifecycle(2, 20), Err((2, 20)));
         drop(guards);
         assert_eq!(cache.get(&2), None);
+    }
+
+    #[test]
+    fn test_guard_leak() {
+        let cache: Cache<i32, i32> = Cache::new(8);
+        let guard1 = match cache.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => g,
+            _ => panic!("expected guard"),
+        };
+        let idx1 = guard1.shared().idx();
+        drop(guard1);
+        let guard2 = match cache.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => g,
+            _ => panic!("expected guard"),
+        };
+        let idx2 = guard2.shared().idx();
+        drop(guard2);
+        assert_eq!(idx1, idx2);
     }
 }

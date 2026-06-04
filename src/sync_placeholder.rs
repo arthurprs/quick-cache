@@ -93,6 +93,13 @@ pub struct PlaceholderGuard<'a, Key, Val, We, B, L> {
     inserted: bool,
 }
 
+#[cfg(test)]
+impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
+    pub fn shared(&self) -> &SharedPlaceholder<Val> {
+        &self.shared
+    }
+}
+
 #[derive(Debug)]
 enum Waiter {
     Thread {
