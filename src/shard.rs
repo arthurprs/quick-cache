@@ -223,8 +223,8 @@ impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, 
             matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if shared.same_as(placeholder))
         }) {
             entry.remove();
+            self.entries.remove(placeholder.idx());
         }
-        self.entries.remove(placeholder.idx());
     }
 
     #[cold]
