@@ -1782,4 +1782,37 @@ mod tests {
         drop(guard2);
         assert_eq!(idx1, idx2);
     }
+
+    // A real insert overwrites the placeholder in place, reusing its slab slot as
+    // a Resident. Dropping the now-stale guard must not free that slot, otherwise
+    // the live entry is evicted while the map still references it.
+    #[test]
+    fn test_guard_drop_after_overwrite_insert() {
+        let cache: Cache<i32, i32> = Cache::new(8);
+        let guard = match cache.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => g,
+            _ => panic!("expected guard"),
+        };
+        cache.insert(1, 100);
+        assert_eq!(cache.get(&1), Some(100));
+        drop(guard);
+        assert_eq!(cache.get(&1), Some(100));
+    }
+
+    // A remove frees the placeholder's slab slot, which a later insert reuses for a
+    // different key. Dropping the original guard must not free that slot again, or
+    // it evicts the unrelated key.
+    #[test]
+    fn test_guard_drop_after_remove_and_reuse() {
+        let cache: Cache<i32, i32> = Cache::new(8);
+        let guard = match cache.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => g,
+            _ => panic!("expected guard"),
+        };
+        cache.remove(&1);
+        cache.insert(2, 222);
+        assert_eq!(cache.get(&2), Some(222));
+        drop(guard);
+        assert_eq!(cache.get(&2), Some(222));
+    }
 }
