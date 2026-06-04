@@ -29,6 +29,27 @@ jobs:
       - run: cargo check --all-targets --no-default-features --features sharded-lock
       - run: cargo check --all-targets --features shuttle
 
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-msrv
+      # `cargo msrv verify` checks that the crate compiles with the
+      # `rust-version` declared in Cargo.toml. The default `cargo check` skips
+      # dev-dependencies, which may require a newer Rust than downstream needs.
+      - run: cargo msrv verify
+      - run: cargo msrv verify -- cargo check --features stats
+      - run: cargo msrv verify -- cargo check --no-default-features
+      - run: cargo msrv verify -- cargo check --no-default-features --features sharded-lock
+
   test:
     name: Tests
     strategy:
