@@ -13,7 +13,10 @@ exclude = ["fuzz"]
 rust-version = "1.71"
 
 [features]
-default = ["ahash", "parking_lot"]
+default = ["custom-hasher", "parking_lot"]
+# Use the crate's bundled fast default hasher (currently ahash) behind the
+# opaque `DefaultHashBuilder`. The concrete hasher is an implementation detail.
+custom-hasher = ["dep:ahash"]
 sharded-lock = ["dep:crossbeam-utils"]
 shuttle = ["dep:shuttle"]
 stats = []
