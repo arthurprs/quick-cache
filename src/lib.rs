@@ -59,7 +59,7 @@
 //!
 //! # Hasher
 //!
-//! By default the crate uses a fast non-cryptographic hasher (currently [ahash](https://crates.io/crates/ahash))
+//! By default the crate uses a fast non-cryptographic hasher (currently [foldhash](https://crates.io/crates/foldhash))
 //! exposed through the opaque [`DefaultHashBuilder`] type and enabled via the `custom-hasher` feature (on by
 //! default). The concrete algorithm is an implementation detail and may change between releases. If the
 //! `custom-hasher` feature is disabled the crate falls back to the std lib implementation instead (currently
@@ -77,7 +77,7 @@
 //!
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
-//! | `custom-hasher` | ✓ | Use the crate's bundled fast non-cryptographic default hasher (currently [ahash](https://crates.io/crates/ahash)) behind the opaque [`DefaultHashBuilder`]. When disabled, falls back to std lib's `RandomState` (currently SipHash-1-3). |
+//! | `custom-hasher` | ✓ | Use the crate's bundled fast non-cryptographic default hasher (currently [foldhash](https://crates.io/crates/foldhash)) behind the opaque [`DefaultHashBuilder`]. When disabled, falls back to std lib's `RandomState` (currently SipHash-1-3). |
 //! | `parking_lot` | ✓ | Use [parking_lot](https://crates.io/crates/parking_lot) for synchronization primitives. Mutually exclusive with `sharded-lock`. |
 //! | `sharded-lock` | | Use [`crossbeam_utils::sync::ShardedLock`](https://docs.rs/crossbeam-utils/latest/crossbeam_utils/sync/struct.ShardedLock.html) for synchronization primitives. Mutually exclusive with `parking_lot`. |
 //! | `shuttle` | | Enable [shuttle](https://crates.io/crates/shuttle) testing support for concurrency testing. |
@@ -110,7 +110,7 @@ mod shuttle_tests;
 pub use options::{Options, OptionsBuilder};
 
 #[cfg(feature = "custom-hasher")]
-type DefaultHasherImpl = ahash::RandomState;
+type DefaultHasherImpl = foldhash::quality::RandomState;
 #[cfg(not(feature = "custom-hasher"))]
 type DefaultHasherImpl = std::collections::hash_map::RandomState;
 
