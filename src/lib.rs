@@ -225,6 +225,22 @@ impl MemoryUsed {
     }
 }
 
+/// Per-item statistics returned by `item_stats`.
+///
+/// Only available with the `stats` feature enabled.
+#[cfg(feature = "stats")]
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ItemStats {
+    /// Number of times the item has been accessed (read) since it became resident.
+    ///
+    /// Incremented on every cache hit (`get`/`get_mut`/`get_value_or_guard`/`entry`).
+    /// Unlike the internal eviction counter, this is monotonic per residency and is
+    /// not bounded by the eviction policy. It resets to zero if the slot is reused for
+    /// a new value (e.g. after eviction and re-insertion).
+    pub access_count: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

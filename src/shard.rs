@@ -79,6 +79,11 @@ pub struct Resident<Key, Val> {
     value: Val,
     state: ResidentState,
     referenced: AtomicU16,
+    /// Number of times this item has been accessed (read) since it became resident.
+    /// Incremented wherever a cache hit is recorded, unlike `referenced` which is
+    /// bounded by the eviction policy. Reset whenever the slot is reused for a new key.
+    #[cfg(feature = "stats")]
+    access_count: AtomicU64,
 }
 
 impl<Key: Clone, Val: Clone> Clone for Resident<Key, Val> {
@@ -89,6 +94,8 @@ impl<Key: Clone, Val: Clone> Clone for Resident<Key, Val> {
             value: self.value.clone(),
             state: self.state,
             referenced: self.referenced.load(atomic::Ordering::Relaxed).into(),
+            #[cfg(feature = "stats")]
+            access_count: self.access_count.load(atomic::Ordering::Relaxed).into(),
         }
     }
 }
@@ -195,6 +202,20 @@ macro_rules! record_miss_mut {
         *$self.misses.get_mut() += 1;
     }};
 }
+#[cfg(feature = "stats")]
+macro_rules! record_item_hit {
+    ($resident: expr) => {{
+        $resident
+            .access_count
+            .fetch_add(1, atomic::Ordering::Relaxed);
+    }};
+}
+#[cfg(feature = "stats")]
+macro_rules! record_item_hit_mut {
+    ($resident: expr) => {{
+        *$resident.access_count.get_mut() += 1;
+    }};
+}
 
 #[cfg(not(feature = "stats"))]
 macro_rules! record_hit {
@@ -211,6 +232,14 @@ macro_rules! record_miss {
 #[cfg(not(feature = "stats"))]
 macro_rules! record_miss_mut {
     ($self: expr) => {{}};
+}
+#[cfg(not(feature = "stats"))]
+macro_rules! record_item_hit {
+    ($resident: expr) => {{}};
+}
+#[cfg(not(feature = "stats"))]
+macro_rules! record_item_hit_mut {
+    ($resident: expr) => {{}};
 }
 
 impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, Plh> {
@@ -563,6 +592,7 @@ impl<
                 resident.referenced.fetch_add(1, atomic::Ordering::Relaxed);
             }
             record_hit!(self);
+            record_item_hit!(resident);
             Some((&resident.key, &resident.value))
         } else {
             record_miss!(self);
@@ -594,6 +624,7 @@ impl<
             *resident.referenced.get_mut() += 1;
         }
         record_hit_mut!(self);
+        record_item_hit_mut!(resident);
 
         let old_weight = self.weighter.weight(&resident.key, &resident.value);
         Some(RefMut {
@@ -638,6 +669,19 @@ impl<
     {
         let (_, resident) = self.search_resident(hash, key)?;
         Some(&resident.value)
+    }
+
+    /// Returns per-item statistics for a resident key without affecting its hotness
+    /// or access count. Returns `None` if the key is not resident.
+    #[cfg(feature = "stats")]
+    pub fn item_stats<Q>(&self, hash: u64, key: &Q) -> Option<crate::ItemStats>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        let (_, resident) = self.search_resident(hash, key)?;
+        Some(crate::ItemStats {
+            access_count: resident.access_count.load(atomic::Ordering::Relaxed),
+        })
     }
 
     pub fn peek_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>>
@@ -900,6 +944,8 @@ impl<
                 value,
                 state: enter_state,
                 referenced: referenced.into(),
+                #[cfg(feature = "stats")]
+                access_count: Default::default(),
             }),
         );
         match evicted {
@@ -1020,6 +1066,8 @@ impl<
             value,
             state: placeholder_hot,
             referenced: (referenced as u16).into(),
+            #[cfg(feature = "stats")]
+            access_count: Default::default(),
         });
 
         let list_head = if placeholder_hot == ResidentState::Hot {
@@ -1102,6 +1150,8 @@ impl<
             value,
             state,
             referenced: Default::default(),
+            #[cfg(feature = "stats")]
+            access_count: Default::default(),
         }));
         if weight != 0 {
             *list_head = Some(self.entries.link(idx, *list_head));
@@ -1147,6 +1197,7 @@ impl<
                     *resident.referenced.get_mut() += 1;
                 }
                 record_hit_mut!(self);
+                record_item_hit_mut!(resident);
                 unsafe {
                     // Rustc gets insanely confused returning references from mut borrows
                     // Safety: value will have the same lifetime as `resident`
@@ -1205,6 +1256,7 @@ impl<
                         if *resident.referenced.get_mut() < MAX_F {
                             *resident.referenced.get_mut() += 1;
                         }
+                        record_item_hit_mut!(resident);
                         EntryOrPlaceholder::Kept(t)
                     }
                     EntryAction::Remove => {
@@ -1404,8 +1456,12 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "stats"))]
     use super::*;
 
+    // The tight entry overhead is only guaranteed without the `stats` feature,
+    // which adds a per-item `access_count` field to each `Resident`.
+    #[cfg(not(feature = "stats"))]
     #[test]
     fn entry_overhead() {
         use std::mem::size_of;

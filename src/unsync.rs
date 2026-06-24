@@ -175,6 +175,16 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.peek(self.shard.hash(key), key)
     }
 
+    /// Returns per-item statistics for `key`, or `None` if the key is not present.
+    /// Like peeks, this does not alter the key "hotness" or its access count.
+    #[cfg(feature = "stats")]
+    pub fn item_stats<Q>(&self, key: &Q) -> Option<crate::ItemStats>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        self.shard.item_stats(self.shard.hash(key), key)
+    }
+
     /// Peeks an item from the cache. Contrary to gets, peeks don't alter the key "hotness".
     ///
     /// Note: Leaking the returned RefMut might cause cache weight tracking to be inaccurate.
