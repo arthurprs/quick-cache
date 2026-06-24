@@ -10,7 +10,7 @@ keywords = ["lru", "concurrent", "cache", "s3-fifo", "clock"]
 categories = ["caching", "concurrency", "data-structures"]
 readme = "README.md"
 exclude = ["fuzz"]
-rust-version = "1.71"
+rust-version = "1.85"
 
 [features]
 default = ["custom-hasher", "parking_lot"]
@@ -25,7 +25,7 @@ stats = []
 crossbeam-utils = { optional = true, version = "0.8" }
 equivalent = "1.0"
 foldhash = { optional = true, version = "0.2" }
-hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
+hashbrown = { version = "0.17", default-features = false, features = ["inline-more"] }
 parking_lot = { optional = true, version = "0.12" }
 shuttle = { version = "0.8", optional = true }
 
