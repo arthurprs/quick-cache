@@ -212,31 +212,35 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     ///
     /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
     pub fn replace(&mut self, key: Key, value: Val, soft: bool) -> Result<(), (Key, Val)> {
-        let lcs = self.replace_with_lifecycle(key, value, soft)?;
-        self.shard.lifecycle.end_request(lcs);
-        Ok(())
+        let mut lcs = Default::default();
+        self.replace_with_lifecycle(key, value, soft, &mut lcs)
     }
 
-    /// Replaces an item in the cache, but only if it already exists.
+    /// Replaces an item in the cache, but only if it already exists, recording any evicted
+    /// items into the given lifecycle request state.
     /// If `soft` is set, the replace operation won't affect the "hotness" of the key,
     /// even if the value is replaced.
     ///
     /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
+    ///
+    /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
+    /// The same `&mut lcs` can be threaded through multiple operations to batch the
+    /// eviction work. Evicted items are released when `lcs` is dropped.
     pub fn replace_with_lifecycle(
         &mut self,
         key: Key,
         value: Val,
         soft: bool,
-    ) -> Result<L::RequestState, (Key, Val)> {
-        let mut lcs = self.shard.lifecycle.begin_request();
+        lcs: &mut L::RequestState,
+    ) -> Result<(), (Key, Val)> {
         self.shard.insert(
-            &mut lcs,
+            lcs,
             self.shard.hash(&key),
             key,
             value,
             InsertStrategy::Replace { soft },
         )?;
-        Ok(lcs)
+        Ok(())
     }
 
     /// Retains only the items specified by the predicate.
@@ -265,9 +269,8 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             Ok((idx, _)) => idx,
             Err((plh, _)) => {
                 let v = with()?;
-                let mut lcs = self.shard.lifecycle.begin_request();
+                let mut lcs = L::RequestState::default();
                 let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
-                self.shard.lifecycle.end_request(lcs);
                 debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
                 plh.idx
             }
@@ -291,10 +294,9 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             Ok((idx, _)) => idx,
             Err((plh, _)) => {
                 let v = with()?;
-                let mut lcs = self.shard.lifecycle.begin_request();
+                let mut lcs = L::RequestState::default();
                 let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
                 debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
-                self.shard.lifecycle.end_request(lcs);
                 plh.idx
             }
         };
@@ -349,23 +351,22 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
 
     /// Inserts an item in the cache with key `key`.
     pub fn insert(&mut self, key: Key, value: Val) {
-        let lcs = self.insert_with_lifecycle(key, value);
-        self.shard.lifecycle.end_request(lcs);
+        let mut lcs = Default::default();
+        self.insert_with_lifecycle(key, value, &mut lcs);
     }
 
-    /// Inserts an item in the cache with key `key`.
-    pub fn insert_with_lifecycle(&mut self, key: Key, value: Val) -> L::RequestState {
-        let mut lcs = self.shard.lifecycle.begin_request();
-        let result = self.shard.insert(
-            &mut lcs,
-            self.shard.hash(&key),
-            key,
-            value,
-            InsertStrategy::Insert,
-        );
+    /// Inserts an item in the cache with key `key`, recording any evicted items into the
+    /// given lifecycle request state.
+    ///
+    /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
+    /// The same `&mut lcs` can be threaded through multiple operations to batch the
+    /// eviction work. Evicted items are released when `lcs` is dropped.
+    pub fn insert_with_lifecycle(&mut self, key: Key, value: Val, lcs: &mut L::RequestState) {
+        let result = self
+            .shard
+            .insert(lcs, self.shard.hash(&key), key, value, InsertStrategy::Insert);
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
-        lcs
     }
 
     /// Clear all items from the cache
@@ -440,9 +441,6 @@ impl<Key, Val> Clone for DefaultLifecycle<Key, Val> {
 
 impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
     type RequestState = ();
-
-    #[inline]
-    fn begin_request(&self) -> Self::RequestState {}
 }
 
 #[derive(Debug, Clone)]
@@ -462,29 +460,22 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
 {
     /// Inserts the value into the placeholder
     pub fn insert(self, value: Val) {
-        self.insert_internal(value, false);
+        let mut lcs = Default::default();
+        self.insert_with_lifecycle(value, &mut lcs);
     }
 
-    /// Inserts the value into the placeholder
-    pub fn insert_with_lifecycle(self, value: Val) -> L::RequestState {
-        self.insert_internal(value, true).unwrap()
-    }
-
-    #[inline]
-    fn insert_internal(mut self, value: Val, return_lcs: bool) -> Option<L::RequestState> {
-        let mut lcs = self.cache.shard.lifecycle.begin_request();
-        let replaced =
-            self.cache
-                .shard
-                .replace_placeholder(&mut lcs, &self.placeholder, false, value);
+    /// Inserts the value into the placeholder, recording any evicted items into the given
+    /// lifecycle request state.
+    ///
+    /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
+    /// Evicted items are released when `lcs` is dropped.
+    pub fn insert_with_lifecycle(mut self, value: Val, lcs: &mut L::RequestState) {
+        let replaced = self
+            .cache
+            .shard
+            .replace_placeholder(lcs, &self.placeholder, false, value);
         debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
         self.inserted = true;
-        if return_lcs {
-            Some(lcs)
-        } else {
-            self.cache.shard.lifecycle.end_request(lcs);
-            None
-        }
     }
 }
 

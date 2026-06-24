@@ -1340,11 +1340,11 @@ impl<
         }
 
         // Evict items if we're over the new capacity
-        let mut lcs = self.lifecycle.begin_request();
+        let mut lcs = L::RequestState::default();
         while self.weight_hot + self.weight_cold > self.weight_capacity
             && self.advance_cold(&mut lcs)
         {}
-        self.lifecycle.end_request(lcs);
+        // `lcs` drops here, releasing evicted items.
         // Trim ghost entries if needed
         while self.num_non_resident > self.capacity_non_resident {
             self.advance_ghost();

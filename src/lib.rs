@@ -164,8 +164,31 @@ impl<Key, Val> Weighter<Key, Val> for UnitWeighter {
 /// Hooks into the lifetime of the cache items.
 ///
 /// The functions should be small and very fast, otherwise the cache performance might be negatively affected.
+///
+/// # Request state
+///
+/// Operations that may evict items thread a [`RequestState`](Lifecycle::RequestState)
+/// through the eviction hooks. It is a per-request accumulator: the cache constructs a
+/// fresh one via [`Default`], the `on_evict*`/`before_evict` hooks record into it, and it
+/// is finalized by its own [`Drop`] (which, for example, releases evicted items _after_
+/// the shard lock is dropped).
+///
+/// The `_with_lifecycle` cache methods take `&mut RequestState`, letting a caller drive
+/// several operations against a single state — e.g. to batch the eviction work or inspect
+/// evicted items before dropping it:
+///
+/// ```ignore
+/// let mut lcs = Default::default();
+/// cache.insert_with_lifecycle(k1, v1, &mut lcs);
+/// cache.insert_with_lifecycle(k2, v2, &mut lcs);
+/// // inspect `lcs` here if desired; evicted items are released when it drops
+/// ```
 pub trait Lifecycle<Key, Val> {
-    type RequestState;
+    /// Per-request accumulator threaded through the eviction hooks.
+    ///
+    /// Constructed via [`Default`] at the start of each request and finalized by its
+    /// [`Drop`]. Keep it cheap to create and drop.
+    type RequestState: Default;
 
     /// Returns whether the item is pinned. Items that are pinned can't be evicted.
     /// Note that a pinned item can still be replaced with get_mut, insert, replace and similar APIs.
@@ -180,9 +203,6 @@ pub trait Lifecycle<Key, Val> {
     fn is_pinned(&self, key: &Key, val: &Val) -> bool {
         false
     }
-
-    /// Called before the insert request starts, e.g.: insert, replace.
-    fn begin_request(&self) -> Self::RequestState;
 
     /// Called when a cache item is about to be evicted.
     /// Note that value replacement (e.g. insertions for the same key) won't call this method.
@@ -233,16 +253,6 @@ pub trait Lifecycle<Key, Val> {
     fn on_evict_hot(&self, state: &mut Self::RequestState, key: Key, val: Val) {
         self.on_evict(state, key, val)
     }
-
-    /// Called after a request finishes, e.g.: insert, replace.
-    ///
-    /// Notes:
-    /// This will _not_ be called when using `_with_lifecycle` apis, which will return the RequestState instead.
-    /// This will _not_ be called if the request errored (e.g. a replace didn't find a value to replace).
-    /// If needed, Drop for RequestState can be used to detect these cases.
-    #[allow(unused_variables)]
-    #[inline]
-    fn end_request(&self, state: Self::RequestState) {}
 }
 
 /// The memory used by the cache

@@ -31,10 +31,6 @@ impl Weighter<u16, Value> for MyWeighter {
 impl Lifecycle<u16, Value> for MyLifecycle {
     type RequestState = Vec<(u16, Value)>;
 
-    fn begin_request(&self) -> Self::RequestState {
-        Default::default()
-    }
-
     fn is_pinned(&self, _key: &u16, val: &Value) -> bool {
         val.pinned
     }
@@ -104,13 +100,15 @@ fn run(input: Input) {
         match op {
             Op::Insert(k, v, pinned) => {
                 // eprintln!("insert {k} {v}");
-                let evicted = cache.insert_with_lifecycle(
+                let mut evicted = Vec::new();
+                cache.insert_with_lifecycle(
                     k,
                     Value {
                         original: v,
                         current: v,
                         pinned,
                     },
+                    &mut evicted,
                 );
                 placeholders.remove(&k);
                 // if k is present it must have value v
@@ -121,15 +119,20 @@ fn run(input: Input) {
             Op::Replace(k, v, pinned) => {
                 // eprintln!("replace {k} {v}");
                 placeholders.remove(&k);
-                if let Ok(evicted) = cache.replace_with_lifecycle(
-                    k,
-                    Value {
-                        original: v,
-                        current: v,
-                        pinned,
-                    },
-                    false,
-                ) {
+                let mut evicted = Vec::new();
+                if cache
+                    .replace_with_lifecycle(
+                        k,
+                        Value {
+                            original: v,
+                            current: v,
+                            pinned,
+                        },
+                        false,
+                        &mut evicted,
+                    )
+                    .is_ok()
+                {
                     // if k is present it must have value v
                     let peek = cache.peek(&k);
                     assert!(peek.is_none() || peek.unwrap().original == v);
@@ -155,7 +158,8 @@ fn run(input: Input) {
                         current: v,
                         pinned,
                     };
-                    if let Ok(evicted) = p.insert_with_lifecycle(value) {
+                    let mut evicted = Vec::new();
+                    if p.insert_with_lifecycle(value, &mut evicted).is_ok() {
                         let peek = cache.peek(&k);
                         assert!(peek.is_none() || peek.unwrap().original == v);
                         check_evicted(k, peek, evicted);
