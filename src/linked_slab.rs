@@ -34,6 +34,12 @@ impl<T> LinkedSlab<T> {
         self.entries.reserve(additional);
     }
 
+    /// The number of entries the slab can hold without reallocating.
+    #[cfg(test)]
+    pub fn capacity(&self) -> usize {
+        self.entries.capacity()
+    }
+
     #[cfg(fuzzing)]
     pub fn len(&self) -> usize {
         self.entries.iter().filter(|e| e.item.is_some()).count()
