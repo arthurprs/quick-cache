@@ -433,9 +433,11 @@ impl<
     /// Reserver additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&mut self, additional: usize) {
-        // Ghost (non-resident) entries also occupy slab/map slots, and their
-        // count is hard-capped at `capacity_non_resident`, so account for them.
-        let additional = additional.saturating_add(self.capacity_non_resident);
+        // Ghost (non-resident) entries also occupy slab/map slots. The number
+        // produced by `additional` insertions is bounded both by `additional`
+        // (each insert evicts at most one resident into a ghost) and by the
+        // shard-wide cap `capacity_non_resident`, so reserve for the smaller.
+        let additional = additional.saturating_add(additional.min(self.capacity_non_resident));
         self.entries.reserve(additional);
         self.map.reserve(additional, |&idx| {
             let (entry, _) = self.entries.get(idx).unwrap();
@@ -1421,6 +1423,38 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserve_caps_ghost_headroom() {
+        // A small reserve on a shard with a large estimated capacity (hence a
+        // large `capacity_non_resident`) must not over-allocate the slab by the
+        // full ghost cap; the ghost headroom is bounded by `additional`.
+        let mut shard = CacheShard::<
+            u64,
+            u64,
+            crate::UnitWeighter,
+            crate::DefaultHashBuilder,
+            crate::sync::DefaultLifecycle<u64, u64>,
+            crate::sync_placeholder::SharedPlaceholder<u64>,
+        >::new(
+            DEFAULT_HOT_ALLOCATION,
+            0.5,       // ghost_allocation -> capacity_non_resident = 500_000
+            1_000_000, // estimated_items_capacity
+            u64::MAX,  // weight_capacity
+            crate::UnitWeighter,
+            crate::DefaultHashBuilder::default(),
+            crate::sync::DefaultLifecycle::default(),
+        );
+        assert_eq!(shard.capacity_non_resident, 500_000);
+        shard.reserve(100);
+        // Ghost headroom is min(additional, capacity_non_resident) = 100, so the
+        // slab reserves ~200 entries, not 500_000+.
+        assert!(
+            shard.entries.capacity() < 1_000,
+            "slab over-allocated: {}",
+            shard.entries.capacity()
+        );
+    }
 
     #[test]
     fn entry_overhead() {
