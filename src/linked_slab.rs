@@ -247,6 +247,6 @@ impl<T> LinkedSlab<T> {
     /// It should be noted that if cache key or value is some type like `Vec<T>`,
     /// the memory allocated in the heap will not be counted.
     pub fn memory_used(&self) -> usize {
-        self.entries.len() * size_of::<Entry<T>>()
+        self.entries.len() * std::mem::size_of::<Entry<T>>()
     }
 }

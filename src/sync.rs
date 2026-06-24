@@ -466,14 +466,17 @@ impl<
         self.lifecycle.end_request(lcs);
     }
 
-    /// Inserts an item in the cache with key `key`, returning the lifecycle request state.
-    ///
-    /// Unlike [`insert`](Self::insert), the lifecycle request is **not** ended automatically.
-    /// The caller is responsible for passing the returned state to [`Lifecycle::end_request`]
-    /// when it is ready to drop any evicted items outside the shard lock.
-    ///
-    /// This is useful when coalescing multiple insertions into a single lifecycle request,
-    /// or when you need to control exactly when evicted items are dropped.
+    /// Attempts to insert an item in the cache with key `key` without blocking.
+    /// Returns `Ok(())` if the item was inserted, or `Err((key, value))` if the shard lock
+    /// could not be acquired without blocking. Lock contention is the only failure
+    /// mode: the inputs are returned so the caller can retry or discard them.
+    pub fn try_insert(&self, key: Key, value: Val) -> Result<(), (Key, Val)> {
+        let lcs = self.try_insert_with_lifecycle(key, value)?;
+        self.lifecycle.end_request(lcs);
+        Ok(())
+    }
+
+    /// Inserts an item in the cache with key `key`.
     pub fn insert_with_lifecycle(&self, key: Key, value: Val) -> L::RequestState {
         let mut lcs = self.lifecycle.begin_request();
         self.insert_with_state(key, value, &mut lcs);
@@ -544,6 +547,32 @@ impl<
                 // result cannot err with the Insert strategy
                 debug_assert!(result.is_ok());
                 Ok(())
+            }
+            _ => Err((key, value)),
+        }
+    }
+
+    /// Attempts to insert an item in the cache with key `key` without blocking.
+    /// Returns `Ok(lcs)` with the lifecycle request state if the item was inserted,
+    /// or `Err((key, value))` if the shard lock could not be acquired without blocking.
+    /// Lock contention is the only failure mode: the inputs are returned so the
+    /// caller can retry or discard them.
+    pub fn try_insert_with_lifecycle(
+        &self,
+        key: Key,
+        value: Val,
+    ) -> Result<L::RequestState, (Key, Val)> {
+        // Tradeoff: begin_request is called before acquiring the shard lock to avoid holding
+        // the lock during potentially expensive lifecycle initialization.
+        let mut lcs = self.lifecycle.begin_request();
+        let (shard, hash) = self.shard_for(&key).unwrap();
+
+        match shard.try_write() {
+            Some(mut shard) => {
+                let result = shard.insert(&mut lcs, hash, key, value, InsertStrategy::Insert);
+                // result cannot err with the Insert strategy
+                debug_assert!(result.is_ok());
+                Ok(lcs)
             }
             _ => Err((key, value)),
         }
@@ -1024,6 +1053,7 @@ impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shard::SharedPlaceholder as _;
     use std::{
         sync::{Arc, Barrier},
         thread,
@@ -1828,5 +1858,56 @@ mod tests {
         assert_eq!(cache.try_insert_with_lifecycle(2, 20), Err((2, 20)));
         drop(guards);
         assert_eq!(cache.get(&2), None);
+    }
+
+    #[test]
+    fn test_guard_leak() {
+        let cache: Cache<i32, i32> = Cache::new(8);
+        let guard1 = match cache.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => g,
+            _ => panic!("expected guard"),
+        };
+        let idx1 = guard1.shared().idx();
+        drop(guard1);
+        let guard2 = match cache.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => g,
+            _ => panic!("expected guard"),
+        };
+        let idx2 = guard2.shared().idx();
+        drop(guard2);
+        assert_eq!(idx1, idx2);
+    }
+
+    // A real insert overwrites the placeholder in place, reusing its slab slot as
+    // a Resident. Dropping the now-stale guard must not free that slot, otherwise
+    // the live entry is evicted while the map still references it.
+    #[test]
+    fn test_guard_drop_after_overwrite_insert() {
+        let cache: Cache<i32, i32> = Cache::new(8);
+        let guard = match cache.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => g,
+            _ => panic!("expected guard"),
+        };
+        cache.insert(1, 100);
+        assert_eq!(cache.get(&1), Some(100));
+        drop(guard);
+        assert_eq!(cache.get(&1), Some(100));
+    }
+
+    // A remove frees the placeholder's slab slot, which a later insert reuses for a
+    // different key. Dropping the original guard must not free that slot again, or
+    // it evicts the unrelated key.
+    #[test]
+    fn test_guard_drop_after_remove_and_reuse() {
+        let cache: Cache<i32, i32> = Cache::new(8);
+        let guard = match cache.get_value_or_guard(&1, None) {
+            GuardResult::Guard(g) => g,
+            _ => panic!("expected guard"),
+        };
+        cache.remove(&1);
+        cache.insert(2, 222);
+        assert_eq!(cache.get(&2), Some(222));
+        drop(guard);
+        assert_eq!(cache.get(&2), Some(222));
     }
 }
