@@ -76,15 +76,6 @@ impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val> {
 }
 
 impl<Key: Eq + Hash, Val: Clone, We: Weighter<Key, Val> + Clone> Cache<Key, Val, We> {
-    /// Creates a new cache with a custom [`Weighter`].
-    ///
-    /// - `estimated_items_capacity` — expected number of items the cache will hold,
-    ///   roughly `weight_capacity / average_item_weight`.
-    /// - `weight_capacity` — total weight the cache may hold across all shards.
-    /// - `weighter` — determines the weight of each key–value pair.
-    ///
-    /// Use [`Cache::new`] when each item has unit weight (i.e. when you only care
-    /// about item count, not size).
     pub fn with_weighter(
         estimated_items_capacity: usize,
         weight_capacity: u64,
@@ -421,19 +412,11 @@ impl<
         Ok(())
     }
 
-    /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists,
-    /// returning the lifecycle request state.
-    ///
+    /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists.
     /// If `soft` is set, the replace operation won't affect the "hotness" of the entry,
     /// even if the value is replaced.
     ///
-    /// Returns `Ok(lcs)` with the lifecycle request state if the entry was replaced.
-    /// Returns `Err((key, value))` if no entry existed for `key` (inputs are returned
-    /// so the caller can retry or discard them). The caller is responsible for passing
-    /// the returned state to [`Lifecycle::end_request`].
-    ///
-    /// Prefer [`replace`](Self::replace) unless you need manual control over lifecycle
-    /// request lifetime.
+    /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
     pub fn replace_with_lifecycle(
         &self,
         key: Key,
@@ -658,18 +641,9 @@ impl<
         PlaceholderGuard::join(&self.lifecycle, shard, hash, key, timeout)
     }
 
-    /// Gets an item from the cache with key `key`, or inserts one produced by `with`.
+    /// Gets or inserts an item in the cache with key `key`.
     ///
-    /// If the key is already present, the cached value is returned without calling `with`.
-    /// Otherwise, the cache is locked for this key (other callers to `get_value_or_guard`
-    /// or the `get_or_insert` family will block until the value is populated), `with` is
-    /// called to produce the value, and the result is inserted and returned.
-    ///
-    /// `with` may return an error, in which case nothing is inserted and the error is
-    /// propagated. The placeholder is dropped so waiting callers can retry.
-    ///
-    /// See also [`get_value_or_guard`](Self::get_value_or_guard) for more control over
-    /// the placeholder lifecycle.
+    /// See also `get_value_or_guard` and `get_value_or_guard_async`.
     pub fn get_or_insert_with<Q, E>(
         &self,
         key: &Q,
@@ -720,12 +694,7 @@ impl<
         }
     }
 
-    /// Gets an item from the cache with key `key`, or inserts one produced by `with`.
-    ///
-    /// Async counterpart of [`get_or_insert_with`](Self::get_or_insert_with). The `with`
-    /// future is only polled when no value exists for `key`. While `with` is being awaited,
-    /// other tasks looking up the same key will suspend and resume once the value is
-    /// inserted (or the guard is dropped without inserting).
+    /// Gets or inserts an item in the cache with key `key`.
     pub async fn get_or_insert_async<Q, E>(
         &self,
         key: &Q,
