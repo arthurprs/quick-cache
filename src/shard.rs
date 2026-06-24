@@ -1321,7 +1321,7 @@ impl<
         }
     }
 
-    pub fn set_capacity(&mut self, new_weight_capacity: u64) {
+    pub fn set_capacity(&mut self, new_weight_capacity: u64, lcs: &mut L::RequestState) {
         // Guard against division by zero when old capacity is 0 (produces inf/NaN ratios)
         if self.weight_capacity == 0 {
             self.weight_capacity = new_weight_capacity;
@@ -1340,11 +1340,7 @@ impl<
         }
 
         // Evict items if we're over the new capacity
-        let mut lcs = L::RequestState::default();
-        while self.weight_hot + self.weight_cold > self.weight_capacity
-            && self.advance_cold(&mut lcs)
-        {}
-        // `lcs` drops here, releasing evicted items.
+        while self.weight_hot + self.weight_cold > self.weight_capacity && self.advance_cold(lcs) {}
         // Trim ghost entries if needed
         while self.num_non_resident > self.capacity_non_resident {
             self.advance_ghost();

@@ -468,7 +468,9 @@ impl<
     /// eviction work. Evicted items are released when `lcs` is dropped.
     pub fn insert_with_lifecycle(&self, key: Key, value: Val, lcs: &mut L::RequestState) {
         let (shard, hash) = self.shard_for(&key).unwrap();
-        let result = shard.write().insert(lcs, hash, key, value, InsertStrategy::Insert);
+        let result = shard
+            .write()
+            .insert(lcs, hash, key, value, InsertStrategy::Insert);
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
     }
@@ -551,7 +553,8 @@ impl<
         let shard_weight_cap = new_weight_capacity.saturating_add(self.shards.len() as u64 - 1)
             / self.shards.len() as u64;
         for shard in &*self.shards {
-            shard.write().set_capacity(shard_weight_cap);
+            let mut lcs = Default::default();
+            shard.write().set_capacity(shard_weight_cap, &mut lcs);
         }
     }
 
@@ -1754,7 +1757,10 @@ mod tests {
 
         // Contended when a read lock is held.
         let guards: Vec<_> = cache.shards.iter().map(|s| s.read()).collect();
-        assert_eq!(cache.try_insert_with_lifecycle(3, 30, &mut lcs), Err((3, 30)));
+        assert_eq!(
+            cache.try_insert_with_lifecycle(3, 30, &mut lcs),
+            Err((3, 30))
+        );
         drop(guards);
         assert_eq!(cache.get(&3), None);
     }

@@ -269,7 +269,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             Ok((idx, _)) => idx,
             Err((plh, _)) => {
                 let v = with()?;
-                let mut lcs = L::RequestState::default();
+                let mut lcs = Default::default();
                 let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
                 debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
                 plh.idx
@@ -294,7 +294,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             Ok((idx, _)) => idx,
             Err((plh, _)) => {
                 let v = with()?;
-                let mut lcs = L::RequestState::default();
+                let mut lcs = Default::default();
                 let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
                 debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
                 plh.idx
@@ -362,9 +362,13 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// The same `&mut lcs` can be threaded through multiple operations to batch the
     /// eviction work. Evicted items are released when `lcs` is dropped.
     pub fn insert_with_lifecycle(&mut self, key: Key, value: Val, lcs: &mut L::RequestState) {
-        let result = self
-            .shard
-            .insert(lcs, self.shard.hash(&key), key, value, InsertStrategy::Insert);
+        let result = self.shard.insert(
+            lcs,
+            self.shard.hash(&key),
+            key,
+            value,
+            InsertStrategy::Insert,
+        );
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
     }
@@ -393,7 +397,8 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// If the new capacity is smaller than the current weight, items will be evicted
     /// to bring the cache within the new limit.
     pub fn set_capacity(&mut self, new_weight_capacity: u64) {
-        self.shard.set_capacity(new_weight_capacity);
+        let mut lcs = Default::default();
+        self.shard.set_capacity(new_weight_capacity, &mut lcs);
     }
 
     #[cfg(any(fuzzing, test))]
