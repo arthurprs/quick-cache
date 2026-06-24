@@ -433,8 +433,10 @@ impl<
     /// Reserver additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&mut self, additional: usize) {
-        // extra 50% for non-resident entries
-        let additional = additional.saturating_add(additional / 2);
+        // Ghost (non-resident) entries also occupy slab/map slots, and their
+        // count is hard-capped at `capacity_non_resident`, so account for them.
+        let additional = additional.saturating_add(self.capacity_non_resident);
+        self.entries.reserve(additional);
         self.map.reserve(additional, |&idx| {
             let (entry, _) = self.entries.get(idx).unwrap();
             match entry {

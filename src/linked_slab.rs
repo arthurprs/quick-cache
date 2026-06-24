@@ -26,6 +26,14 @@ impl<T> LinkedSlab<T> {
         }
     }
 
+    /// Reserves capacity for at least `additional` more entries to be inserted.
+    ///
+    /// This pre-allocates the backing storage so that subsequent `insert`s don't
+    /// trigger a reallocation (and the associated copy) of the whole slab.
+    pub fn reserve(&mut self, additional: usize) {
+        self.entries.reserve(additional);
+    }
+
     #[cfg(fuzzing)]
     pub fn len(&self) -> usize {
         self.entries.iter().filter(|e| e.item.is_some()).count()
@@ -248,5 +256,27 @@ impl<T> LinkedSlab<T> {
     /// the memory allocated in the heap will not be counted.
     pub fn memory_used(&self) -> usize {
         self.entries.len() * std::mem::size_of::<Entry<T>>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserve_avoids_realloc() {
+        let mut slab: LinkedSlab<u64> = LinkedSlab::with_capacity(0);
+        slab.reserve(1000);
+        let cap = slab.entries.capacity();
+        assert!(cap >= 1000);
+        // Inserting up to the reserved capacity must not reallocate.
+        for i in 0..cap as u64 {
+            slab.insert(i);
+        }
+        assert_eq!(
+            slab.entries.capacity(),
+            cap,
+            "slab reallocated despite reserve"
+        );
     }
 }
