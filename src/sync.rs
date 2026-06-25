@@ -363,6 +363,7 @@ impl<
 
     /// Returns per-item statistics for `key`, or `None` if the key is not present.
     /// Like peeks, this does not alter the key "hotness" or its access count.
+    /// Only available when the `stats` feature is enabled.
     #[cfg(feature = "stats")]
     pub fn item_stats<Q>(&self, key: &Q) -> Option<crate::ItemStats>
     where
