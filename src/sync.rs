@@ -483,24 +483,6 @@ impl<
         lcs
     }
 
-    /// Inserts an item in the cache with key `key` using an existing lifecycle request state.
-    ///
-    /// `lcs` must have been obtained from a prior [`Lifecycle::begin_request`] call and
-    /// must **not** have been passed to [`Lifecycle::end_request`] yet. Any items evicted
-    /// by this insert are recorded into `lcs` and will be dropped when `end_request` is
-    /// eventually called.
-    ///
-    /// Prefer [`insert`](Self::insert) for the common case where you do not need to
-    /// manage the lifecycle state manually.
-    pub fn insert_with_state(&self, key: Key, value: Val, lcs: &mut L::RequestState) {
-        let (shard, hash) = self.shard_for(&key).unwrap();
-        let result = shard
-            .write()
-            .insert(lcs, hash, key, value, InsertStrategy::Insert);
-        // result cannot err with the Insert strategy
-        debug_assert!(result.is_ok());
-    }
-
     /// Attempts to insert an item in the cache with key `key` without blocking.
     /// Returns `Ok(lcs)` with the lifecycle request state if the item was inserted,
     /// or `Err((key, value))` if the shard lock could not be acquired without blocking.
