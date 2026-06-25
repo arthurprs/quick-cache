@@ -59,7 +59,6 @@ pub struct Cache<
     hash_builder: B,
     shards: Box<[RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>]>,
     shards_mask: u64,
-    lifecycle: L,
 }
 
 impl<Key: Eq + Hash, Val: Clone> Cache<Key, Val> {
@@ -170,7 +169,6 @@ impl<
             shards: shards.into_boxed_slice(),
             hash_builder,
             shards_mask: num_shards - 1,
-            lifecycle,
         }
     }
 
@@ -407,28 +405,32 @@ impl<
     ///
     /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
     pub fn replace(&self, key: Key, value: Val, soft: bool) -> Result<(), (Key, Val)> {
-        let lcs = self.replace_with_lifecycle(key, value, soft)?;
-        self.lifecycle.end_request(lcs);
-        Ok(())
+        let mut lcs = Default::default();
+        self.replace_with_lifecycle(key, value, soft, &mut lcs)
     }
 
-    /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists.
+    /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists,
+    /// recording any evicted items into the given lifecycle request state.
     /// If `soft` is set, the replace operation won't affect the "hotness" of the entry,
     /// even if the value is replaced.
     ///
     /// Returns `Ok` if the entry was admitted and `Err(_)` if it wasn't.
+    ///
+    /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
+    /// The same `&mut lcs` can be threaded through multiple operations to batch the
+    /// eviction work. Evicted items are released when `lcs` is dropped.
     pub fn replace_with_lifecycle(
         &self,
         key: Key,
         value: Val,
         soft: bool,
-    ) -> Result<L::RequestState, (Key, Val)> {
-        let mut lcs = self.lifecycle.begin_request();
+        lcs: &mut L::RequestState,
+    ) -> Result<(), (Key, Val)> {
         let (shard, hash) = self.shard_for(&key).unwrap();
         shard
             .write()
-            .insert(&mut lcs, hash, key, value, InsertStrategy::Replace { soft })?;
-        Ok(lcs)
+            .insert(lcs, hash, key, value, InsertStrategy::Replace { soft })?;
+        Ok(())
     }
 
     /// Retains only the items specified by the predicate.
@@ -445,8 +447,8 @@ impl<
 
     /// Inserts an item in the cache with key `key`.
     pub fn insert(&self, key: Key, value: Val) {
-        let lcs = self.insert_with_lifecycle(key, value);
-        self.lifecycle.end_request(lcs);
+        let mut lcs = Default::default();
+        self.insert_with_lifecycle(key, value, &mut lcs);
     }
 
     /// Attempts to insert an item in the cache with key `key` without blocking.
@@ -454,44 +456,48 @@ impl<
     /// could not be acquired without blocking. Lock contention is the only failure
     /// mode: the inputs are returned so the caller can retry or discard them.
     pub fn try_insert(&self, key: Key, value: Val) -> Result<(), (Key, Val)> {
-        let lcs = self.try_insert_with_lifecycle(key, value)?;
-        self.lifecycle.end_request(lcs);
-        Ok(())
+        let mut lcs = Default::default();
+        self.try_insert_with_lifecycle(key, value, &mut lcs)
     }
 
-    /// Inserts an item in the cache with key `key`.
-    pub fn insert_with_lifecycle(&self, key: Key, value: Val) -> L::RequestState {
-        let mut lcs = self.lifecycle.begin_request();
+    /// Inserts an item in the cache with key `key`, recording any evicted items into the
+    /// given lifecycle request state.
+    ///
+    /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
+    /// The same `&mut lcs` can be threaded through multiple operations to batch the
+    /// eviction work. Evicted items are released when `lcs` is dropped.
+    pub fn insert_with_lifecycle(&self, key: Key, value: Val, lcs: &mut L::RequestState) {
         let (shard, hash) = self.shard_for(&key).unwrap();
         let result = shard
             .write()
-            .insert(&mut lcs, hash, key, value, InsertStrategy::Insert);
+            .insert(lcs, hash, key, value, InsertStrategy::Insert);
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
-        lcs
     }
 
-    /// Attempts to insert an item in the cache with key `key` without blocking.
-    /// Returns `Ok(lcs)` with the lifecycle request state if the item was inserted,
-    /// or `Err((key, value))` if the shard lock could not be acquired without blocking.
-    /// Lock contention is the only failure mode: the inputs are returned so the
-    /// caller can retry or discard them.
+    /// Attempts to insert an item in the cache with key `key` without blocking, recording
+    /// any evicted items into the given lifecycle request state.
+    /// Returns `Ok(())` if the item was inserted, or `Err((key, value))` if the shard lock
+    /// could not be acquired without blocking. Lock contention is the only failure mode:
+    /// the inputs are returned so the caller can retry or discard them.
+    ///
+    /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
+    /// The same `&mut lcs` can be threaded through multiple operations to batch the
+    /// eviction work. Evicted items are released when `lcs` is dropped.
     pub fn try_insert_with_lifecycle(
         &self,
         key: Key,
         value: Val,
-    ) -> Result<L::RequestState, (Key, Val)> {
-        // Tradeoff: begin_request is called before acquiring the shard lock to avoid holding
-        // the lock during potentially expensive lifecycle initialization.
-        let mut lcs = self.lifecycle.begin_request();
+        lcs: &mut L::RequestState,
+    ) -> Result<(), (Key, Val)> {
         let (shard, hash) = self.shard_for(&key).unwrap();
 
         match shard.try_write() {
             Some(mut shard) => {
-                let result = shard.insert(&mut lcs, hash, key, value, InsertStrategy::Insert);
+                let result = shard.insert(lcs, hash, key, value, InsertStrategy::Insert);
                 // result cannot err with the Insert strategy
                 debug_assert!(result.is_ok());
-                Ok(lcs)
+                Ok(())
             }
             _ => Err((key, value)),
         }
@@ -547,7 +553,9 @@ impl<
         let shard_weight_cap = new_weight_capacity.saturating_add(self.shards.len() as u64 - 1)
             / self.shards.len() as u64;
         for shard in &*self.shards {
-            shard.write().set_capacity(shard_weight_cap);
+            let mut lcs = Default::default();
+            // `lcs` drops after this statement's lock guard, releasing evicted items outside the lock.
+            shard.write().set_capacity(shard_weight_cap, &mut lcs);
         }
     }
 
@@ -574,7 +582,7 @@ impl<
         if let Some(v) = shard.read().get(hash, key) {
             return GuardResult::Value(v.clone());
         }
-        PlaceholderGuard::join(&self.lifecycle, shard, hash, key, timeout)
+        PlaceholderGuard::join(shard, hash, key, timeout)
     }
 
     /// Gets or inserts an item in the cache with key `key`.
@@ -618,7 +626,7 @@ impl<
             if let Some(v) = shard.read().get(hash, key) {
                 return Ok(v.clone());
             }
-            match JoinFuture::new(&self.lifecycle, shard, hash, key).await {
+            match JoinFuture::new(shard, hash, key).await {
                 JoinResult::Filled(Some(shared)) => {
                     // SAFETY: Filled means the value was set by the loader.
                     return Ok(unsafe { shared.value().unwrap_unchecked().clone() });
@@ -724,21 +732,16 @@ impl<
                 EntryOrPlaceholder::Replaced(shared, old_val) => {
                     drop(shard_guard);
                     return EntryResult::Replaced(
-                        PlaceholderGuard::start_loading(&self.lifecycle, shard, shared),
+                        PlaceholderGuard::start_loading(shard, shared),
                         old_val,
                     );
                 }
                 EntryOrPlaceholder::NewPlaceholder(shared) => {
                     drop(shard_guard);
-                    return EntryResult::Vacant(PlaceholderGuard::start_loading(
-                        &self.lifecycle,
-                        shard,
-                        shared,
-                    ));
+                    return EntryResult::Vacant(PlaceholderGuard::start_loading(shard, shared));
                 }
                 EntryOrPlaceholder::ExistingPlaceholder(shared) => {
                     match PlaceholderGuard::wait_for_placeholder(
-                        &self.lifecycle,
                         shard,
                         shard_guard,
                         shared,
@@ -783,16 +786,14 @@ impl<
                     EntryOrPlaceholder::Replaced(shared, old_val) => {
                         drop(shard_guard);
                         Ok(EntryResult::Replaced(
-                            PlaceholderGuard::start_loading(&self.lifecycle, shard, shared),
+                            PlaceholderGuard::start_loading(shard, shared),
                             old_val,
                         ))
                     }
                     EntryOrPlaceholder::NewPlaceholder(shared) => {
                         drop(shard_guard);
                         Ok(EntryResult::Vacant(PlaceholderGuard::start_loading(
-                            &self.lifecycle,
-                            shard,
-                            shared,
+                            shard, shared,
                         )))
                     }
                     EntryOrPlaceholder::ExistingPlaceholder(_) => Err(()),
@@ -800,7 +801,7 @@ impl<
             };
             match result {
                 Ok(entry_result) => return entry_result,
-                Err(()) => match JoinFuture::new(&self.lifecycle, shard, hash, key).await {
+                Err(()) => match JoinFuture::new(shard, hash, key).await {
                     JoinResult::Filled(_) => continue,
                     JoinResult::Guard(g) => return EntryResult::Vacant(g),
                     JoinResult::Timeout => unsafe { unreachable_unchecked() },
@@ -937,11 +938,6 @@ impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
     // in most cases. And we want to avoid introducing any extra
     // overhead (e.g. a vector) for this default lifecycle.
     type RequestState = [Option<(Key, Val)>; 2];
-
-    #[inline]
-    fn begin_request(&self) -> Self::RequestState {
-        [None, None]
-    }
 
     #[inline]
     fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val) {
@@ -1750,19 +1746,24 @@ mod tests {
     #[test]
     fn test_try_insert_with_lifecycle() {
         let cache = Cache::new(100);
+        let mut lcs = Default::default();
 
-        // Successful insert returns the lifecycle request state.
-        let result = cache.try_insert_with_lifecycle(1, 10);
-        assert!(result.is_ok());
-        let lcs = result.ok().unwrap();
-        cache.lifecycle.end_request(lcs);
+        // Successful insert records evictions into the provided request state.
+        assert_eq!(cache.try_insert_with_lifecycle(1, 10, &mut lcs), Ok(()));
         assert_eq!(cache.get(&1), Some(10));
+
+        // The same request state can be threaded through several operations.
+        assert_eq!(cache.try_insert_with_lifecycle(2, 20, &mut lcs), Ok(()));
+        assert_eq!(cache.get(&2), Some(20));
 
         // Contended when a read lock is held.
         let guards: Vec<_> = cache.shards.iter().map(|s| s.read()).collect();
-        assert_eq!(cache.try_insert_with_lifecycle(2, 20), Err((2, 20)));
+        assert_eq!(
+            cache.try_insert_with_lifecycle(3, 30, &mut lcs),
+            Err((3, 30))
+        );
         drop(guards);
-        assert_eq!(cache.get(&2), None);
+        assert_eq!(cache.get(&3), None);
     }
 
     #[test]
