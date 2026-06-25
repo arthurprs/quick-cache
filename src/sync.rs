@@ -554,6 +554,7 @@ impl<
             / self.shards.len() as u64;
         for shard in &*self.shards {
             let mut lcs = Default::default();
+            // `lcs` drops after this statement's lock guard, releasing evicted items outside the lock.
             shard.write().set_capacity(shard_weight_cap, &mut lcs);
         }
     }
