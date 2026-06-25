@@ -196,7 +196,43 @@ pub trait Lifecycle<Key, Val> {
     fn before_evict(&self, state: &mut Self::RequestState, key: &Key, val: &mut Val) {}
 
     /// Called when an item is evicted.
-    fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val);
+    ///
+    /// To distinguish evictions from the hot vs cold queues, override
+    /// [`Lifecycle::on_evict_hot`] and/or [`Lifecycle::on_evict_cold`] instead;
+    /// they default to delegating here.
+    ///
+    /// If none of `on_evict`, `on_evict_hot`, or `on_evict_cold` is overridden,
+    /// eviction notifications are silently dropped.
+    ///
+    /// Note: items that are rejected without ever being admitted to the cache
+    /// (oversized inserts and oversized placeholder values) are routed through
+    /// [`Lifecycle::on_evict_cold`], which by default reaches this method.
+    #[allow(unused_variables)]
+    #[inline]
+    fn on_evict(&self, state: &mut Self::RequestState, key: Key, val: Val) {}
+
+    /// Called when an item is evicted from the cold queue.
+    ///
+    /// By default delegates to [`Lifecycle::on_evict`].
+    ///
+    /// Note: items that are rejected without ever being admitted to the cache
+    /// (oversized inserts and oversized placeholder values) are also reported
+    /// via this method.
+    #[inline]
+    fn on_evict_cold(&self, state: &mut Self::RequestState, key: Key, val: Val) {
+        self.on_evict(state, key, val)
+    }
+
+    /// Called when an item is evicted from the hot queue.
+    ///
+    /// By default delegates to [`Lifecycle::on_evict`].
+    ///
+    /// Note: rejected (never-admitted) items are reported via
+    /// [`Lifecycle::on_evict_cold`], not this method.
+    #[inline]
+    fn on_evict_hot(&self, state: &mut Self::RequestState, key: Key, val: Val) {
+        self.on_evict(state, key, val)
+    }
 
     /// Called after a request finishes, e.g.: insert, replace.
     ///

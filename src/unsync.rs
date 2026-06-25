@@ -453,9 +453,6 @@ impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
 
     #[inline]
     fn begin_request(&self) -> Self::RequestState {}
-
-    #[inline]
-    fn on_evict(&self, _state: &mut Self::RequestState, _key: Key, _val: Val) {}
 }
 
 #[derive(Debug, Clone)]
