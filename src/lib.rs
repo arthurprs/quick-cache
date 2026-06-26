@@ -79,7 +79,7 @@
 //! | `parking_lot` | ✓ | Use [parking_lot](https://crates.io/crates/parking_lot) for synchronization primitives. Mutually exclusive with `sharded-lock`. |
 //! | `sharded-lock` | | Use [`crossbeam_utils::sync::ShardedLock`](https://docs.rs/crossbeam-utils/latest/crossbeam_utils/sync/struct.ShardedLock.html) for synchronization primitives. Mutually exclusive with `parking_lot`. |
 //! | `shuttle` | | Enable [shuttle](https://crates.io/crates/shuttle) testing support for concurrency testing. |
-//! | `stats` | | Enable cache statistics tracking via the `hits()` and `misses()` methods. |
+//! | `stats` | | Enable cache statistics tracking via the `hits()`, `misses()`, and per-item `item_stats()` methods. Overhead: adds an 8-byte per-item access counter (`AtomicU64`) to each resident item — raising per-entry memory by up to 8 bytes, depending on layout — and performs two atomic increments per cache hit and one per miss. |
 #![allow(clippy::type_complexity)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -273,7 +273,10 @@ impl MemoryUsed {
 
 /// Per-item statistics returned by `item_stats`.
 ///
-/// Only available with the `stats` feature enabled.
+/// Only available with the `stats` feature enabled. Enabling that feature adds an
+/// 8-byte per-item access counter to each resident item (raising per-entry memory
+/// by up to 8 bytes, depending on layout) and performs two atomic increments per
+/// cache hit and one per miss.
 #[cfg(feature = "stats")]
 #[non_exhaustive]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
