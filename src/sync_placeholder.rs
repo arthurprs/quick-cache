@@ -87,7 +87,6 @@ enum LoadingState {
 }
 
 pub struct PlaceholderGuard<'a, Key, Val, We, B, L> {
-    lifecycle: &'a L,
     shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
     shared: SharedPlaceholder<Val>,
     inserted: bool,
@@ -196,7 +195,6 @@ pub enum EntryResult<'a, Key, Val, We, B, L, T> {
 impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
     #[inline]
     pub fn start_loading(
-        lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         shared: SharedPlaceholder<Val>,
     ) -> Self {
@@ -205,7 +203,6 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
             LoadingState::Loading
         ));
         PlaceholderGuard {
-            lifecycle,
             shard,
             shared,
             inserted: false,
@@ -216,7 +213,6 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
     // or a guard if the caller got the guard.
     #[inline]
     fn handle_notification(
-        lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         shared: SharedPlaceholder<Val>,
     ) -> Result<SharedPlaceholder<Val>, PlaceholderGuard<'a, Key, Val, We, B, L>> {
@@ -225,7 +221,7 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
         if shared.value().is_some() {
             Ok(shared)
         } else {
-            Err(PlaceholderGuard::start_loading(lifecycle, shard, shared))
+            Err(PlaceholderGuard::start_loading(shard, shared))
         }
     }
 
@@ -265,7 +261,6 @@ impl<
     > PlaceholderGuard<'a, Key, Val, We, B, L>
 {
     pub fn join<Q>(
-        lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         hash: u64,
         key: &Q,
@@ -278,12 +273,12 @@ impl<
         let shared = match shard_guard.get_or_placeholder(hash, key) {
             Ok((_, v)) => return GuardResult::Value(v.clone()),
             Err((shared, true)) => {
-                return GuardResult::Guard(Self::start_loading(lifecycle, shard, shared));
+                return GuardResult::Guard(Self::start_loading(shard, shared));
             }
             Err((shared, false)) => shared,
         };
         let mut deadline = timeout.map(Ok);
-        match Self::wait_for_placeholder(lifecycle, shard, shard_guard, shared, deadline.as_mut()) {
+        match Self::wait_for_placeholder(shard, shard_guard, shared, deadline.as_mut()) {
             JoinResult::Filled(shared) => unsafe {
                 // SAFETY: Filled means the value was set by the loader.
                 GuardResult::Value(shared.unwrap_unchecked().value().unwrap_unchecked().clone())
@@ -302,7 +297,6 @@ impl<
     /// call. On first use the duration is converted in-place to `Err(instant)` so that
     /// callers that retry (e.g. `entry`) preserve the original deadline across calls.
     pub(crate) fn wait_for_placeholder(
-        lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         shard_guard: RwLockWriteGuard<'a, CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         shared: SharedPlaceholder<Val>,
@@ -345,7 +339,7 @@ impl<
             if let Some(instant) = deadline {
                 let remaining = instant.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Self::join_timeout(lifecycle, shard, shared, parked_thread, &notified);
+                    return Self::join_timeout(shard, shared, parked_thread, &notified);
                 }
                 #[cfg(not(fuzzing))]
                 thread::park_timeout(remaining);
@@ -354,7 +348,7 @@ impl<
                 thread::park();
             }
             if notified.load(Ordering::Acquire) {
-                return match Self::handle_notification(lifecycle, shard, shared) {
+                return match Self::handle_notification(shard, shared) {
                     Ok(shared) => JoinResult::Filled(Some(shared)),
                     Err(g) => JoinResult::Guard(g),
                 };
@@ -364,7 +358,6 @@ impl<
 
     #[cold]
     fn join_timeout(
-        lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, Arc<Placeholder<Val>>>>,
         shared: Arc<Placeholder<Val>>,
         // when timeout is zero, the thread may have not been added to the waiters list
@@ -375,7 +368,7 @@ impl<
         match state.loading {
             LoadingState::Loading if notified.load(Ordering::Acquire) => {
                 drop(state); // Drop state guard to avoid a deadlock with start_loading
-                JoinResult::Guard(PlaceholderGuard::start_loading(lifecycle, shard, shared))
+                JoinResult::Guard(PlaceholderGuard::start_loading(shard, shared))
             }
             LoadingState::Loading => {
                 if parked_thread.is_some() {
@@ -414,18 +407,24 @@ impl<
     /// A placeholder can be removed as a result of a `remove` call
     /// or a non-placeholder `insert` with the same key.
     pub fn insert(self, value: Val) -> Result<(), Val> {
-        let lifecycle = self.lifecycle;
-        let lcs = self.insert_with_lifecycle(value)?;
-        lifecycle.end_request(lcs);
-        Ok(())
+        let mut lcs = Default::default();
+        self.insert_with_lifecycle(value, &mut lcs)
     }
 
-    /// Inserts the value into the placeholder
+    /// Inserts the value into the placeholder, recording any evicted items into the given
+    /// lifecycle request state.
     ///
     /// Returns Err if the placeholder isn't in the cache anymore.
     /// A placeholder can be removed as a result of a `remove` call
     /// or a non-placeholder `insert` with the same key.
-    pub fn insert_with_lifecycle(mut self, value: Val) -> Result<L::RequestState, Val> {
+    ///
+    /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
+    /// Evicted items are released when `lcs` is dropped.
+    pub fn insert_with_lifecycle(
+        mut self,
+        value: Val,
+        lcs: &mut L::RequestState,
+    ) -> Result<(), Val> {
         unsafe { self.shared.value.set(value.clone()).unwrap_unchecked() };
         let referenced;
         {
@@ -446,11 +445,10 @@ impl<
         //   - the placeholder will be removed here, if it still exists
         self.inserted = true;
 
-        let mut lcs = self.lifecycle.begin_request();
         self.shard
             .write()
-            .replace_placeholder(&mut lcs, &self.shared, referenced, value)?;
-        Ok(lcs)
+            .replace_placeholder(lcs, &self.shared, referenced, value)?;
+        Ok(())
     }
 }
 
@@ -510,7 +508,6 @@ impl<Key, Val, We, B, L> std::fmt::Debug for PlaceholderGuard<'_, Key, Val, We, 
 /// be moved after the first poll, keeping that pointer valid. The pointer is
 /// cleaned up in `drop_pending_waiter` before the struct is destroyed.
 pub(crate) struct JoinFuture<'a, 'b, Q: ?Sized, Key, Val, We, B, L> {
-    lifecycle: &'a L,
     shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
     hash: u64,
     key: &'b Q,
@@ -530,13 +527,11 @@ enum JoinFutureState<Val> {
 
 impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
     pub(crate) fn new(
-        lifecycle: &'a L,
         shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
         hash: u64,
         key: &'b Q,
     ) -> Self {
         Self {
-            lifecycle,
             shard,
             hash,
             key,
@@ -561,7 +556,7 @@ impl<Q: ?Sized, Key, Val, We, B, L> JoinFuture<'_, '_, Q, Key, Val, We, B, L> {
                 // The write guard was abandoned elsewhere, this future was notified but didn't get polled.
                 // So we get and drop the guard here to handle the side effects.
                 drop(state); // Drop state guard to avoid a deadlock with start_loading
-                let _ = PlaceholderGuard::start_loading(self.lifecycle, self.shard, shared);
+                let _ = PlaceholderGuard::start_loading(self.shard, shared);
             }
             LoadingState::Loading => {
                 // Remove ourselves from the waiters list
@@ -607,7 +602,6 @@ impl<
         // fields. The `notified` field's address (registered in the waiter list) stays
         // stable because Pin guarantees the future won't be moved.
         let this = unsafe { self.get_unchecked_mut() };
-        let lifecycle = this.lifecycle;
         let shard = this.shard;
         match &mut this.state {
             JoinFutureState::Created => {
@@ -621,7 +615,7 @@ impl<
                         this.state = JoinFutureState::Done;
                         drop(shard_guard);
                         Poll::Ready(JoinResult::Guard(PlaceholderGuard::start_loading(
-                            lifecycle, shard, shared,
+                            shard, shared,
                         )))
                     }
                     Err((shared, false)) => {
@@ -680,12 +674,10 @@ impl<
                 else {
                     unsafe { unreachable_unchecked() }
                 };
-                Poll::Ready(
-                    match PlaceholderGuard::handle_notification(lifecycle, shard, shared) {
-                        Ok(shared) => JoinResult::Filled(Some(shared)),
-                        Err(g) => JoinResult::Guard(g),
-                    },
-                )
+                Poll::Ready(match PlaceholderGuard::handle_notification(shard, shared) {
+                    Ok(shared) => JoinResult::Filled(Some(shared)),
+                    Err(g) => JoinResult::Guard(g),
+                })
             }
             JoinFutureState::Done => panic!("Polled after ready"),
         }
