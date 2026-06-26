@@ -229,6 +229,12 @@ impl<
         // shard, rotate the hash by usize::BITS / 2 so we avoid the lower bits and
         // the highest 7 bits that hashbrown uses internally for probing, improving
         // the real entropy available to each hashbrown shard.
+        //
+        // The rotation is deliberately tied to usize::BITS, not u64::BITS: on 32-bit
+        // targets a usize-width hasher (e.g. FxHash) leaves the top 32 hash bits zero
+        // (hashbrown guards against this too; see its h1 / Tag::full), so we keep the
+        // shard window in the low word where the entropy actually lives. Rotating by
+        // u64::BITS / 2 there would send every key to shard 0.
         hash.rotate_right(usize::BITS / 2) & self.shards_mask
     }
 

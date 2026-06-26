@@ -13,15 +13,18 @@ exclude = ["fuzz"]
 rust-version = "1.71"
 
 [features]
-default = ["ahash", "parking_lot"]
+default = ["custom-hasher", "parking_lot"]
+# Use the crate's bundled fast default hasher (currently foldhash) behind the
+# opaque `DefaultHashBuilder`. The concrete hasher is an implementation detail.
+custom-hasher = ["dep:foldhash"]
 sharded-lock = ["dep:crossbeam-utils"]
 shuttle = ["dep:shuttle"]
 stats = []
 
 [dependencies]
-ahash = { optional = true, version = "0.8" }
 crossbeam-utils = { optional = true, version = "0.8" }
 equivalent = "1.0"
+foldhash = { optional = true, version = "0.2" }
 hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
 parking_lot = { optional = true, version = "0.12" }
 shuttle = { version = "0.8", optional = true }
