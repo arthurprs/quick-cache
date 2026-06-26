@@ -79,6 +79,11 @@ pub struct Resident<Key, Val> {
     value: Val,
     state: ResidentState,
     referenced: AtomicU16,
+    /// Number of times this item has been accessed (read) since it became resident.
+    /// Incremented wherever a cache hit is recorded, unlike `referenced` which is
+    /// bounded by the eviction policy. Reset whenever the slot is reused for a new key.
+    #[cfg(feature = "stats")]
+    access_count: AtomicU64,
 }
 
 impl<Key: Clone, Val: Clone> Clone for Resident<Key, Val> {
@@ -89,6 +94,8 @@ impl<Key: Clone, Val: Clone> Clone for Resident<Key, Val> {
             value: self.value.clone(),
             state: self.state,
             referenced: self.referenced.load(atomic::Ordering::Relaxed).into(),
+            #[cfg(feature = "stats")]
+            access_count: self.access_count.load(atomic::Ordering::Relaxed).into(),
         }
     }
 }
@@ -176,11 +183,21 @@ macro_rules! record_hit {
     ($self: expr) => {{
         $self.hits.fetch_add(1, atomic::Ordering::Relaxed);
     }};
+    ($self: expr, $resident: expr) => {{
+        $self.hits.fetch_add(1, atomic::Ordering::Relaxed);
+        $resident
+            .access_count
+            .fetch_add(1, atomic::Ordering::Relaxed);
+    }};
 }
 #[cfg(feature = "stats")]
 macro_rules! record_hit_mut {
     ($self: expr) => {{
         *$self.hits.get_mut() += 1;
+    }};
+    ($self: expr, $resident: expr) => {{
+        *$self.hits.get_mut() += 1;
+        *$resident.access_count.get_mut() += 1;
     }};
 }
 #[cfg(feature = "stats")]
@@ -195,14 +212,15 @@ macro_rules! record_miss_mut {
         *$self.misses.get_mut() += 1;
     }};
 }
-
 #[cfg(not(feature = "stats"))]
 macro_rules! record_hit {
     ($self: expr) => {{}};
+    ($self: expr, $resident: expr) => {{}};
 }
 #[cfg(not(feature = "stats"))]
 macro_rules! record_hit_mut {
     ($self: expr) => {{}};
+    ($self: expr, $resident: expr) => {{}};
 }
 #[cfg(not(feature = "stats"))]
 macro_rules! record_miss {
@@ -567,7 +585,7 @@ impl<
                 // Even if that happens there's no impact correctness wise.
                 resident.referenced.fetch_add(1, atomic::Ordering::Relaxed);
             }
-            record_hit!(self);
+            record_hit!(self, resident);
             Some((&resident.key, &resident.value))
         } else {
             record_miss!(self);
@@ -598,7 +616,7 @@ impl<
         if *resident.referenced.get_mut() < MAX_F {
             *resident.referenced.get_mut() += 1;
         }
-        record_hit_mut!(self);
+        record_hit_mut!(self, resident);
 
         let old_weight = self.weighter.weight(&resident.key, &resident.value);
         Some(RefMut {
@@ -643,6 +661,19 @@ impl<
     {
         let (_, resident) = self.search_resident(hash, key)?;
         Some(&resident.value)
+    }
+
+    /// Returns per-item statistics for a resident key without affecting its hotness
+    /// or access count. Returns `None` if the key is not resident.
+    #[cfg(feature = "stats")]
+    pub fn item_stats<Q>(&self, hash: u64, key: &Q) -> Option<crate::ItemStats>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        let (_, resident) = self.search_resident(hash, key)?;
+        Some(crate::ItemStats {
+            access_count: resident.access_count.load(atomic::Ordering::Relaxed),
+        })
     }
 
     pub fn peek_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>>
@@ -906,6 +937,8 @@ impl<
                 value,
                 state: enter_state,
                 referenced: referenced.into(),
+                #[cfg(feature = "stats")]
+                access_count: Default::default(),
             }),
         );
         match evicted {
@@ -1034,6 +1067,8 @@ impl<
             value,
             state: placeholder_hot,
             referenced: (referenced as u16).into(),
+            #[cfg(feature = "stats")]
+            access_count: Default::default(),
         });
 
         let list_head = if placeholder_hot == ResidentState::Hot {
@@ -1116,6 +1151,8 @@ impl<
             value,
             state,
             referenced: Default::default(),
+            #[cfg(feature = "stats")]
+            access_count: Default::default(),
         }));
         if weight != 0 {
             *list_head = Some(self.entries.link(idx, *list_head));
@@ -1164,7 +1201,7 @@ impl<
                 if *resident.referenced.get_mut() < MAX_F {
                     *resident.referenced.get_mut() += 1;
                 }
-                record_hit_mut!(self);
+                record_hit_mut!(self, resident);
                 unsafe {
                     // Rustc gets insanely confused returning references from mut borrows
                     // Safety: value will have the same lifetime as `resident`
@@ -1215,7 +1252,6 @@ impl<
 
                 return match action {
                     EntryAction::Retain(t) => {
-                        record_hit_mut!(self);
                         let Some((Entry::Resident(resident), _)) = self.entries.get_mut(idx) else {
                             // SAFETY: we had a mut reference to the Resident under `idx` until the previous line
                             unsafe { unreachable_unchecked() };
@@ -1223,6 +1259,7 @@ impl<
                         if *resident.referenced.get_mut() < MAX_F {
                             *resident.referenced.get_mut() += 1;
                         }
+                        record_hit_mut!(self, resident);
                         EntryOrPlaceholder::Kept(t)
                     }
                     EntryAction::Remove => {
@@ -1420,6 +1457,7 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
 mod tests {
     use super::*;
 
+    #[cfg(not(feature = "stats"))]
     #[test]
     fn reserve_caps_ghost_headroom() {
         // A small reserve on a shard with a large estimated capacity (hence a
@@ -1455,14 +1493,24 @@ mod tests {
     #[test]
     fn entry_overhead() {
         use std::mem::size_of;
+        // 8 bytes from the linked slab, 8 bytes from the entry enum.
+        // `stats` adds an 8-byte `access_count` to each `Resident` (24 -> 32 bytes).
+        // Whether the slab entry grows then depends on enum discriminant/niche layout:
+        // the sync entry's discriminant moves into the `Arc` niche, cancelling the
+        // growth (stays 32), while the unsync entry loses its niche and grows by 8.
+        // (Layout-dependent and not guaranteed stable across rustc versions.)
         assert_eq!(
             size_of::<Entry<u64, u64, crate::sync_placeholder::SharedPlaceholder<u64>>>()
                 - size_of::<[u64; 2]>(),
-            16 // 8 bytes from linked slab, 8 bytes from entry
+            16
         );
+        #[cfg(not(feature = "stats"))]
+        let unsync_overhead = 16;
+        #[cfg(feature = "stats")]
+        let unsync_overhead = 24;
         assert_eq!(
             size_of::<Entry<u64, u64, crate::unsync::SharedPlaceholder>>() - size_of::<[u64; 2]>(),
-            16 // 8 bytes from linked slab, 8 bytes from entry
+            unsync_overhead
         );
     }
 }

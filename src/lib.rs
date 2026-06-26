@@ -81,7 +81,7 @@
 //! | `parking_lot` | ✓ | Use [parking_lot](https://crates.io/crates/parking_lot) for synchronization primitives. Mutually exclusive with `sharded-lock`. |
 //! | `sharded-lock` | | Use [`crossbeam_utils::sync::ShardedLock`](https://docs.rs/crossbeam-utils/latest/crossbeam_utils/sync/struct.ShardedLock.html) for synchronization primitives. Mutually exclusive with `parking_lot`. |
 //! | `shuttle` | | Enable [shuttle](https://crates.io/crates/shuttle) testing support for concurrency testing. |
-//! | `stats` | | Enable cache statistics tracking via the `hits()` and `misses()` methods. |
+//! | `stats` | | Enable cache statistics tracking via the `hits()`, `misses()`, and per-item `item_stats()` methods. Overhead: adds an 8-byte per-item access counter (`AtomicU64`) to each resident item — raising per-entry memory by up to 8 bytes, depending on layout — and performs two atomic increments per cache hit and one per miss. |
 #![allow(clippy::type_complexity)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -296,6 +296,25 @@ impl MemoryUsed {
     pub fn total(&self) -> usize {
         self.entries + self.map
     }
+}
+
+/// Per-item statistics returned by `item_stats`.
+///
+/// Only available with the `stats` feature enabled. Enabling that feature adds an
+/// 8-byte per-item access counter to each resident item (raising per-entry memory
+/// by up to 8 bytes, depending on layout) and performs two atomic increments per
+/// cache hit and one per miss.
+#[cfg(feature = "stats")]
+#[non_exhaustive]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ItemStats {
+    /// Number of times the item has been accessed (read) since it became resident.
+    ///
+    /// Incremented on every cache hit (`get`/`get_mut`/`get_value_or_guard`/`entry`).
+    /// Unlike the internal eviction counter, this is monotonic per residency and is
+    /// not bounded by the eviction policy. It resets to zero if the slot is reused for
+    /// a new value (e.g. after eviction and re-insertion).
+    pub access_count: u64,
 }
 
 #[cfg(test)]

@@ -365,6 +365,35 @@ impl<
         }
     }
 
+    /// Returns per-item statistics for `key`, or `None` if the key is not present.
+    /// Like peeks, this does not alter the key "hotness" or its access count.
+    #[cfg(feature = "stats")]
+    pub fn item_stats<Q>(&self, key: &Q) -> Option<crate::ItemStats>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        let (shard, hash) = self.shard_for(key)?;
+        shard.read().item_stats(hash, key)
+    }
+
+    /// Attempts to return per-item statistics for `key`.
+    /// Like peeks, this does not alter the key "hotness" or its access count.
+    /// Returns `Ok(Some(stats))` if the key is present, `Ok(None)` if absent,
+    /// or `Err(LockContention)` if the shard lock could not be acquired without blocking.
+    #[cfg(feature = "stats")]
+    pub fn try_item_stats<Q>(&self, key: &Q) -> Result<Option<crate::ItemStats>, LockContention>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        let Some((shard, hash)) = self.shard_for(key) else {
+            return Ok(None);
+        };
+        match shard.try_read() {
+            Some(guard) => Ok(guard.item_stats(hash, key)),
+            None => Err(LockContention),
+        }
+    }
+
     /// Remove an item from the cache whose key is `key`.
     /// Returns the removed entry, if any.
     pub fn remove<Q>(&self, key: &Q) -> Option<(Key, Val)>
@@ -1702,6 +1731,29 @@ mod tests {
         cache.insert(1, 10);
         let _guards: Vec<_> = cache.shards.iter().map(|s| s.write()).collect();
         assert!(cache.try_peek(&1).is_err());
+    }
+
+    #[cfg(feature = "stats")]
+    #[test]
+    fn test_item_stats() {
+        let cache = Cache::new(100);
+        // Missing key has no stats.
+        assert!(cache.item_stats(&1).is_none());
+
+        cache.insert(1, 10);
+        // Insert alone is not a hit.
+        assert_eq!(cache.item_stats(&1).map(|s| s.access_count), Some(0));
+
+        // Each get increments the per-item access count.
+        cache.get(&1);
+        cache.get(&1);
+        cache.get(&1);
+        assert_eq!(cache.item_stats(&1).map(|s| s.access_count), Some(3));
+
+        // Peeking (including item_stats itself) does not alter the count.
+        cache.peek(&1);
+        let _ = cache.item_stats(&1);
+        assert_eq!(cache.item_stats(&1).map(|s| s.access_count), Some(3));
     }
 
     #[test]
