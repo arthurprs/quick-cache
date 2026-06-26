@@ -1474,6 +1474,8 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
 
 #[cfg(test)]
 mod tests {
+    use crate::shard::Entry;
+
     #[cfg(not(feature = "stats"))]
     use super::*;
 

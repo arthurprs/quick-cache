@@ -363,7 +363,6 @@ impl<
 
     /// Returns per-item statistics for `key`, or `None` if the key is not present.
     /// Like peeks, this does not alter the key "hotness" or its access count.
-    /// Only available when the `stats` feature is enabled.
     #[cfg(feature = "stats")]
     pub fn item_stats<Q>(&self, key: &Q) -> Option<crate::ItemStats>
     where
@@ -371,6 +370,24 @@ impl<
     {
         let (shard, hash) = self.shard_for(key)?;
         shard.read().item_stats(hash, key)
+    }
+
+    /// Attempts to return per-item statistics for `key`.
+    /// Like peeks, this does not alter the key "hotness" or its access count.
+    /// Returns `Ok(Some(stats))` if the key is present, `Ok(None)` if absent,
+    /// or `Err(LockContention)` if the shard lock could not be acquired without blocking.
+    #[cfg(feature = "stats")]
+    pub fn try_item_stats<Q>(&self, key: &Q) -> Result<Option<crate::ItemStats>, LockContention>
+    where
+        Q: Hash + Equivalent<Key> + ?Sized,
+    {
+        let Some((shard, hash)) = self.shard_for(key) else {
+            return Ok(None);
+        };
+        match shard.try_read() {
+            Some(guard) => Ok(guard.item_stats(hash, key)),
+            None => Err(LockContention),
+        }
     }
 
     /// Remove an item from the cache whose key is `key`.
