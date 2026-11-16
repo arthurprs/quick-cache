@@ -278,11 +278,14 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         let idx = match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((idx, _)) => idx,
             Err((plh, _)) => {
-                let v = with()?;
-                let mut lcs = Default::default();
-                let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
-                debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
-                plh.idx
+                let idx = plh.idx;
+                let guard = Guard {
+                    cache: self,
+                    placeholder: plh,
+                    inserted: false,
+                };
+                guard.insert(with()?);
+                idx
             }
         };
         Ok(self.shard.peek_token(idx))
@@ -303,11 +306,14 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         let idx = match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((idx, _)) => idx,
             Err((plh, _)) => {
-                let v = with()?;
-                let mut lcs = Default::default();
-                let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
-                debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
-                plh.idx
+                let idx = plh.idx;
+                let guard = Guard {
+                    cache: self,
+                    placeholder: plh,
+                    inserted: false,
+                };
+                guard.insert(with()?);
+                idx
             }
         };
         Ok(self.shard.peek_token_mut(idx).map(RefMut))
