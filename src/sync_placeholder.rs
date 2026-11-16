@@ -425,6 +425,16 @@ impl<
         value: Val,
         lcs: &mut L::RequestState,
     ) -> Result<(), Val> {
+        // Extra references suggest waiters; the locked check decides whether publication is needed.
+        if Arc::strong_count(&self.shared) <= 2 {
+            let mut shard = self.shard.write();
+            let state = self.shared.state.write();
+            if state.waiters.is_empty() {
+                self.inserted = true;
+                drop(state);
+                return shard.replace_placeholder(lcs, &self.shared, false, value);
+            }
+        }
         unsafe { self.shared.value.set(value.clone()).unwrap_unchecked() };
         let referenced;
         {
