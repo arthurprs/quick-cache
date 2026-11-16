@@ -66,6 +66,9 @@ jobs:
       - run: cargo test
       - run: cargo test --no-default-features
       - run: cargo test --no-default-features --features sharded-lock
+      - run: cargo test --features stats
+      - run: cargo test --no-default-features --features stats
+      - run: cargo test --no-default-features --features sharded-lock,stats
       # no run because of shuttle feature and non-shuttle tests
       - run: cargo test --features shuttle --no-run
 
