@@ -21,6 +21,7 @@ fn step(seed: &mut u64) -> u64 {
 }
 #[test]
 fn mixed_sync_async_cancellation_and_replacement() {
+    let iterations = if cfg!(miri) { 64 } else { 1000 };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -33,7 +34,7 @@ fn mixed_sync_async_cancellation_and_replacement() {
             let cache = cache.clone();
             threads.push(std::thread::spawn(move || {
                 let mut seed = 0x6105 + worker;
-                for _ in 0..1000 {
+                for _ in 0..iterations {
                     let key = step(&mut seed)%8;
                     match step(&mut seed)%5 {
                         0 => cache.insert(key,key),
@@ -69,7 +70,7 @@ fn mixed_sync_async_cancellation_and_replacement() {
                 let mut seed = 0x9205 + worker;
                 let w1=Waker::from(Arc::new(Noop));
                 let w2=Waker::from(Arc::new(Noop));
-                for _ in 0..1000 {
+                for _ in 0..iterations {
                     let key=step(&mut seed)%8;
                     if step(&mut seed)%3==0 {
                         let mut future=Box::pin(cache.get_value_or_guard_async(&key));
