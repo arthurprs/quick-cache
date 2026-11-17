@@ -389,14 +389,12 @@ impl<
         lcs: &mut L::RequestState,
     ) -> Result<(), Val> {
         let location = self.location.unwrap();
-        let shared = {
-            let mut shard = self.shard.write();
-            let Some(shared) = shard.shared_placeholder(&location).cloned() else {
-                self.location = None;
-                return shard.replace_placeholder(lcs, &location, false, value);
-            };
-            shared
+        let mut shard = self.shard.write();
+        let Some(shared) = shard.shared_placeholder(&location).cloned() else {
+            self.location = None;
+            return shard.replace_placeholder(lcs, &location, false, value);
         };
+        // The shard lock serializes cloning and publication with invalidation.
         let shared_value = value.clone();
         let waiters = {
             let mut waiters = shared.waiters.write();
@@ -410,10 +408,8 @@ impl<
             waiters.iter().for_each(Waiter::mark_notified);
             mem::take(&mut *waiters)
         };
-        let result =
-            self.shard
-                .write()
-                .replace_placeholder(lcs, &location, !waiters.is_empty(), value);
+        let result = shard.replace_placeholder(lcs, &location, !waiters.is_empty(), value);
+        drop(shard);
         for waiter in waiters {
             waiter.wake.wake();
         }
@@ -630,7 +626,7 @@ mod lazy_tests {
         collections::hash_map::DefaultHasher,
         hash::BuildHasherDefault,
         panic::{catch_unwind, AssertUnwindSafe},
-        sync::{atomic::AtomicUsize, Barrier},
+        sync::atomic::AtomicUsize,
         task::{Context, Wake, Waker},
     };
 
@@ -701,49 +697,61 @@ mod lazy_tests {
     }
 
     #[derive(Debug)]
-    struct BlockingClone {
-        entered: Arc<Barrier>,
-        resume: Arc<Barrier>,
+    struct PublicationProbe {
+        shard: std::sync::Weak<TestShard<PublicationProbe>>,
+        clones: Arc<AtomicUsize>,
+        wakes: Arc<AtomicUsize>,
     }
-    impl Clone for BlockingClone {
+    impl Clone for PublicationProbe {
         fn clone(&self) -> Self {
-            self.entered.wait();
-            self.resume.wait();
+            let shard = self.shard.upgrade().unwrap();
+            assert!(
+                shard.try_write().is_none(),
+                "publication clone must serialize with invalidation"
+            );
+            self.clones.fetch_add(1, Ordering::SeqCst);
             Self {
-                entered: self.entered.clone(),
-                resume: self.resume.clone(),
+                shard: self.shard.clone(),
+                clones: self.clones.clone(),
+                wakes: self.wakes.clone(),
             }
         }
     }
-
+    impl Wake for PublicationProbe {
+        fn wake(self: Arc<Self>) {
+            let shard = self.shard.upgrade().unwrap();
+            assert!(
+                shard.try_write().is_some(),
+                "publication wake holds the shard lock"
+            );
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
     #[test]
-    fn invalidation_during_clone_rejects_old_publication() {
-        let shard = shard::<BlockingClone>();
+    fn publication_serializes_clone_then_wakes_after_unlock() {
+        let shard = Arc::new(shard::<PublicationProbe>());
+        let clones = Arc::new(AtomicUsize::new(0));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let probe = || PublicationProbe {
+            shard: Arc::downgrade(&shard),
+            clones: clones.clone(),
+            wakes: wakes.clone(),
+        };
         let GuardResult::Guard(owner) = PlaceholderGuard::join(&shard, hash(0), &0, None) else {
             panic!()
         };
-        let waker = Waker::from(Arc::new(Noop));
+        let waker = Waker::from(Arc::new(probe()));
         let mut cx = Context::from_waker(&waker);
         let mut waiter = pin::pin!(JoinFuture::new(&shard, hash(0), &0));
         assert!(waiter.as_mut().poll(&mut cx).is_pending());
-        let entered = Arc::new(Barrier::new(2));
-        let resume = Arc::new(Barrier::new(2));
-        let value = BlockingClone {
-            entered: entered.clone(),
-            resume: resume.clone(),
-        };
-        std::thread::scope(|scope| {
-            let publication = scope.spawn(move || owner.insert(value));
-            entered.wait();
-            clear(&shard);
-            assert!(matches!(
-                waiter.as_mut().poll(&mut cx),
-                Poll::Ready(JoinResult::Filled(None))
-            ));
-            resume.wait();
-            assert!(publication.join().unwrap().is_err());
-        });
-        assert!(shard.read().peek(hash(0), &0).is_none());
+        owner.insert(probe()).unwrap();
+        assert_eq!(clones.load(Ordering::SeqCst), 1);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        clear(&shard);
+        assert!(matches!(
+            waiter.as_mut().poll(&mut cx),
+            Poll::Ready(JoinResult::Filled(Some(_)))
+        ));
     }
 
     struct CheckWake {
