@@ -1,7 +1,6 @@
 use crate::{
-    linked_slab::Token,
     options::*,
-    shard::{self, CacheShard, InsertStrategy},
+    shard::{self, CacheShard, InsertStrategy, PlaceholderLocation},
     DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
@@ -15,7 +14,7 @@ pub struct Cache<
     B = DefaultHashBuilder,
     L = DefaultLifecycle<Key, Val>,
 > {
-    shard: CacheShard<Key, Val, We, B, L, SharedPlaceholder>,
+    shard: CacheShard<Key, Val, We, B, L, ()>,
 }
 
 impl<Key: Eq + Hash, Val> Cache<Key, Val> {
@@ -201,7 +200,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        self.shard.remove(self.shard.hash(key), key)
+        self.shard.remove(self.shard.hash(key), key, &mut |_| {})
     }
 
     /// Remove an item from the cache whose key is `key` if `f(&value)` returns `true` for that entry.
@@ -249,6 +248,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             key,
             value,
             InsertStrategy::Replace { soft },
+            &mut |_| {},
         )?;
         Ok(())
     }
@@ -330,8 +330,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             },
             Err((placeholder, _)) => Err(Guard {
                 cache: self,
-                placeholder,
-                inserted: false,
+                placeholder: Some(placeholder),
             }),
         }
     }
@@ -353,8 +352,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             Ok((idx, _)) => Ok(self.shard.peek_token_mut(idx).map(RefMut)),
             Err((placeholder, _)) => Err(Guard {
                 cache: self,
-                placeholder,
-                inserted: false,
+                placeholder: Some(placeholder),
             }),
         }
     }
@@ -378,6 +376,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             key,
             value,
             InsertStrategy::Insert,
+            &mut |_| {},
         );
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
@@ -385,7 +384,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
 
     /// Clear all items from the cache
     pub fn clear(&mut self) {
-        self.shard.clear();
+        self.shard.clear(&mut |_| {});
     }
 
     /// Iterator for the items in the cache
@@ -458,16 +457,9 @@ impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
     type RequestState = ();
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct SharedPlaceholder {
-    hash: u64,
-    idx: Token,
-}
-
 pub struct Guard<'a, Key, Val, We, B, L> {
     cache: &'a mut Cache<Key, Val, We, B, L>,
-    placeholder: SharedPlaceholder,
-    inserted: bool,
+    placeholder: Option<PlaceholderLocation<()>>,
 }
 
 impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<Key, Val>>
@@ -485,12 +477,14 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
     /// Evicted items are released when `lcs` is dropped.
     pub fn insert_with_lifecycle(mut self, value: Val, lcs: &mut L::RequestState) {
-        let replaced = self
-            .cache
-            .shard
-            .replace_placeholder(lcs, &self.placeholder, false, value);
+        let replaced = self.cache.shard.replace_placeholder(
+            lcs,
+            self.placeholder.as_ref().unwrap(),
+            false,
+            value,
+        );
         debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
-        self.inserted = true;
+        self.placeholder = None;
     }
 }
 
@@ -498,17 +492,20 @@ impl<Key, Val, We, B, L> Drop for Guard<'_, Key, Val, We, B, L> {
     #[inline]
     fn drop(&mut self) {
         #[cold]
-        fn drop_slow<Key, Val, We, B, L>(this: &mut Guard<'_, Key, Val, We, B, L>) {
-            this.cache.shard.remove_placeholder(&this.placeholder);
+        fn drop_slow<Key, Val, We, B, L>(
+            this: &mut Guard<'_, Key, Val, We, B, L>,
+            location: PlaceholderLocation<()>,
+        ) {
+            this.cache.shard.remove_placeholder(&location);
         }
-        if !self.inserted {
-            drop_slow(self);
+        if let Some(location) = self.placeholder {
+            drop_slow(self, location);
         }
     }
 }
 
 pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L>(
-    crate::shard::RefMut<'cache, Key, Val, We, B, L, SharedPlaceholder>,
+    crate::shard::RefMut<'cache, Key, Val, We, B, L, ()>,
 );
 
 impl<Key, Val, We: Weighter<Key, Val>, B, L> std::ops::Deref for RefMut<'_, Key, Val, We, B, L> {
@@ -527,26 +524,10 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L> std::ops::DerefMut for RefMut<'_, K
     }
 }
 
-impl shard::SharedPlaceholder for SharedPlaceholder {
-    #[inline]
-    fn new(hash: u64, idx: Token) -> Self {
-        Self { hash, idx }
-    }
-
-    #[inline]
-    fn same_as(&self, _other: &Self) -> bool {
-        true
-    }
-
-    #[inline]
-    fn hash(&self) -> u64 {
-        self.hash
-    }
-
-    #[inline]
-    fn idx(&self) -> Token {
-        self.idx
-    }
+impl<Val> shard::PlaceholderId<Val> for () {
+    type Shared = std::convert::Infallible;
+    type Context = ();
+    fn new(_: &mut ()) {}
 }
 
 #[cfg(test)]

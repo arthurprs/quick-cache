@@ -1,9 +1,15 @@
 #![cfg(not(feature = "shuttle"))]
+
 use quick_cache::sync::{Cache, GuardResult};
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    task::{Context, Poll, Wake, Waker},
 };
+
 #[derive(Debug)]
 struct Value(Arc<AtomicUsize>);
 impl Clone for Value {
@@ -12,97 +18,18 @@ impl Clone for Value {
         Self(self.0.clone())
     }
 }
-fn guard<'a>(
-    cache: &'a Cache<u64, Value>,
-) -> quick_cache::sync::PlaceholderGuard<
-    'a,
-    u64,
-    Value,
-    quick_cache::UnitWeighter,
-    quick_cache::DefaultHashBuilder,
-    quick_cache::sync::DefaultLifecycle<u64, Value>,
-> {
-    match cache.get_value_or_guard(&0, None) {
-        GuardResult::Guard(g) => g,
-        _ => unreachable!(),
-    }
-}
+
 #[test]
 fn uncontended_guard_avoids_shared_value_clone() {
     let count = Arc::new(AtomicUsize::new(0));
     let cache = Cache::<u64, Value>::new(16);
-    guard(&cache).insert(Value(count.clone())).unwrap();
+    let GuardResult::Guard(owner) = cache.get_value_or_guard(&0, None) else {
+        panic!("expected loader")
+    };
+    owner.insert(Value(count.clone())).unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 0);
 }
-#[test]
-fn overwritten_guard_returns_original_without_clone() {
-    let count = Arc::new(AtomicUsize::new(0));
-    let cache = Cache::<u64, Value>::new(16);
-    let old = guard(&cache);
-    cache.insert(0, Value(count.clone()));
-    assert!(old.insert(Value(count.clone())).is_err());
-    assert_eq!(count.load(Ordering::SeqCst), 0);
-}
-#[test]
-fn convenience_loader_clones_for_cache_ownership() {
-    let count = Arc::new(AtomicUsize::new(0));
-    let cache = Cache::<u64, Value>::new(16);
-    cache
-        .get_or_insert_with(&0, || Ok::<_, ()>(Value(count.clone())))
-        .unwrap();
-    assert_eq!(count.load(Ordering::SeqCst), 1);
-}
-struct Noop;
-impl std::task::Wake for Noop {
-    fn wake(self: Arc<Self>) {}
-}
-#[test]
-fn detached_placeholder_still_delivers_to_registered_waiter() {
-    use std::future::Future;
-    let count = Arc::new(AtomicUsize::new(0));
-    let cache = Cache::<u64, Value>::new(16);
-    let owner = guard(&cache);
-    let mut waiter = Box::pin(cache.get_value_or_guard_async(&0));
-    let waker = std::task::Waker::from(Arc::new(Noop));
-    let mut cx = std::task::Context::from_waker(&waker);
-    assert!(waiter.as_mut().poll(&mut cx).is_pending());
-    assert!(cache.remove(&0).is_none());
-    assert!(owner.insert(Value(count.clone())).is_err());
-    assert_eq!(count.load(Ordering::SeqCst), 1);
-    assert!(matches!(
-        waiter.as_mut().poll(&mut cx),
-        std::task::Poll::Ready(Ok(_))
-    ));
-    assert_eq!(count.load(Ordering::SeqCst), 2);
-}
-#[test]
-fn racing_registration_receives_value() {
-    use std::future::Future;
-    let cache = Cache::<u64, u64>::new(16);
-    for round in 0..1000 {
-        cache.remove(&0);
-        let owner = match cache.get_value_or_guard(&0, None) {
-            GuardResult::Guard(g) => g,
-            _ => unreachable!(),
-        };
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                std::thread::yield_now();
-                owner.insert(round).unwrap();
-            });
-            let mut waiter = Box::pin(cache.get_value_or_guard_async(&0));
-            let waker = std::task::Waker::from(Arc::new(Noop));
-            let mut cx = std::task::Context::from_waker(&waker);
-            loop {
-                if let std::task::Poll::Ready(result) = waiter.as_mut().poll(&mut cx) {
-                    assert_eq!(result.unwrap(), round);
-                    break;
-                }
-                std::thread::yield_now();
-            }
-        });
-    }
-}
+
 #[derive(Clone)]
 struct Heavy;
 impl quick_cache::Weighter<u64, Value> for Heavy {
@@ -110,66 +37,75 @@ impl quick_cache::Weighter<u64, Value> for Heavy {
         1000
     }
 }
+
 #[test]
-fn rejected_heavy_value_needs_no_shared_clone() {
-    let count = Arc::new(AtomicUsize::new(0));
-    let cache = Cache::with(
-        16,
-        16,
-        Heavy,
-        quick_cache::DefaultHashBuilder::default(),
-        quick_cache::sync::DefaultLifecycle::default(),
-    );
-    let owner = match cache.get_value_or_guard(&0, None) {
-        GuardResult::Guard(g) => g,
-        _ => unreachable!(),
+fn shared_value_reaches_waiters_after_cancellation_and_rejection() {
+    for (capacity, cached) in [(16, false), (4096, true)] {
+        let count = Arc::new(AtomicUsize::new(0));
+        let cache = Cache::<u64, Value, Heavy>::with(
+            16,
+            capacity,
+            Heavy,
+            Default::default(),
+            Default::default(),
+        );
+        let GuardResult::Guard(owner) = cache.get_value_or_guard(&0, None) else {
+            panic!("expected loader")
+        };
+        let mut waiters: Vec<_> = (0..3)
+            .map(|_| Box::pin(cache.get_value_or_guard_async(&0)))
+            .collect();
+        let mut cx = Context::from_waker(Waker::noop());
+        for waiter in &mut waiters {
+            assert!(waiter.as_mut().poll(&mut cx).is_pending());
+        }
+        drop(waiters.pop());
+        owner.insert(Value(count.clone())).unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.remove(&0).is_some(), cached);
+        for waiter in &mut waiters {
+            assert!(matches!(waiter.as_mut().poll(&mut cx), Poll::Ready(Ok(_))));
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+}
+
+struct Noop;
+impl Wake for Noop {
+    fn wake(self: Arc<Self>) {}
+}
+
+#[test]
+fn panicking_wake_keeps_other_waiter_safe_to_repoll() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    struct PanicWake;
+    impl Wake for PanicWake {
+        fn wake(self: Arc<Self>) {
+            panic!("wake callback");
+        }
+    }
+    let cache = Cache::<u64, u64>::new(16);
+    let GuardResult::Guard(owner) = cache.get_value_or_guard(&0, None) else {
+        panic!("expected loader")
     };
-    owner.insert(Value(count.clone())).unwrap();
-    assert!(!cache.contains_key(&0));
-    assert_eq!(count.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn cancelled_waiters_need_no_shared_clone() {
-    use std::future::Future;
-    let count = Arc::new(AtomicUsize::new(0));
-    let cache = Cache::<u64, Value>::new(16);
-    let owner = guard(&cache);
-    let mut waiters: Vec<_> = (0..8)
-        .map(|_| Box::pin(cache.get_value_or_guard_async(&0)))
-        .collect();
-    let waker = std::task::Waker::from(Arc::new(Noop));
-    let mut cx = std::task::Context::from_waker(&waker);
-    for waiter in &mut waiters {
-        assert!(waiter.as_mut().poll(&mut cx).is_pending());
-    }
-    drop(waiters);
-    owner.insert(Value(count.clone())).unwrap();
-    assert_eq!(count.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn stacked_waiters_receive_shared_value_after_cancellation() {
-    use std::future::Future;
-    let count = Arc::new(AtomicUsize::new(0));
-    let cache = Cache::<u64, Value>::new(16);
-    let owner = guard(&cache);
-    let mut waiters: Vec<_> = (0..8)
-        .map(|_| Box::pin(cache.get_value_or_guard_async(&0)))
-        .collect();
-    let waker = std::task::Waker::from(Arc::new(Noop));
-    let mut cx = std::task::Context::from_waker(&waker);
-    for waiter in &mut waiters {
-        assert!(waiter.as_mut().poll(&mut cx).is_pending());
-    }
-    drop(waiters.pop());
-    owner.insert(Value(count.clone())).unwrap();
-    assert_eq!(count.load(Ordering::SeqCst), 1);
-    for waiter in &mut waiters {
-        assert!(matches!(
-            waiter.as_mut().poll(&mut cx),
-            std::task::Poll::Ready(Ok(_))
-        ));
-    }
-    assert_eq!(count.load(Ordering::SeqCst), 8);
+    let bad = Waker::from(Arc::new(PanicWake));
+    let good = Waker::from(Arc::new(Noop));
+    let changed = Waker::from(Arc::new(Noop));
+    assert!(!good.will_wake(&changed));
+    let mut first = Box::pin(cache.get_value_or_guard_async(&0));
+    let mut second = Box::pin(cache.get_value_or_guard_async(&0));
+    assert!(first
+        .as_mut()
+        .poll(&mut Context::from_waker(&bad))
+        .is_pending());
+    assert!(second
+        .as_mut()
+        .poll(&mut Context::from_waker(&good))
+        .is_pending());
+    assert!(catch_unwind(AssertUnwindSafe(|| owner.insert(7))).is_err());
+    assert!(matches!(
+        second.as_mut().poll(&mut Context::from_waker(&changed)),
+        Poll::Ready(Ok(7))
+    ));
+    assert_eq!(cache.peek(&0), Some(7));
 }

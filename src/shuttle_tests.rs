@@ -22,6 +22,44 @@ fn noop_waker(id: usize) -> std::task::Waker {
 }
 
 #[test]
+fn test_lazy_detached_cancelled_handoff() {
+    shuttle::check_random(
+        || {
+            let cache = crate::sync::Cache::<u64, u64>::new(16);
+            let GuardResult::Guard(old) = cache.get_value_or_guard(&0, None) else {
+                panic!()
+            };
+            let waker = noop_waker(1);
+            let mut cx = std::task::Context::from_waker(&waker);
+            let mut cancelled = Box::pin(cache.get_value_or_guard_async(&0));
+            assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+            cache.clear();
+            let GuardResult::Guard(new) = cache.get_value_or_guard(&0, None) else {
+                panic!()
+            };
+            let mut waiter = std::pin::pin!(cache.get_value_or_guard_async(&0));
+            assert!(waiter.as_mut().poll(&mut cx).is_pending());
+            thread::scope(|scope| {
+                scope.spawn(move || drop(old));
+                drop(cancelled);
+                scope.spawn(move || new.insert(23).unwrap());
+                loop {
+                    match waiter.as_mut().poll(&mut cx) {
+                        Poll::Ready(Ok(value)) => {
+                            assert_eq!(value, 23);
+                            break;
+                        }
+                        Poll::Ready(Err(_)) => panic!("detached owner removed the new load"),
+                        Poll::Pending => thread::yield_now(),
+                    }
+                }
+            });
+        },
+        100,
+    );
+}
+
+#[test]
 fn test_guard_works() {
     let mut config = shuttle::Config::default();
     config.max_steps = shuttle::MaxSteps::None;
