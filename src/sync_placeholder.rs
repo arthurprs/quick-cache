@@ -54,6 +54,9 @@ pub struct WakeBatch(Vec<Waiter>);
 
 impl WakeBatch {
     pub(crate) fn wake(self) {
+        if self.0.is_empty() {
+            return;
+        }
         for waiter in self.0 {
             waiter.wake.wake();
         }
