@@ -13,12 +13,11 @@ use std::{
 use crate::{
     shard::{CacheShard, PlaceholderId, PlaceholderLocation},
     shim::{
-        rw_lock::{RwLock, RwLockWriteGuard},
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
         },
-        thread, Mutex, OnceLock,
+        thread, Mutex, OnceLock, RwLock, RwLockWriteGuard,
     },
     Equivalent, Lifecycle, Weighter,
 };

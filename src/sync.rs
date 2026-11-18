@@ -10,7 +10,7 @@ use crate::{
     linked_slab::Token,
     options::{Options, OptionsBuilder},
     shard::{CacheShard, InsertStrategy},
-    shim::rw_lock::RwLock,
+    shim::RwLock,
     DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
 };
 
