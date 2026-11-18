@@ -18,10 +18,10 @@ use crate::shard::EntryOrPlaceholder;
 pub use crate::sync_placeholder::{EntryAction, EntryResult, GuardResult, PlaceholderGuard};
 use crate::sync_placeholder::{JoinFuture, JoinResult, WakeBatch};
 
-/// Error returned by non-blocking cache operations that do not consume their
+/// Error returned by `try_*` cache operations that do not consume their
 /// inputs when the relevant shard lock could not be acquired immediately.
 ///
-/// This is used by borrowed-key/read-path operations. Non-blocking operations
+/// This is used by borrowed-key/read-path operations. `try_*` operations
 /// that consume owned inputs (e.g. `try_insert`) instead return those inputs
 /// on contention so the caller can retry or discard without losing data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,6 +49,10 @@ impl std::error::Error for LockContention {}
 /// # Thread Safety and Concurrency
 /// The cache instance can be wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
+///
+/// The `try_*` methods do not wait for shard locks. Invalidating a pending load
+/// can still wait for its waiter lock while holding the shard lock. Wake callbacks
+/// run synchronously after the shard lock is released.
 ///
 /// If an operation or wake callback panics, remaining waiters may not be woken.
 pub struct Cache<
@@ -411,6 +415,8 @@ impl<
     /// Attempts to remove an item from the cache whose key is `key`.
     /// Returns `Ok(Some(entry))` with the removed entry if present, `Ok(None)` if absent,
     /// or `Err(LockContention)` if the shard lock could not be acquired without blocking.
+    ///
+    /// See [`Cache`] for the blocking behavior of try methods.
     pub fn try_remove<Q>(&self, key: &Q) -> Result<Option<(Key, Val)>, LockContention>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -498,10 +504,12 @@ impl<
         self.insert_with_lifecycle(key, value, &mut lcs);
     }
 
-    /// Attempts to insert an item in the cache with key `key` without blocking.
+    /// Attempts to insert an item in the cache with key `key` without waiting for the shard lock.
     /// Returns `Ok(())` if the item was inserted, or `Err((key, value))` if the shard lock
     /// could not be acquired without blocking. Lock contention is the only failure
     /// mode: the inputs are returned so the caller can retry or discard them.
+    ///
+    /// See [`Cache`] for the blocking behavior of try methods.
     pub fn try_insert(&self, key: Key, value: Val) -> Result<(), (Key, Val)> {
         let mut lcs = Default::default();
         self.try_insert_with_lifecycle(key, value, &mut lcs)
@@ -529,8 +537,8 @@ impl<
         wakes.wake();
     }
 
-    /// Attempts to insert an item in the cache with key `key` without blocking, recording
-    /// any evicted items into the given lifecycle request state.
+    /// Attempts to insert an item in the cache with key `key` without waiting for the shard lock.
+    /// Records evicted items in the given lifecycle request state.
     /// Returns `Ok(())` if the item was inserted, or `Err((key, value))` if the shard lock
     /// could not be acquired without blocking. Lock contention is the only failure mode:
     /// the inputs are returned so the caller can retry or discard them.
@@ -538,6 +546,8 @@ impl<
     /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
     /// The same `&mut lcs` can be threaded through multiple operations to batch the
     /// eviction work. Evicted items are released when `lcs` is dropped.
+    ///
+    /// See [`Cache`] for the blocking behavior of try methods.
     pub fn try_insert_with_lifecycle(
         &self,
         key: Key,
