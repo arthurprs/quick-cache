@@ -9,7 +9,9 @@ thread_local! {
     static TRACK: Cell<bool> = const { Cell::new(false) };
     static ALLOCS: Cell<usize> = const { Cell::new(0) };
 }
+
 struct CountingAllocator;
+
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let result = unsafe { System.alloc(layout) };
@@ -18,9 +20,11 @@ unsafe impl GlobalAlloc for CountingAllocator {
         }
         result
     }
+
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe { System.dealloc(ptr, layout) }
     }
+
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         let result = unsafe { System.realloc(ptr, layout, size) };
         if !result.is_null() && TRACK.try_with(Cell::get).unwrap_or(false) {
@@ -29,6 +33,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         result
     }
 }
+
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
@@ -90,19 +95,24 @@ fn retain_remains_usable_after_predicate_panic() {
 
 #[derive(Clone)]
 struct ValueWeight;
+
 impl quick_cache::Weighter<u64, u64> for ValueWeight {
     fn weight(&self, _: &u64, value: &u64) -> u64 {
         *value % 5
     }
 }
+
 #[derive(Default)]
 struct Collide;
+
 impl std::hash::Hasher for Collide {
     fn finish(&self) -> u64 {
         0
     }
+
     fn write(&mut self, _: &[u8]) {}
 }
+
 #[test]
 fn retain_handles_ghosts_zero_weights_and_hash_collisions() {
     use std::collections::BTreeMap;
