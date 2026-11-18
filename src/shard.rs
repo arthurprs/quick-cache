@@ -19,11 +19,20 @@ use crate::shim::sync::atomic::AtomicU64;
 // Max reference counter, this is 1 in ClockPro and 3 in the S3-FIFO.
 const MAX_F: u16 = 2;
 
-pub trait SharedPlaceholder: Clone {
-    fn new(hash: u64, idx: Token) -> Self;
-    fn same_as(&self, other: &Self) -> bool;
-    fn hash(&self) -> u64;
-    fn idx(&self) -> Token;
+pub trait PlaceholderId<Val>: Copy + Eq {
+    type Shared;
+    type Context: Default;
+    type WakeBatch;
+
+    fn new(context: &mut Self::Context) -> Self;
+    fn invalidate(shared: &Self::Shared, wakes: &mut Self::WakeBatch);
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PlaceholderLocation<Id> {
+    pub hash: u64,
+    pub idx: Token,
+    pub id: Id,
 }
 
 pub enum InsertStrategy {
@@ -53,18 +62,18 @@ pub enum EntryAction<T> {
 }
 
 /// Result of an entry-or-placeholder operation at the shard level.
-pub enum EntryOrPlaceholder<Key, Val, Plh, T> {
+pub enum EntryOrPlaceholder<Key, Val, Id, T> {
     /// Callback returned `Retain(T)` — entry is still in the cache.
     Kept(T),
     /// Callback returned `Remove` — entry was removed.
     Removed(Key, Val),
     /// Callback returned `ReplaceWithGuard` — entry was replaced with a placeholder.
     /// The old value is returned so it can be dropped outside the lock.
-    Replaced(Plh, Val),
+    Replaced(PlaceholderLocation<Id>, Val),
     /// Found an existing placeholder (another loader is working on this key).
-    ExistingPlaceholder(Plh),
+    ExistingPlaceholder(PlaceholderLocation<Id>),
     /// No entry existed, a new placeholder was created.
-    NewPlaceholder(Plh),
+    NewPlaceholder(PlaceholderLocation<Id>),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -101,29 +110,31 @@ impl<Key: Clone, Val: Clone> Clone for Resident<Key, Val> {
 }
 
 #[derive(Debug, Clone)]
-struct Placeholder<Key, Plh> {
+struct Placeholder<Key, Id, Shared> {
     key: Key,
     hot: ResidentState,
-    shared: Plh,
+    id: Id,
+    shared: Option<Shared>,
 }
 
 #[derive(Clone)]
-enum Entry<Key, Val, Plh> {
+enum Entry<Key, Val, Id, Shared = std::convert::Infallible> {
     Resident(Resident<Key, Val>),
-    Placeholder(Placeholder<Key, Plh>),
+    Placeholder(Placeholder<Key, Id, Shared>),
     Ghost(u64),
 }
 
 /// A bounded cache using a modified CLOCK-PRO eviction policy.
 /// The implementation allows some parallelism as gets don't require exclusive access.
 /// Any evicted items are returned so they can be dropped by the caller, outside the locks.
-pub struct CacheShard<Key, Val, We, B, L, Plh> {
+pub struct CacheShard<Key, Val, We, B, L, Id: PlaceholderId<Val>> {
     hash_builder: B,
     /// Map to an entry in the `entries` slab.
     /// Note that the actual key/value/hash are not stored in the map but in the slab.
     map: HashTable<Token>,
     /// Slab holding entries
-    entries: LinkedSlab<Entry<Key, Val, Plh>>,
+    entries: LinkedSlab<Entry<Key, Val, Id, Id::Shared>>,
+    pub(crate) placeholder_context: Id::Context,
     /// Head of cold list, containing Cold entries.
     /// Only contains entries of kind `Resident`.
     cold_head: Option<Token>,
@@ -149,14 +160,18 @@ pub struct CacheShard<Key, Val, We, B, L, Plh> {
     pub(crate) lifecycle: L,
 }
 
-impl<Key: Clone, Val: Clone, We: Clone, B: Clone, L: Clone, Plh: Clone> Clone
-    for CacheShard<Key, Val, We, B, L, Plh>
+impl<Key: Clone, Val: Clone, We: Clone, B: Clone, L: Clone, Id: PlaceholderId<Val>> Clone
+    for CacheShard<Key, Val, We, B, L, Id>
+where
+    Id::Context: Clone,
+    Id::Shared: Clone,
 {
     fn clone(&self) -> Self {
         Self {
             hash_builder: self.hash_builder.clone(),
             map: self.map.clone(),
             entries: self.entries.clone(),
+            placeholder_context: self.placeholder_context.clone(),
             cold_head: self.cold_head,
             hot_head: self.hot_head,
             ghost_head: self.ghost_head,
@@ -231,17 +246,45 @@ macro_rules! record_miss_mut {
     ($self: expr) => {{}};
 }
 
-impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, Plh> {
-    pub fn remove_placeholder(&mut self, placeholder: &Plh) {
-        if let Ok(entry) = self.map.find_entry(placeholder.hash(), |&idx| {
-            if idx != placeholder.idx() {
+impl<Key, Val, We, B, L, Id: PlaceholderId<Val>> CacheShard<Key, Val, We, B, L, Id> {
+    fn placeholder_id(entry: &Entry<Key, Val, Id, Id::Shared>) -> Option<Id> {
+        let Entry::Placeholder(p) = entry else {
+            return None;
+        };
+        Some(p.id)
+    }
+
+    pub fn shared_placeholder(&self, location: &PlaceholderLocation<Id>) -> Option<&Id::Shared> {
+        let (Entry::Placeholder(p), _) = self.entries.get(location.idx)? else {
+            return None;
+        };
+        let shared = p.shared.as_ref()?;
+        (p.id == location.id).then_some(shared)
+    }
+
+    pub fn share_placeholder(
+        &mut self,
+        location: &PlaceholderLocation<Id>,
+        create: impl FnOnce() -> Id::Shared,
+    ) -> &Id::Shared {
+        let (entry, _) = self.entries.get_mut(location.idx).unwrap();
+        debug_assert!(Self::placeholder_id(entry) == Some(location.id));
+        let Entry::Placeholder(p) = entry else {
+            unreachable!()
+        };
+        p.shared.get_or_insert_with(create)
+    }
+
+    pub fn remove_placeholder(&mut self, placeholder: &PlaceholderLocation<Id>) {
+        if let Ok(entry) = self.map.find_entry(placeholder.hash, |&idx| {
+            if idx != placeholder.idx {
                 return false;
             }
             let (entry, _) = self.entries.get(idx).unwrap();
-            matches!(entry, Entry::Placeholder(Placeholder { shared, .. }) if shared.same_as(placeholder))
+            Self::placeholder_id(entry) == Some(placeholder.id)
         }) {
             entry.remove();
-            self.entries.remove(placeholder.idx());
+            self.entries.remove(placeholder.idx);
         }
     }
 
@@ -266,7 +309,7 @@ impl<Key, Val, We, B, L, Plh: SharedPlaceholder> CacheShard<Key, Val, We, B, L, 
     }
 }
 
-impl<Key, Val, We, B, L, Plh> CacheShard<Key, Val, We, B, L, Plh> {
+impl<Key, Val, We, B, L, Id: PlaceholderId<Val>> CacheShard<Key, Val, We, B, L, Id> {
     pub fn memory_used(&self) -> MemoryUsed {
         MemoryUsed {
             entries: self.entries.memory_used(),
@@ -296,7 +339,15 @@ impl<Key, Val, We, B, L, Plh> CacheShard<Key, Val, We, B, L, Plh> {
         self.misses.load(atomic::Ordering::Relaxed)
     }
 
-    pub fn clear(&mut self) {
+    pub fn clear(&mut self, wakes: &mut Id::WakeBatch) {
+        // Mark notifications before dropping keys from the draining entries.
+        for entry in self.entries.iter() {
+            if let Entry::Placeholder(p) = entry {
+                if let Some(shared) = p.shared.as_ref() {
+                    Id::invalidate(shared, wakes);
+                }
+            }
+        }
         let _ = self.drain();
     }
 
@@ -342,8 +393,8 @@ impl<
         We: Weighter<Key, Val>,
         B: BuildHasher,
         L: Lifecycle<Key, Val>,
-        Plh: SharedPlaceholder,
-    > CacheShard<Key, Val, We, B, L, Plh>
+        Id: PlaceholderId<Val>,
+    > CacheShard<Key, Val, We, B, L, Id>
 {
     pub fn new(
         hot_allocation: f64,
@@ -363,6 +414,7 @@ impl<
             hash_builder,
             map: HashTable::with_capacity(0),
             entries: LinkedSlab::with_capacity(0),
+            placeholder_context: Default::default(),
             weight_capacity,
             #[cfg(feature = "stats")]
             hits: Default::default(),
@@ -601,7 +653,7 @@ impl<
         self.get_key_value(hash, key).map(|(_k, v)| v)
     }
 
-    pub fn get_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>>
+    pub fn get_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L, Id>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
@@ -639,7 +691,7 @@ impl<
     }
 
     #[inline]
-    pub fn peek_token_mut(&mut self, token: Token) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>> {
+    pub fn peek_token_mut(&mut self, token: Token) -> Option<RefMut<'_, Key, Val, We, B, L, Id>> {
         if let Some((Entry::Resident(resident), _)) = self.entries.get_mut(token) {
             let old_weight = self.weighter.weight(&resident.key, &resident.value);
             Some(RefMut {
@@ -676,7 +728,7 @@ impl<
         })
     }
 
-    pub fn peek_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>>
+    pub fn peek_mut<Q>(&mut self, hash: u64, key: &Q) -> Option<RefMut<'_, Key, Val, We, B, L, Id>>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
@@ -684,13 +736,18 @@ impl<
         self.peek_token_mut(idx)
     }
 
-    pub fn remove<Q>(&mut self, hash: u64, key: &Q) -> Option<(Key, Val)>
+    pub fn remove<Q>(&mut self, hash: u64, key: &Q, wakes: &mut Id::WakeBatch) -> Option<(Key, Val)>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         // This could be search_resident, but calling `remove` is likely a
         // strong indication that this input isn't important.
         let idx = self.search(hash, key)?;
+        if let Some((Entry::Placeholder(p), _)) = self.entries.get(idx) {
+            if let Some(shared) = p.shared.as_ref() {
+                Id::invalidate(shared, wakes);
+            }
+        }
         self.remove_internal(hash, idx)
     }
 
@@ -753,10 +810,7 @@ impl<
                 self.num_non_resident -= 1;
                 &mut self.ghost_head
             }
-            Entry::Placeholder(_) => {
-                // TODO: this is probably undesirable as it could lead to two placeholders for the same key.
-                return None;
-            }
+            Entry::Placeholder(_) => return None,
         };
         if *list_head == Some(idx) {
             *list_head = next;
@@ -897,10 +951,10 @@ impl<
         &mut self,
         lcs: &mut L::RequestState,
         idx: Token,
-        key: Key,
-        value: Val,
+        (key, value): (Key, Val),
         weight: u64,
         strategy: InsertStrategy,
+        wakes: &mut Id::WakeBatch,
     ) -> Result<(), (Key, Val)> {
         // caller already handled overweight items, but it could have been pinned
         let (entry, _) = self.entries.get_mut(idx).unwrap();
@@ -925,7 +979,10 @@ impl<
                 enter_state = ResidentState::Hot;
             }
             Entry::Placeholder(ph) => {
-                referenced = 1; // Pretend it's a newly inserted Resident
+                if let Some(shared) = ph.shared.as_ref() {
+                    Id::invalidate(shared, wakes);
+                }
+                referenced = 1;
                 enter_state = ph.hot;
             }
         }
@@ -1028,25 +1085,23 @@ impl<
     pub fn replace_placeholder(
         &mut self,
         lcs: &mut L::RequestState,
-        placeholder: &Plh,
+        placeholder: &PlaceholderLocation<Id>,
         referenced: bool,
         mut value: Val,
     ) -> Result<(), Val> {
-        let entry = match self.entries.get_mut(placeholder.idx()) {
-            Some((entry, _)) if matches!(&*entry, Entry::Placeholder(p) if p.shared.same_as(placeholder)) => {
-                entry
-            }
+        // Final owners stop accepting joins while this shard lock is held.
+        let entry = match self.entries.get_mut(placeholder.idx) {
+            Some((entry, _)) if Self::placeholder_id(entry) == Some(placeholder.id) => entry,
             _ => return Err(value),
         };
         let Entry::Placeholder(Placeholder {
-            key,
-            hot: mut placeholder_hot,
-            ..
+            key, hot, shared, ..
         }) = mem::replace(entry, Entry::Ghost(0))
         else {
-            // Safety: we had a mut reference to entry with Resident inside as checked by the first match statement
-            unsafe { core::hint::unreachable_unchecked() };
+            unreachable!()
         };
+        let mut placeholder_hot = hot;
+        drop(shared);
         let mut weight = self.weighter.weight(&key, &value);
         // don't admit if it won't fit within the budget
         if weight > self.weight_target_hot && !self.lifecycle.is_pinned(&key, &value) {
@@ -1082,7 +1137,7 @@ impl<
         };
 
         if weight != 0 {
-            *list_head = Some(self.entries.link(placeholder.idx(), *list_head));
+            *list_head = Some(self.entries.link(placeholder.idx, *list_head));
             while self.weight_hot + self.weight_cold > self.weight_capacity
                 && self.advance_cold(lcs)
             {}
@@ -1095,12 +1150,12 @@ impl<
     fn handle_overweight_replace_placeholder(
         &mut self,
         lcs: &mut L::RequestState,
-        placeholder: &Plh,
+        placeholder: &PlaceholderLocation<Id>,
         key: Key,
         value: Val,
     ) -> Result<(), Val> {
-        self.entries.remove(placeholder.idx());
-        self.map_remove(placeholder.hash(), placeholder.idx());
+        self.entries.remove(placeholder.idx);
+        self.map_remove(placeholder.hash, placeholder.idx);
         self.lifecycle.on_evict_cold(lcs, key, value);
         Ok(())
     }
@@ -1112,6 +1167,7 @@ impl<
         key: Key,
         mut value: Val,
         strategy: InsertStrategy,
+        wakes: &mut Id::WakeBatch,
     ) -> Result<(), (Key, Val)> {
         let mut weight = self.weighter.weight(&key, &value);
         // don't admit if it won't fit within the budget
@@ -1125,7 +1181,7 @@ impl<
         }
 
         if let Some(idx) = self.search(hash, &key) {
-            return self.insert_existing(lcs, idx, key, value, weight, strategy);
+            return self.insert_existing(lcs, idx, (key, value), weight, strategy, wakes);
         } else if matches!(strategy, InsertStrategy::Replace { .. }) {
             return Err((key, value));
         }
@@ -1191,7 +1247,7 @@ impl<
         &mut self,
         hash: u64,
         key: &Q,
-    ) -> Result<(Token, &Val), (Plh, bool)>
+    ) -> Result<(Token, &Val), (PlaceholderLocation<Id>, bool)>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
@@ -1227,7 +1283,7 @@ impl<
         hash: u64,
         key: &Q,
         on_occupied: &mut F,
-    ) -> EntryOrPlaceholder<Key, Val, Plh, T>
+    ) -> EntryOrPlaceholder<Key, Val, Id, T>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
         F: FnMut(&Key, &mut Val) -> EntryAction<T>,
@@ -1242,7 +1298,7 @@ impl<
                 // for the duration of the callback.
                 let action = {
                     let (key_ptr, val_ptr) = (&r.key as *const Key, &mut r.value as *mut Val);
-                    let _guard = WeightGuard::<Key, Val, We, B, L, Plh> {
+                    let _guard = WeightGuard::<Key, Val, We, B, L, Id> {
                         idx,
                         old_weight: self.weighter.weight(&r.key, &r.value),
                         shard,
@@ -1267,6 +1323,11 @@ impl<
                         EntryOrPlaceholder::Removed(key, val)
                     }
                     EntryAction::ReplaceWithGuard => {
+                        let shared = PlaceholderLocation {
+                            hash,
+                            idx,
+                            id: Id::new(&mut self.placeholder_context),
+                        };
                         let Some((Entry::Resident(r), _)) = self.entries.get_mut(idx) else {
                             // SAFETY: we had a mut reference to the Resident under `idx` until the previous line
                             unsafe { unreachable_unchecked() };
@@ -1288,7 +1349,6 @@ impl<
                                 *list_head = next;
                             }
                         }
-                        let shared = Plh::new(hash, idx);
                         let (entry, _) = unsafe { self.entries.get_mut_unchecked(idx) };
                         let Entry::Resident(r) = mem::replace(entry, Entry::Ghost(0)) else {
                             unsafe { unreachable_unchecked() }
@@ -1296,7 +1356,8 @@ impl<
                         *entry = Entry::Placeholder(Placeholder {
                             key: r.key,
                             hot: state,
-                            shared: shared.clone(),
+                            id: shared.id,
+                            shared: None,
                         });
                         EntryOrPlaceholder::Replaced(shared, r.value)
                     }
@@ -1319,23 +1380,35 @@ impl<
         hash: u64,
         key: &Q,
         idx: Option<Token>,
-    ) -> (Plh, bool)
+    ) -> (PlaceholderLocation<Id>, bool)
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         if let Some(idx) = idx {
             let (entry, _) = unsafe { self.entries.get_mut_unchecked(idx) };
             match entry {
-                Entry::Placeholder(p) => {
+                Entry::Placeholder(_) => {
                     record_hit_mut!(self);
-                    (p.shared.clone(), false)
+                    (
+                        PlaceholderLocation {
+                            hash,
+                            idx,
+                            id: Self::placeholder_id(entry).unwrap(),
+                        },
+                        false,
+                    )
                 }
                 Entry::Ghost(_) => {
-                    let shared = Plh::new(hash, idx);
+                    let shared = PlaceholderLocation {
+                        hash,
+                        idx,
+                        id: Id::new(&mut self.placeholder_context),
+                    };
                     *entry = Entry::Placeholder(Placeholder {
                         key: key.to_owned(),
                         hot: ResidentState::Hot,
-                        shared: shared.clone(),
+                        id: shared.id,
+                        shared: None,
                     });
                     self.num_non_resident -= 1;
                     let next = self.entries.unlink(idx);
@@ -1349,11 +1422,16 @@ impl<
             }
         } else {
             let idx = self.entries.next_free();
-            let shared = Plh::new(hash, idx);
+            let shared = PlaceholderLocation {
+                hash,
+                idx,
+                id: Id::new(&mut self.placeholder_context),
+            };
             let idx_ = self.entries.insert(Entry::Placeholder(Placeholder {
                 key: key.to_owned(),
                 hot: ResidentState::Cold,
-                shared: shared.clone(),
+                id: shared.id,
+                shared: None,
             }));
             debug_assert_eq!(idx, idx_);
             self.map_insert(hash, idx);
@@ -1391,14 +1469,14 @@ impl<
 
 /// Drop guard for `entry_or_placeholder`: if the user callback panics after
 /// mutating the value, recomputes weight to keep shard accounting consistent.
-struct WeightGuard<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> {
-    shard: *mut CacheShard<Key, Val, We, B, L, Plh>,
+struct WeightGuard<Key, Val, We: Weighter<Key, Val>, B, L, Id: PlaceholderId<Val>> {
+    shard: *mut CacheShard<Key, Val, We, B, L, Id>,
     idx: Token,
     old_weight: u64,
 }
 
-impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
-    for WeightGuard<Key, Val, We, B, L, Plh>
+impl<Key, Val, We: Weighter<Key, Val>, B, L, Id: PlaceholderId<Val>> Drop
+    for WeightGuard<Key, Val, We, B, L, Id>
 {
     fn drop(&mut self) {
         // SAFETY: shard pointer is valid — guard is created and dropped within
@@ -1419,13 +1497,13 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
 
 /// Structure wrapping a mutable reference to a cached item.
 /// On drop, recomputes weight via the inner [`WeightGuard`].
-pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> {
-    guard: WeightGuard<Key, Val, We, B, L, Plh>,
-    _phantom: std::marker::PhantomData<&'cache mut CacheShard<Key, Val, We, B, L, Plh>>,
+pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Id: PlaceholderId<Val>> {
+    guard: WeightGuard<Key, Val, We, B, L, Id>,
+    _phantom: std::marker::PhantomData<&'cache mut CacheShard<Key, Val, We, B, L, Id>>,
 }
 
-impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
-    RefMut<'_, Key, Val, We, B, L, Plh>
+impl<Key, Val, We: Weighter<Key, Val>, B, L, Id: PlaceholderId<Val>>
+    RefMut<'_, Key, Val, We, B, L, Id>
 {
     pub(crate) fn pair(&self) -> (&Key, &Val) {
         // SAFETY: RefMut is only constructed from a valid &mut CacheShard with a
@@ -1469,7 +1547,7 @@ mod tests {
             crate::UnitWeighter,
             crate::DefaultHashBuilder,
             crate::sync::DefaultLifecycle<u64, u64>,
-            crate::sync_placeholder::SharedPlaceholder<u64>,
+            std::num::NonZeroU64,
         >::new(
             DEFAULT_HOT_ALLOCATION,
             0.5,       // ghost_allocation -> capacity_non_resident = 500_000
@@ -1493,23 +1571,28 @@ mod tests {
     #[test]
     fn entry_overhead() {
         use std::mem::size_of;
-        // 8 bytes from the linked slab, 8 bytes from the entry enum.
-        // `stats` adds an 8-byte `access_count` to each `Resident` (24 -> 32 bytes).
-        // Whether the slab entry grows then depends on enum discriminant/niche layout:
-        // the sync entry's discriminant moves into the `Arc` niche, cancelling the
-        // growth (stays 32), while the unsync entry loses its niche and grows by 8.
-        // (Layout-dependent and not guaranteed stable across rustc versions.)
+        // Pinned-toolchain layout: sync IDs provide a niche; unsync stores no ID.
+        #[cfg(feature = "stats")]
+        let sync_overhead = 24;
+        #[cfg(not(feature = "stats"))]
+        let sync_overhead = 16;
         assert_eq!(
-            size_of::<Entry<u64, u64, crate::sync_placeholder::SharedPlaceholder<u64>>>()
-                - size_of::<[u64; 2]>(),
-            16
+            size_of::<
+                Entry<
+                    u64,
+                    u64,
+                    std::num::NonZeroU64,
+                    crate::shim::sync::Arc<crate::sync_placeholder::Placeholder<u64>>,
+                >,
+            >() - size_of::<[u64; 2]>(),
+            sync_overhead
         );
         #[cfg(not(feature = "stats"))]
-        let unsync_overhead = 16;
+        let unsync_overhead = 8;
         #[cfg(feature = "stats")]
-        let unsync_overhead = 24;
+        let unsync_overhead = 16;
         assert_eq!(
-            size_of::<Entry<u64, u64, crate::unsync::SharedPlaceholder>>() - size_of::<[u64; 2]>(),
+            size_of::<Entry<u64, u64, ()>>() - size_of::<[u64; 2]>(),
             unsync_overhead
         );
     }

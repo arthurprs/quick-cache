@@ -2,6 +2,7 @@ use std::{
     future::Future,
     hash::{BuildHasher, Hash},
     hint::unreachable_unchecked,
+    num::NonZeroU64,
     time::Duration,
 };
 
@@ -10,18 +11,17 @@ use crate::{
     options::{Options, OptionsBuilder},
     shard::{CacheShard, InsertStrategy},
     shim::rw_lock::RwLock,
-    sync_placeholder::SharedPlaceholder,
     DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
 };
 
 use crate::shard::EntryOrPlaceholder;
 pub use crate::sync_placeholder::{EntryAction, EntryResult, GuardResult, PlaceholderGuard};
-use crate::sync_placeholder::{JoinFuture, JoinResult};
+use crate::sync_placeholder::{JoinFuture, JoinResult, WakeBatch};
 
-/// Error returned by non-blocking cache operations that do not consume their
+/// Error returned by `try_*` cache operations that do not consume their
 /// inputs when the relevant shard lock could not be acquired immediately.
 ///
-/// This is used by borrowed-key/read-path operations. Non-blocking operations
+/// This is used by borrowed-key/read-path operations. `try_*` operations
 /// that consume owned inputs (e.g. `try_insert`) instead return those inputs
 /// on contention so the caller can retry or discard without losing data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,6 +49,14 @@ impl std::error::Error for LockContention {}
 /// # Thread Safety and Concurrency
 /// The cache instance can be wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
+///
+/// The `try_*` methods return immediately on shard lock contention. When they
+/// invalidate a shared pending load, they may wait for that load's waiter mutex
+/// while holding the shard lock. The waiter mutex is normally held only briefly
+/// for wait list bookkeeping. Wake callbacks run synchronously after both locks
+/// are released.
+///
+/// If an operation or wake callback panics, remaining waiters may not be woken.
 pub struct Cache<
     Key,
     Val,
@@ -57,7 +65,7 @@ pub struct Cache<
     L = DefaultLifecycle<Key, Val>,
 > {
     hash_builder: B,
-    shards: Box<[RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>]>,
+    shards: Box<[RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>]>,
     shards_mask: u64,
 }
 
@@ -264,10 +272,7 @@ impl<
     fn shard_for<Q>(
         &self,
         key: &Q,
-    ) -> Option<(
-        &RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
-        u64,
-    )>
+    ) -> Option<(&RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>, u64)>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
@@ -394,19 +399,29 @@ impl<
         }
     }
 
-    /// Remove an item from the cache whose key is `key`.
-    /// Returns the removed entry, if any.
+    /// Removes and returns the resident entry for `key`, if present.
+    ///
+    /// If `key` has a pending load, invalidates the load, wakes its waiters to
+    /// retry the lookup, and returns `None`. The loader's guard returns `Err(value)`
+    /// if it later tries to insert.
     pub fn remove<Q>(&self, key: &Q) -> Option<(Key, Val)>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         let (shard, hash) = self.shard_for(key).unwrap();
-        shard.write().remove(hash, key)
+        let mut wakes = WakeBatch::default();
+        let result = shard.write().remove(hash, key, &mut wakes);
+        wakes.wake();
+        result
     }
 
-    /// Attempts to remove an item from the cache whose key is `key`.
-    /// Returns `Ok(Some(entry))` with the removed entry if present, `Ok(None)` if absent,
-    /// or `Err(LockContention)` if the shard lock could not be acquired without blocking.
+    /// Attempts to remove the entry for `key`.
+    ///
+    /// Returns the result of [`remove`](Self::remove) in `Ok`, with the same
+    /// behavior for pending loads. Returns `Err(LockContention)` if it cannot
+    /// acquire the shard lock immediately.
+    ///
+    /// See [`Cache`] for the blocking behavior of try methods.
     pub fn try_remove<Q>(&self, key: &Q) -> Result<Option<(Key, Val)>, LockContention>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -415,10 +430,13 @@ impl<
             return Ok(None);
         };
 
-        match shard.try_write() {
-            Some(mut guard) => Ok(guard.remove(hash, key)),
+        let mut wakes = WakeBatch::default();
+        let result = match shard.try_write() {
+            Some(mut guard) => Ok(guard.remove(hash, key, &mut wakes)),
             None => Err(LockContention),
-        }
+        };
+        wakes.wake();
+        result
     }
 
     /// Remove an item from the cache whose key is `key` if `f(&value)` returns `true` for that entry.
@@ -434,7 +452,7 @@ impl<
         shard.write().remove_if(hash, key, f)
     }
 
-    /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists.
+    /// Replaces a resident entry for `key`.
     /// If `soft` is set, the replace operation won't affect the "hotness" of the entry,
     /// even if the value is replaced.
     ///
@@ -444,8 +462,8 @@ impl<
         self.replace_with_lifecycle(key, value, soft, &mut lcs)
     }
 
-    /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists,
-    /// recording any evicted items into the given lifecycle request state.
+    /// Replaces a resident entry for `key`, recording any evicted items into the
+    /// given lifecycle request state.
     /// If `soft` is set, the replace operation won't affect the "hotness" of the entry,
     /// even if the value is replaced.
     ///
@@ -462,9 +480,15 @@ impl<
         lcs: &mut L::RequestState,
     ) -> Result<(), (Key, Val)> {
         let (shard, hash) = self.shard_for(&key).unwrap();
-        shard
-            .write()
-            .insert(lcs, hash, key, value, InsertStrategy::Replace { soft })?;
+        shard.write().insert(
+            lcs,
+            hash,
+            key,
+            value,
+            InsertStrategy::Replace { soft },
+            // Replace rejects placeholders, so the wake batch stays empty.
+            &mut WakeBatch::default(),
+        )?;
         Ok(())
     }
 
@@ -481,15 +505,21 @@ impl<
     }
 
     /// Inserts an item in the cache with key `key`.
+    ///
+    /// An admitted value invalidates any pending load for `key` and wakes its
+    /// waiters to retry the lookup. A value rejected at admission leaves the
+    /// pending load in place.
     pub fn insert(&self, key: Key, value: Val) {
         let mut lcs = Default::default();
         self.insert_with_lifecycle(key, value, &mut lcs);
     }
 
-    /// Attempts to insert an item in the cache with key `key` without blocking.
-    /// Returns `Ok(())` if the item was inserted, or `Err((key, value))` if the shard lock
-    /// could not be acquired without blocking. Lock contention is the only failure
-    /// mode: the inputs are returned so the caller can retry or discard them.
+    /// Attempts to insert an item in the cache with key `key` without waiting for the shard lock.
+    ///
+    /// Returns `Err((key, value))` on shard lock contention and `Ok(())` once
+    /// the insertion is attempted, including when the value is rejected at admission.
+    ///
+    /// See [`insert`](Self::insert) for pending loads and [`Cache`] for blocking behavior.
     pub fn try_insert(&self, key: Key, value: Val) -> Result<(), (Key, Val)> {
         let mut lcs = Default::default();
         self.try_insert_with_lifecycle(key, value, &mut lcs)
@@ -498,27 +528,33 @@ impl<
     /// Inserts an item in the cache with key `key`, recording any evicted items into the
     /// given lifecycle request state.
     ///
+    /// See [`insert`](Self::insert) for the effect on pending loads.
+    ///
     /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
     /// The same `&mut lcs` can be threaded through multiple operations to batch the
     /// eviction work. Evicted items are released when `lcs` is dropped.
     pub fn insert_with_lifecycle(&self, key: Key, value: Val, lcs: &mut L::RequestState) {
         let (shard, hash) = self.shard_for(&key).unwrap();
-        let result = shard
-            .write()
-            .insert(lcs, hash, key, value, InsertStrategy::Insert);
+        let mut wakes = WakeBatch::default();
+        let result =
+            shard
+                .write()
+                .insert(lcs, hash, key, value, InsertStrategy::Insert, &mut wakes);
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
+        wakes.wake();
     }
 
-    /// Attempts to insert an item in the cache with key `key` without blocking, recording
-    /// any evicted items into the given lifecycle request state.
-    /// Returns `Ok(())` if the item was inserted, or `Err((key, value))` if the shard lock
-    /// could not be acquired without blocking. Lock contention is the only failure mode:
-    /// the inputs are returned so the caller can retry or discard them.
+    /// Attempts to insert an item in the cache with key `key` without waiting for the shard lock.
+    /// Records evicted items in the given lifecycle request state.
+    ///
+    /// See [`try_insert`](Self::try_insert) for the result and behavior on pending loads.
     ///
     /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
     /// The same `&mut lcs` can be threaded through multiple operations to batch the
     /// eviction work. Evicted items are released when `lcs` is dropped.
+    ///
+    /// See [`Cache`] for the blocking behavior of try methods.
     pub fn try_insert_with_lifecycle(
         &self,
         key: Key,
@@ -527,21 +563,31 @@ impl<
     ) -> Result<(), (Key, Val)> {
         let (shard, hash) = self.shard_for(&key).unwrap();
 
-        match shard.try_write() {
+        let mut wakes = WakeBatch::default();
+        let result = match shard.try_write() {
             Some(mut shard) => {
-                let result = shard.insert(lcs, hash, key, value, InsertStrategy::Insert);
+                let result =
+                    shard.insert(lcs, hash, key, value, InsertStrategy::Insert, &mut wakes);
                 // result cannot err with the Insert strategy
                 debug_assert!(result.is_ok());
                 Ok(())
             }
             _ => Err((key, value)),
-        }
+        };
+        wakes.wake();
+        result
     }
 
-    /// Clear all items from the cache
+    /// Clears the cache one shard at a time, invalidating pending loads.
+    ///
+    /// After unlocking each shard, wakes the waiters for its invalidated
+    /// loads to retry the lookup. A retry can start a new load while
+    /// `clear` is still clearing other shards.
     pub fn clear(&self) {
         for s in self.shards.iter() {
-            s.write().clear();
+            let mut wakes = WakeBatch::default();
+            s.write().clear(&mut wakes);
+            wakes.wake();
         }
     }
 
@@ -601,6 +647,8 @@ impl<
     /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_or_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
+    /// Removing, overwriting or clearing an in-flight entry wakes its waiters to retry lookup.
+    /// A value published before invalidation can still reach registered waiters.
     ///
     /// A `None` `timeout` means waiting forever.
     /// A `Some(<zero>)` timeout will return a Timeout error immediately if the value is not present
@@ -649,6 +697,8 @@ impl<
     /// While the returned guard is alive, other calls with the same key using the
     /// `get_value_or_guard` or `get_or_insert` family of functions will wait until the guard
     /// is dropped or the value is inserted.
+    /// Removing, overwriting or clearing an in-flight entry wakes its waiters to retry lookup.
+    /// A value published before invalidation can still reach registered waiters.
     pub async fn get_value_or_guard_async<'a, Q>(
         &'a self,
         key: &Q,
@@ -870,7 +920,7 @@ impl<Key, Val, We, B, L> std::fmt::Debug for Cache<Key, Val, We, B, L> {
 ///
 /// See [`Cache::iter`] for more details.
 pub struct Iter<'a, Key, Val, We, B, L> {
-    shards: &'a [RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>],
+    shards: &'a [RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>],
     current_shard: usize,
     last: Option<Token>,
 }
@@ -907,7 +957,7 @@ impl<Key, Val, We, B, L> std::fmt::Debug for Iter<'_, Key, Val, We, B, L> {
 ///
 /// See [`Cache::drain`] for more details.
 pub struct Drain<'a, Key, Val, We, B, L> {
-    shards: &'a [RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>],
+    shards: &'a [RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>],
     current_shard: usize,
     last: Option<Token>,
 }
@@ -959,6 +1009,7 @@ impl<Key, Val> Default for DefaultLifecycle<Key, Val> {
         Self(Default::default())
     }
 }
+
 impl<Key, Val> Clone for DefaultLifecycle<Key, Val> {
     #[inline]
     fn clone(&self) -> Self {
@@ -989,7 +1040,6 @@ impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shard::SharedPlaceholder as _;
     use std::{
         sync::{Arc, Barrier},
         thread,
@@ -1223,6 +1273,7 @@ mod tests {
     fn test_entry_weight_tracking() {
         #[derive(Clone)]
         struct StringWeighter;
+
         impl crate::Weighter<u64, String> for StringWeighter {
             fn weight(&self, _key: &u64, val: &String) -> u64 {
                 val.len() as u64
@@ -1831,13 +1882,13 @@ mod tests {
             GuardResult::Guard(g) => g,
             _ => panic!("expected guard"),
         };
-        let idx1 = guard1.shared().idx();
+        let idx1 = guard1.location().idx;
         drop(guard1);
         let guard2 = match cache.get_value_or_guard(&1, None) {
             GuardResult::Guard(g) => g,
             _ => panic!("expected guard"),
         };
-        let idx2 = guard2.shared().idx();
+        let idx2 = guard2.location().idx;
         drop(guard2);
         assert_eq!(idx1, idx2);
     }
