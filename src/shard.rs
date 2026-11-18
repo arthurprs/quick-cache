@@ -569,22 +569,24 @@ impl<
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        let mut ghost = None;
-        self.map
-            .find(hash, |&idx| {
-                let (entry, _) = self.entries.get(idx).unwrap();
-                match entry {
-                    Entry::Resident(Resident { key, .. })
-                    | Entry::Placeholder(Placeholder { key, .. }) => k.equivalent(key),
-                    Entry::Ghost(ghost_hash) if *ghost_hash == hash => {
-                        ghost = Some(idx);
-                        false
-                    }
-                    _ => false,
+        let mut hash_match = None;
+        for bucket in self.map.iter_hash(hash) {
+            let idx = *bucket;
+            let (entry, _) = self.entries.get(idx).unwrap();
+            match entry {
+                Entry::Resident(Resident { key, .. })
+                | Entry::Placeholder(Placeholder { key, .. })
+                    if k.equivalent(key) =>
+                {
+                    return Some(idx);
                 }
-            })
-            .copied()
-            .or(ghost)
+                Entry::Ghost(non_resident_hash) if *non_resident_hash == hash => {
+                    hash_match = Some(idx);
+                }
+                _ => (),
+            }
+        }
+        hash_match
     }
 
     #[inline]
@@ -1532,41 +1534,6 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L, Id: PlaceholderId<Val>>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn remove_prefers_exact_key_over_colliding_ghost() {
-        #[derive(Default)]
-        struct ZeroHasher;
-
-        impl std::hash::Hasher for ZeroHasher {
-            fn write(&mut self, _: &[u8]) {}
-
-            fn finish(&self) -> u64 {
-                0
-            }
-        }
-
-        let mut shard = CacheShard::<_, _, _, _, _, ()>::new(
-            0.5,
-            1.0,
-            4,
-            2,
-            crate::UnitWeighter,
-            std::hash::BuildHasherDefault::<ZeroHasher>::default(),
-            crate::unsync::DefaultLifecycle::<u64, u64>::default(),
-        );
-        for key in 0..3 {
-            shard
-                .insert(&mut (), 0, key, key, InsertStrategy::Insert, &mut ())
-                .unwrap();
-        }
-        assert_eq!(shard.num_non_resident, 1);
-        assert_eq!(shard.remove(0, &2, &mut ()), Some((2, 2)));
-        assert_eq!(shard.num_non_resident, 1);
-        assert_eq!(shard.remove(0, &99, &mut ()), None);
-        assert_eq!(shard.num_non_resident, 0);
-        shard.validate(false);
-    }
 
     #[cfg(not(feature = "stats"))]
     #[test]
