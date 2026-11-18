@@ -569,24 +569,22 @@ impl<
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        let mut hash_match = None;
-        for bucket in self.map.iter_hash(hash) {
-            let idx = *bucket;
-            let (entry, _) = self.entries.get(idx).unwrap();
-            match entry {
-                Entry::Resident(Resident { key, .. })
-                | Entry::Placeholder(Placeholder { key, .. })
-                    if k.equivalent(key) =>
-                {
-                    return Some(idx);
+        let mut ghost = None;
+        self.map
+            .find(hash, |&idx| {
+                let (entry, _) = self.entries.get(idx).unwrap();
+                match entry {
+                    Entry::Resident(Resident { key, .. })
+                    | Entry::Placeholder(Placeholder { key, .. }) => k.equivalent(key),
+                    Entry::Ghost(ghost_hash) if *ghost_hash == hash => {
+                        ghost = Some(idx);
+                        false
+                    }
+                    _ => false,
                 }
-                Entry::Ghost(non_resident_hash) if *non_resident_hash == hash => {
-                    hash_match = Some(idx);
-                }
-                _ => (),
-            }
-        }
-        hash_match
+            })
+            .copied()
+            .or(ghost)
     }
 
     #[inline]
@@ -1534,6 +1532,41 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L, Id: PlaceholderId<Val>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_prefers_exact_key_over_colliding_ghost() {
+        #[derive(Default)]
+        struct ZeroHasher;
+
+        impl std::hash::Hasher for ZeroHasher {
+            fn write(&mut self, _: &[u8]) {}
+
+            fn finish(&self) -> u64 {
+                0
+            }
+        }
+
+        let options = crate::OptionsBuilder::new()
+            .hot_allocation(0.5)
+            .ghost_allocation(1.0)
+            .estimated_items_capacity(4)
+            .weight_capacity(2)
+            .build()
+            .unwrap();
+        let mut cache = crate::unsync::Cache::<u64, u64, _, _>::with_options(
+            options,
+            crate::UnitWeighter,
+            std::hash::BuildHasherDefault::<ZeroHasher>::default(),
+            crate::unsync::DefaultLifecycle::default(),
+        );
+        for key in 0..3 {
+            cache.insert(key, key);
+        }
+        assert_eq!(cache.peek(&1), None);
+        assert_eq!(cache.remove(&2), Some((2, 2)));
+        assert_eq!(cache.remove(&99), None);
+        assert_eq!(cache.peek(&0), Some(&0));
+    }
 
     #[cfg(not(feature = "stats"))]
     #[test]
