@@ -479,6 +479,7 @@ impl<
             key,
             value,
             InsertStrategy::Replace { soft },
+            // Replace rejects placeholders, so the wake batch stays empty.
             &mut WakeBatch::default(),
         )?;
         Ok(())
