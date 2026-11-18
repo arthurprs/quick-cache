@@ -124,7 +124,7 @@ impl Waiter {
     }
 }
 
-fn remove_waiter(waiters: &mut Vec<Waiter>, notified: *const AtomicBool) {
+fn remove_waiter(waiters: &mut Vec<Waiter>, notified: *const AtomicBool) -> Waiter {
     // An unnotified waiter stays registered until it removes itself under this lock.
     let idx = unsafe {
         waiters
@@ -132,7 +132,7 @@ fn remove_waiter(waiters: &mut Vec<Waiter>, notified: *const AtomicBool) {
             .position(|w| std::ptr::eq(w.notified, notified))
             .unwrap_unchecked()
     };
-    waiters.swap_remove(idx);
+    waiters.swap_remove(idx)
 }
 
 /// Result of [`Cache::get_value_or_guard`](crate::sync::Cache::get_value_or_guard).
@@ -211,13 +211,13 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
         }
     }
 
-    // Join the waiters list or return the value if it was already loaded
+    // The shard lock keeps the placeholder live while the waiter registers.
     #[inline]
     fn join_waiters(
         mut locked_shard: RwLockWriteGuard<'a, CacheShard<Key, Val, We, B, L, NonZeroU64>>,
         shared: &PlaceholderLocation<NonZeroU64>,
         waiter: Waiter,
-    ) -> (Arc<Placeholder<Val>>, bool) {
+    ) -> Arc<Placeholder<Val>> {
         let shared = locked_shard
             .share_placeholder(shared, || {
                 Arc::new(Placeholder {
@@ -227,17 +227,9 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
                 })
             })
             .clone();
-        let mut waiters = shared.waiters.write();
-        let filled = match shared.value.get() {
-            None => {
-                waiters.push(waiter);
-                false
-            }
-            Some(Some(_)) => true,
-            Some(None) => unreachable!(),
-        };
-        drop(waiters);
-        (shared, filled)
+        debug_assert!(shared.value.get().is_none());
+        shared.waiters.write().push(waiter);
+        shared
     }
 }
 
@@ -295,16 +287,11 @@ impl<
         deadline: Option<&mut Result<Duration, Instant>>,
     ) -> JoinResult<'a, Key, Val, We, B, L> {
         if matches!(deadline.as_deref(), Some(Ok(d)) if d.is_zero()) {
-            return match shard_guard.shared_placeholder(&shared) {
-                Some(shared) if shared.value().is_some() => {
-                    JoinResult::Filled(Some(shared.clone()))
-                }
-                _ => JoinResult::Timeout,
-            };
+            return JoinResult::Timeout;
         }
         let notified = pin::pin!(AtomicBool::new(false));
         let thread = thread::current();
-        let (shared, already_filled) = Self::join_waiters(
+        let shared = Self::join_waiters(
             shard_guard,
             &shared,
             Waiter {
@@ -312,10 +299,6 @@ impl<
                 wake: Wake::Thread(thread),
             },
         );
-        if already_filled {
-            return JoinResult::Filled(Some(shared));
-        }
-
         // Lazily convert the duration to a deadline on first call;
         // subsequent retries from entry() reuse the same deadline.
         let deadline = deadline.and_then(|d| match *d {
@@ -404,11 +387,7 @@ impl<
         let shared_value = value.clone();
         let waiters = {
             let mut waiters = shared.waiters.write();
-            if matches!(shared.value.get(), Some(None)) {
-                self.location = None;
-                return Err(value);
-            }
-            unsafe { shared.value.set(Some(shared_value)).unwrap_unchecked() };
+            assert!(shared.value.set(Some(shared_value)).is_ok());
             self.location = None;
             // A wake can panic or cancel another waiter after this lock is released.
             waiters.iter().for_each(Waiter::mark_notified);
@@ -510,8 +489,11 @@ impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, 
 impl<Q: ?Sized, Key, Val, We, B, L> JoinFuture<'_, '_, Q, Key, Val, We, B, L> {
     #[cold]
     fn drop_pending_waiter(&mut self) {
-        let JoinFutureState::Pending { shared, .. } =
-            mem::replace(&mut self.state, JoinFutureState::Done)
+        // Keep the cached waker alive until the notification pointer is unregistered.
+        let JoinFutureState::Pending {
+            shared,
+            waker: _waker,
+        } = mem::replace(&mut self.state, JoinFutureState::Done)
         else {
             unsafe { unreachable_unchecked() }
         };
@@ -522,7 +504,9 @@ impl<Q: ?Sized, Key, Val, We, B, L> JoinFuture<'_, '_, Q, Key, Val, We, B, L> {
                 drop(waiters);
                 let _ = PlaceholderGuard::start_loading(self.shard, shared.location);
             } else {
-                remove_waiter(&mut waiters, &self.notified);
+                let waiter = remove_waiter(&mut waiters, &self.notified);
+                drop(waiters);
+                drop(waiter);
             }
         }
     }
@@ -574,7 +558,7 @@ impl<
                         // Register as waiter while holding shard lock — prevents
                         // race with drop_uninserted_slow removing the placeholder.
                         let waker = cx.waker().clone();
-                        let (shared, already_filled) = PlaceholderGuard::join_waiters(
+                        let shared = PlaceholderGuard::join_waiters(
                             shard_guard,
                             &shared,
                             Waiter {
@@ -582,13 +566,8 @@ impl<
                                 wake: Wake::Task(waker.clone()),
                             },
                         );
-                        if already_filled {
-                            this.state = JoinFutureState::Done;
-                            Poll::Ready(JoinResult::Filled(Some(shared)))
-                        } else {
-                            this.state = JoinFutureState::Pending { shared, waker };
-                            Poll::Pending
-                        }
+                        this.state = JoinFutureState::Pending { shared, waker };
+                        Poll::Pending
                     }
                 }
             }
@@ -598,6 +577,9 @@ impl<
                     if waker.will_wake(new_waker) {
                         return Poll::Pending;
                     }
+                    // Waker clones and drops can call user code.
+                    let next_waker = new_waker.clone();
+                    let next_wake = Wake::Task(next_waker.clone());
                     let mut waiters = shared.waiters.write();
                     // Re-check after acquiring the lock — a concurrent insert
                     // may have drained the waiters list in the meantime.
@@ -608,8 +590,10 @@ impl<
                                 .find(|w| std::ptr::eq(w.notified, &this.notified))
                                 .unwrap_unchecked()
                         };
-                        *waker = new_waker.clone();
-                        w.wake = Wake::Task(new_waker.clone());
+                        let previous_wake = mem::replace(&mut w.wake, next_wake);
+                        drop(waiters);
+                        *waker = next_waker;
+                        drop(previous_wake);
                         return Poll::Pending;
                     }
                 }
@@ -704,6 +688,59 @@ mod lazy_tests {
         };
         successor.insert(8).unwrap();
         assert!(shard.read().shared_placeholder(&location).is_none());
+    }
+
+    struct CheckWakerDrop {
+        shared: Arc<Placeholder<u64>>,
+        lock_available: Arc<AtomicBool>,
+    }
+
+    impl Wake for CheckWakerDrop {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for CheckWakerDrop {
+        fn drop(&mut self) {
+            self.lock_available
+                .store(self.shared.waiters.try_write().is_some(), Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn cancellation_and_repoll_drop_wakers_after_unlocking() {
+        let lock_available = [true, false].map(|cancel| {
+            let shard = shard::<u64>();
+            let GuardResult::Guard(owner) = PlaceholderGuard::join(&shard, hash(0), &0, None)
+            else {
+                panic!()
+            };
+            let mut waiter = Box::pin(JoinFuture::new(&shard, hash(0), &0));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(waiter.as_mut().poll(&mut cx).is_pending());
+            let shared = shard
+                .read()
+                .shared_placeholder(owner.location())
+                .unwrap()
+                .clone();
+            let lock_available = Arc::new(AtomicBool::new(false));
+            let waker = Waker::from(Arc::new(CheckWakerDrop {
+                shared,
+                lock_available: lock_available.clone(),
+            }));
+            assert!(waiter
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending());
+            drop(waker);
+            if cancel {
+                drop(waiter);
+            } else {
+                assert!(waiter.as_mut().poll(&mut cx).is_pending());
+            }
+            assert!(owner.insert(8).is_ok());
+            lock_available.load(Ordering::Relaxed)
+        });
+        assert_eq!(lock_available, [true, true], "cancellation and repoll");
     }
 
     #[derive(Debug)]
