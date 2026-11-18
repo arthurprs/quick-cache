@@ -93,8 +93,6 @@ mod linked_slab;
 #[cfg(fuzzing)]
 pub mod linked_slab;
 mod options;
-#[cfg(not(feature = "shuttle"))]
-mod rw_lock;
 mod shard;
 mod shim;
 /// Concurrent cache variants that can be used from multiple threads.
