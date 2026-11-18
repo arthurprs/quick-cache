@@ -2,13 +2,16 @@ use quick_cache::{
     unsync::{Cache, DefaultLifecycle},
     DefaultHashBuilder, OptionsBuilder, Weighter,
 };
+
 #[derive(Clone)]
 struct ValueWeight;
+
 impl Weighter<u64, u64> for ValueWeight {
     fn weight(&self, _: &u64, value: &u64) -> u64 {
         *value
     }
 }
+
 fn check(hot: bool, replace: bool, head_item: bool) {
     let options = OptionsBuilder::new()
         .estimated_items_capacity(8)
@@ -43,34 +46,42 @@ fn check(hot: bool, replace: bool, head_item: bool) {
     assert!(cache.contains_key(&key));
     assert_eq!(cache.weight(), 8);
 }
+
 #[test]
 fn hot_nonhead_replace_preserves_clock_hand() {
     check(true, true, false)
 }
+
 #[test]
 fn hot_nonhead_mutate_preserves_clock_hand() {
     check(true, false, false)
 }
+
 #[test]
 fn cold_nonhead_replace_preserves_clock_hand() {
     check(false, true, false)
 }
+
 #[test]
 fn cold_nonhead_mutate_preserves_clock_hand() {
     check(false, false, false)
 }
+
 #[test]
 fn hot_head_replace_advances_clock_hand() {
     check(true, true, true)
 }
+
 #[test]
 fn hot_head_mutate_advances_clock_hand() {
     check(true, false, true)
 }
+
 #[test]
 fn cold_head_replace_advances_clock_hand() {
     check(false, true, true)
 }
+
 #[test]
 fn cold_head_mutate_advances_clock_hand() {
     check(false, false, true)
