@@ -50,9 +50,11 @@ impl std::error::Error for LockContention {}
 /// The cache instance can be wrapped with an `Arc` (or equivalent) and shared between threads.
 /// All methods are accessible via non-mut references so no further synchronization (e.g. Mutex) is needed.
 ///
-/// The `try_*` methods do not wait for shard locks. Invalidating a pending load
-/// can still wait for its waiter lock while holding the shard lock. Wake callbacks
-/// run synchronously after the shard lock is released.
+/// The `try_*` methods return immediately on shard lock contention. When they
+/// invalidate a shared pending load, they may wait for that load's waiter mutex
+/// while holding the shard lock. The waiter mutex is normally held only briefly
+/// for wait list bookkeeping. Wake callbacks run synchronously after both locks
+/// are released.
 ///
 /// If an operation or wake callback panics, remaining waiters may not be woken.
 pub struct Cache<
@@ -576,7 +578,11 @@ impl<
         result
     }
 
-    /// Clear all items from the cache
+    /// Clears the cache one shard at a time, invalidating pending loads.
+    ///
+    /// After unlocking each shard, wakes the waiters for its invalidated
+    /// loads to retry the lookup. A retry can start a new load while
+    /// `clear` is still clearing other shards.
     pub fn clear(&self) {
         for s in self.shards.iter() {
             let mut wakes = WakeBatch::default();
