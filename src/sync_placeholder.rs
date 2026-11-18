@@ -37,6 +37,7 @@ impl<Val> PlaceholderId<Val> for NonZeroU64 {
 
 #[derive(Default)]
 pub(crate) struct WakeBatch(Vec<Waiter>);
+
 impl WakeBatch {
     pub(crate) fn invalidate<Val>(&mut self, shared: &Arc<Placeholder<Val>>) {
         let mut waiters = shared.waiters.write();
@@ -50,6 +51,7 @@ impl WakeBatch {
             }
         }
     }
+
     pub(crate) fn wake(self) {
         for waiter in self.0 {
             waiter.wake.wake();
@@ -96,6 +98,7 @@ struct Waiter {
 // SAFETY: Cancellation unregisters under the waiter lock. Detached records
 // access only their owned wake handles after notification flags are marked.
 unsafe impl Send for Waiter {}
+
 unsafe impl Sync for Waiter {}
 
 #[derive(Debug)]
@@ -103,6 +106,7 @@ enum Wake {
     Thread(thread::Thread),
     Task(task::Waker),
 }
+
 impl Wake {
     fn wake(self) {
         match self {
@@ -111,6 +115,7 @@ impl Wake {
         }
     }
 }
+
 impl Waiter {
     fn mark_notified(&self) {
         // SAFETY: Cancellation removes unnotified waiters under the waiter lock.
@@ -448,6 +453,7 @@ impl<Key, Val, We, B, L> Drop for PlaceholderGuard<'_, Key, Val, We, B, L> {
         }
     }
 }
+
 impl<Key, Val, We, B, L> std::fmt::Debug for PlaceholderGuard<'_, Key, Val, We, B, L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlaceholderGuard").finish_non_exhaustive()
@@ -637,6 +643,7 @@ mod lazy_tests {
     fn hash(key: u64) -> u64 {
         TestHasher::default().hash_one(key)
     }
+
     fn shard<V>() -> TestShard<V> {
         RwLock::new(CacheShard::new(
             0.9,
@@ -648,7 +655,9 @@ mod lazy_tests {
             DefaultLifecycle::default(),
         ))
     }
+
     struct Noop;
+
     impl Wake for Noop {
         fn wake(self: Arc<Self>) {}
     }
@@ -702,6 +711,7 @@ mod lazy_tests {
         clones: Arc<AtomicUsize>,
         wakes: Arc<AtomicUsize>,
     }
+
     impl Clone for PublicationProbe {
         fn clone(&self) -> Self {
             let shard = self.shard.upgrade().unwrap();
@@ -717,6 +727,7 @@ mod lazy_tests {
             }
         }
     }
+
     impl Wake for PublicationProbe {
         fn wake(self: Arc<Self>) {
             let shard = self.shard.upgrade().unwrap();
@@ -727,6 +738,7 @@ mod lazy_tests {
             self.wakes.fetch_add(1, Ordering::SeqCst);
         }
     }
+
     #[test]
     fn publication_serializes_clone_then_wakes_after_unlock() {
         let shard = Arc::new(shard::<PublicationProbe>());
@@ -760,6 +772,7 @@ mod lazy_tests {
         calls: Arc<AtomicUsize>,
         panic: bool,
     }
+
     impl Wake for CheckWake {
         fn wake(self: Arc<Self>) {
             assert!(
@@ -774,6 +787,7 @@ mod lazy_tests {
             assert!(!self.panic, "invalidation wake");
         }
     }
+
     #[test]
     fn invalidation_marks_waiters_before_panicking_wake() {
         let shard = Arc::new(shard::<u64>());
@@ -835,6 +849,7 @@ mod lazy_tests {
         }
         panic!("waiter did not register");
     }
+
     #[test]
     fn synchronous_waiter_retries_then_accepts_handoff() {
         let shard = shard::<u64>();

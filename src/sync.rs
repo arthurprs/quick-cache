@@ -994,6 +994,7 @@ impl<Key, Val> Default for DefaultLifecycle<Key, Val> {
         Self(Default::default())
     }
 }
+
 impl<Key, Val> Clone for DefaultLifecycle<Key, Val> {
     #[inline]
     fn clone(&self) -> Self {
@@ -1257,6 +1258,7 @@ mod tests {
     fn test_entry_weight_tracking() {
         #[derive(Clone)]
         struct StringWeighter;
+
         impl crate::Weighter<u64, String> for StringWeighter {
             fn weight(&self, _key: &u64, val: &String) -> u64 {
                 val.len() as u64

@@ -22,6 +22,7 @@ const MAX_F: u16 = 2;
 pub trait PlaceholderId<Val>: Copy + Eq {
     type Shared;
     type Context: Default;
+
     fn new(context: &mut Self::Context) -> Self;
 }
 

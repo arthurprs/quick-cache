@@ -527,6 +527,7 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L> std::ops::DerefMut for RefMut<'_, K
 impl<Val> shard::PlaceholderId<Val> for () {
     type Shared = std::convert::Infallible;
     type Context = ();
+
     fn new(_: &mut ()) {}
 }
 

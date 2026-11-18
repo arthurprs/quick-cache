@@ -16,11 +16,13 @@ use std::{
 
 #[derive(Default)]
 struct Wakes(AtomicUsize);
+
 impl Wake for Wakes {
     fn wake(self: Arc<Self>) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 }
+
 fn cache() -> Cache<u64, u64> {
     Cache::with_options(
         quick_cache::OptionsBuilder::new()
@@ -34,6 +36,7 @@ fn cache() -> Cache<u64, u64> {
         Default::default(),
     )
 }
+
 #[test]
 fn remove_wakes_waiters_to_retry_without_old_value() {
     let cache = cache();
@@ -63,6 +66,7 @@ fn remove_wakes_waiters_to_retry_without_old_value() {
     assert!(matches!(second.as_mut().poll(&mut cx), Poll::Ready(Ok(9))));
     assert_eq!(cache.get(&0), Some(9));
 }
+
 #[test]
 fn clear_multiple_pending_loads_wakes_every_waiter() {
     let cache = cache();
@@ -155,13 +159,16 @@ fn clear_panic_leaves_invalidated_waiters_safe_to_drop() {
         sync::atomic::AtomicBool,
     };
     static PANIC: AtomicBool = AtomicBool::new(false);
+
     #[derive(Clone, PartialEq, Eq, Hash)]
     struct Key(u64);
+
     impl Drop for Key {
         fn drop(&mut self) {
             assert!(!PANIC.swap(false, Ordering::SeqCst), "key drop");
         }
     }
+
     let cache = Cache::<Key, u64>::with_options(
         quick_cache::OptionsBuilder::new()
             .estimated_items_capacity(16)
@@ -198,14 +205,17 @@ fn clear_panic_leaves_invalidated_waiters_safe_to_drop() {
 }
 
 type PendingWaiter = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+
 struct CancelWake {
     next: Arc<std::sync::Mutex<Option<PendingWaiter>>>,
 }
+
 impl Wake for CancelWake {
     fn wake(self: Arc<Self>) {
         self.next.lock().unwrap().take();
     }
 }
+
 #[test]
 fn invalidation_wake_can_drop_a_later_waiter() {
     let cache = Arc::new(cache());

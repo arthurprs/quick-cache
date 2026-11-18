@@ -12,6 +12,7 @@ use std::{
 
 #[derive(Debug)]
 struct Value(Arc<AtomicUsize>);
+
 impl Clone for Value {
     fn clone(&self) -> Self {
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -32,6 +33,7 @@ fn uncontended_guard_avoids_shared_value_clone() {
 
 #[derive(Clone)]
 struct Heavy;
+
 impl quick_cache::Weighter<u64, Value> for Heavy {
     fn weight(&self, _: &u64, _: &Value) -> u64 {
         1000
@@ -71,6 +73,7 @@ fn shared_value_reaches_waiters_after_cancellation_and_rejection() {
 }
 
 struct Noop;
+
 impl Wake for Noop {
     fn wake(self: Arc<Self>) {}
 }
@@ -78,12 +81,15 @@ impl Wake for Noop {
 #[test]
 fn panicking_wake_keeps_other_waiter_safe_to_repoll() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
+
     struct PanicWake;
+
     impl Wake for PanicWake {
         fn wake(self: Arc<Self>) {
             panic!("wake callback");
         }
     }
+
     let cache = Cache::<u64, u64>::new(16);
     let GuardResult::Guard(owner) = cache.get_value_or_guard(&0, None) else {
         panic!("expected loader")
