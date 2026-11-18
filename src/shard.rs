@@ -304,7 +304,10 @@ impl<Key, Val, We, B, L, Id: PlaceholderId<Val>> CacheShard<Key, Val, We, B, L, 
         if old_weight == 0 && new_weight != 0 {
             *target_head = Some(self.entries.link(idx, *target_head));
         } else if old_weight != 0 && new_weight == 0 {
-            *target_head = self.entries.unlink(idx);
+            let next = self.entries.unlink(idx);
+            if *target_head == Some(idx) {
+                *target_head = next;
+            }
         }
     }
 }
@@ -1012,7 +1015,10 @@ impl<
                 if evicted_weight == 0 && weight != 0 {
                     *list_head = Some(self.entries.link(idx, *list_head));
                 } else if evicted_weight != 0 && weight == 0 {
-                    *list_head = self.entries.unlink(idx);
+                    let next = self.entries.unlink(idx);
+                    if *list_head == Some(idx) {
+                        *list_head = next;
+                    }
                 }
                 match enter_state {
                     ResidentState::Hot => {
