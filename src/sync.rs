@@ -397,8 +397,11 @@ impl<
         }
     }
 
-    /// Remove an item from the cache whose key is `key`.
-    /// Returns the removed entry, if any.
+    /// Removes and returns the resident entry for `key`, if present.
+    ///
+    /// If `key` has a pending load, invalidates the load, wakes its waiters to
+    /// retry the lookup, and returns `None`. The loader's guard returns `Err(value)`
+    /// if it later tries to insert.
     pub fn remove<Q>(&self, key: &Q) -> Option<(Key, Val)>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
@@ -410,9 +413,11 @@ impl<
         result
     }
 
-    /// Attempts to remove an item from the cache whose key is `key`.
-    /// Returns `Ok(Some(entry))` with the removed entry if present, `Ok(None)` if absent,
-    /// or `Err(LockContention)` if the shard lock could not be acquired without blocking.
+    /// Attempts to remove the entry for `key`.
+    ///
+    /// Returns the result of [`remove`](Self::remove) in `Ok`, with the same
+    /// behavior for pending loads. Returns `Err(LockContention)` if it cannot
+    /// acquire the shard lock immediately.
     ///
     /// See [`Cache`] for the blocking behavior of try methods.
     pub fn try_remove<Q>(&self, key: &Q) -> Result<Option<(Key, Val)>, LockContention>
@@ -445,7 +450,7 @@ impl<
         shard.write().remove_if(hash, key, f)
     }
 
-    /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists.
+    /// Replaces a resident entry for `key`.
     /// If `soft` is set, the replace operation won't affect the "hotness" of the entry,
     /// even if the value is replaced.
     ///
@@ -455,8 +460,8 @@ impl<
         self.replace_with_lifecycle(key, value, soft, &mut lcs)
     }
 
-    /// Inserts an item in the cache, but _only_ if an entry with key `key` already exists,
-    /// recording any evicted items into the given lifecycle request state.
+    /// Replaces a resident entry for `key`, recording any evicted items into the
+    /// given lifecycle request state.
     /// If `soft` is set, the replace operation won't affect the "hotness" of the entry,
     /// even if the value is replaced.
     ///
@@ -498,17 +503,21 @@ impl<
     }
 
     /// Inserts an item in the cache with key `key`.
+    ///
+    /// An admitted value invalidates any pending load for `key` and wakes its
+    /// waiters to retry the lookup. A value rejected at admission leaves the
+    /// pending load in place.
     pub fn insert(&self, key: Key, value: Val) {
         let mut lcs = Default::default();
         self.insert_with_lifecycle(key, value, &mut lcs);
     }
 
     /// Attempts to insert an item in the cache with key `key` without waiting for the shard lock.
-    /// Returns `Ok(())` if the item was inserted, or `Err((key, value))` if the shard lock
-    /// could not be acquired without blocking. Lock contention is the only failure
-    /// mode: the inputs are returned so the caller can retry or discard them.
     ///
-    /// See [`Cache`] for the blocking behavior of try methods.
+    /// Returns `Err((key, value))` on shard lock contention and `Ok(())` once
+    /// the insertion is attempted, including when the value is rejected at admission.
+    ///
+    /// See [`insert`](Self::insert) for pending loads and [`Cache`] for blocking behavior.
     pub fn try_insert(&self, key: Key, value: Val) -> Result<(), (Key, Val)> {
         let mut lcs = Default::default();
         self.try_insert_with_lifecycle(key, value, &mut lcs)
@@ -516,6 +525,8 @@ impl<
 
     /// Inserts an item in the cache with key `key`, recording any evicted items into the
     /// given lifecycle request state.
+    ///
+    /// See [`insert`](Self::insert) for the effect on pending loads.
     ///
     /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
     /// The same `&mut lcs` can be threaded through multiple operations to batch the
@@ -534,9 +545,8 @@ impl<
 
     /// Attempts to insert an item in the cache with key `key` without waiting for the shard lock.
     /// Records evicted items in the given lifecycle request state.
-    /// Returns `Ok(())` if the item was inserted, or `Err((key, value))` if the shard lock
-    /// could not be acquired without blocking. Lock contention is the only failure mode:
-    /// the inputs are returned so the caller can retry or discard them.
+    ///
+    /// See [`try_insert`](Self::try_insert) for the result and behavior on pending loads.
     ///
     /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
     /// The same `&mut lcs` can be threaded through multiple operations to batch the
