@@ -13,6 +13,34 @@ pub use shuttle::*;
 // because we're not relying on any OnceLock blocking behavior.
 pub use std::sync::OnceLock;
 
+#[cfg(all(feature = "parking_lot", not(feature = "shuttle")))]
+pub(crate) use parking_lot::Mutex;
+
+#[cfg(any(not(feature = "parking_lot"), feature = "shuttle"))]
+#[derive(Debug)]
+pub(crate) struct Mutex<T>(sync::Mutex<T>);
+
+#[cfg(any(not(feature = "parking_lot"), feature = "shuttle"))]
+impl<T> Mutex<T> {
+    pub(crate) const fn new(value: T) -> Self {
+        Self(sync::Mutex::new(value))
+    }
+
+    #[inline]
+    pub(crate) fn lock(&self) -> sync::MutexGuard<'_, T> {
+        self.0.lock().unwrap()
+    }
+
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(crate) fn try_lock(&self) -> Option<sync::MutexGuard<'_, T>> {
+        match self.0.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(sync::TryLockError::WouldBlock) => None,
+            Err(sync::TryLockError::Poisoned(err)) => panic!("{err}"),
+        }
+    }
+}
+
 #[cfg(feature = "shuttle")]
 pub mod rw_lock {
     use std::ops::{Deref, DerefMut};

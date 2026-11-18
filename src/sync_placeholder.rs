@@ -18,7 +18,7 @@ use crate::{
             atomic::{AtomicBool, Ordering},
             Arc,
         },
-        thread, OnceLock,
+        thread, Mutex, OnceLock,
     },
     Equivalent, Lifecycle, Weighter,
 };
@@ -36,7 +36,7 @@ impl<Val> PlaceholderId<Val> for NonZeroU64 {
     }
 
     fn invalidate(shared: &Self::Shared, wakes: &mut Self::WakeBatch) {
-        let mut waiters = shared.waiters.write();
+        let mut waiters = shared.waiters.lock();
         if shared.value.get().is_none() {
             unsafe { shared.value.set(None).unwrap_unchecked() };
             waiters.iter().for_each(Waiter::mark_notified);
@@ -68,7 +68,7 @@ pub struct Placeholder<Val> {
     location: PlaceholderLocation<NonZeroU64>,
     // Registration holds the shard lock. Terminal writers set the outcome and
     // mark and detach waiters while holding this lock.
-    waiters: RwLock<Vec<Waiter>>,
+    waiters: Mutex<Vec<Waiter>>,
     // Unset: loading or handoff. None: retry. Some(value): published.
     value: OnceLock<Option<Val>>,
 }
@@ -102,8 +102,6 @@ struct Waiter {
 // SAFETY: Cancellation unregisters under the waiter lock. Detached records
 // access only their owned wake handles after notification flags are marked.
 unsafe impl Send for Waiter {}
-
-unsafe impl Sync for Waiter {}
 
 #[derive(Debug)]
 enum Wake {
@@ -226,12 +224,12 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
                 Arc::new(Placeholder {
                     location: *shared,
                     value: OnceLock::new(),
-                    waiters: RwLock::new(Vec::new()),
+                    waiters: Mutex::new(Vec::new()),
                 })
             })
             .clone();
         debug_assert!(shared.value.get().is_none());
-        shared.waiters.write().push(waiter);
+        shared.waiters.lock().push(waiter);
         shared
     }
 }
@@ -338,7 +336,7 @@ impl<
         shared: Arc<Placeholder<Val>>,
         notified: &AtomicBool,
     ) -> JoinResult<'a, Key, Val, We, B, L> {
-        let mut waiters = shared.waiters.write();
+        let mut waiters = shared.waiters.lock();
         if !notified.load(Ordering::Acquire) {
             remove_waiter(&mut waiters, notified);
             return JoinResult::Timeout;
@@ -389,7 +387,7 @@ impl<
         // The shard lock serializes cloning and publication with invalidation.
         let shared_value = value.clone();
         let waiters = {
-            let mut waiters = shared.waiters.write();
+            let mut waiters = shared.waiters.lock();
             assert!(shared.value.set(Some(shared_value)).is_ok());
             self.location = None;
             // A wake can panic or cancel another waiter after this lock is released.
@@ -412,7 +410,7 @@ impl<Key, Val, We, B, L> PlaceholderGuard<'_, Key, Val, We, B, L> {
         let wake = shard_guard
             .shared_placeholder(&location)
             .and_then(|shared| {
-                let mut waiters = shared.waiters.write();
+                let mut waiters = shared.waiters.lock();
                 debug_assert!(shared.value.get().is_none());
                 waiters.pop().map(|waiter| {
                     waiter.mark_notified();
@@ -500,7 +498,7 @@ impl<Q: ?Sized, Key, Val, We, B, L> JoinFuture<'_, '_, Q, Key, Val, We, B, L> {
         else {
             unsafe { unreachable_unchecked() }
         };
-        let mut waiters = shared.waiters.write();
+        let mut waiters = shared.waiters.lock();
         if shared.value.get().is_none() {
             if self.notified.load(Ordering::Acquire) {
                 // The selected waiter passes abandoned ownership onward when cancelled.
@@ -583,7 +581,7 @@ impl<
                     // Waker clones and drops can call user code.
                     let next_waker = new_waker.clone();
                     let next_wake = Wake::Task(next_waker.clone());
-                    let mut waiters = shared.waiters.write();
+                    let mut waiters = shared.waiters.lock();
                     // Re-check after acquiring the lock — a concurrent insert
                     // may have drained the waiters list in the meantime.
                     if !this.notified.load(Ordering::Acquire) {
@@ -705,7 +703,7 @@ mod lazy_tests {
     impl Drop for CheckWakerDrop {
         fn drop(&mut self) {
             self.lock_available
-                .store(self.shared.waiters.try_write().is_some(), Ordering::Relaxed);
+                .store(self.shared.waiters.try_lock().is_some(), Ordering::Relaxed);
         }
     }
 
@@ -821,7 +819,7 @@ mod lazy_tests {
                 "invalidation holds shard lock"
             );
             assert!(
-                self.shared.waiters.try_write().is_some(),
+                self.shared.waiters.try_lock().is_some(),
                 "invalidation holds waiter lock"
             );
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -882,7 +880,7 @@ mod lazy_tests {
             if shard
                 .read()
                 .shared_placeholder(&location)
-                .is_some_and(|shared| !shared.waiters.read().is_empty())
+                .is_some_and(|shared| !shared.waiters.lock().is_empty())
             {
                 return;
             }
