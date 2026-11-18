@@ -528,25 +528,26 @@ impl<
     where
         F: Fn(&Key, &Val) -> bool,
     {
-        let retained_tokens = self
-            .map
-            .iter()
-            .filter_map(|&idx| match self.entries.get(idx) {
-                Some((entry, _idx)) => match entry {
-                    Entry::Resident(r) => {
-                        if !f(&r.key, &r.value) {
-                            let hash = self.hash(&r.key);
-                            Some((idx, hash))
-                        } else {
-                            None
+        if self.len() == 0 {
+            return;
+        }
+
+        let mut continuation = None;
+        loop {
+            let candidate =
+                self.entries
+                    .iter_from(continuation)
+                    .find_map(|(idx, entry)| match entry {
+                        Entry::Resident(r) if !f(&r.key, &r.value) => {
+                            Some((idx, self.hash(&r.key)))
                         }
-                    }
-                    Entry::Placeholder(_) | Entry::Ghost(_) => None,
-                },
-                None => None,
-            })
-            .collect::<Vec<_>>();
-        for (idx, hash) in retained_tokens {
+                        _ => None,
+                    });
+            let Some((idx, hash)) = candidate else {
+                break;
+            };
+            // The continuation is a slab position and stays valid after removal.
+            continuation = Some(idx);
             self.remove_internal(hash, idx);
         }
     }
