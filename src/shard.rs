@@ -528,6 +528,10 @@ impl<
     where
         F: Fn(&Key, &Val) -> bool,
     {
+        if self.len() == 0 {
+            return;
+        }
+
         let mut continuation = None;
         loop {
             let candidate =
