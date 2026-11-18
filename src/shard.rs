@@ -22,8 +22,10 @@ const MAX_F: u16 = 2;
 pub trait PlaceholderId<Val>: Copy + Eq {
     type Shared;
     type Context: Default;
+    type WakeBatch;
 
     fn new(context: &mut Self::Context) -> Self;
+    fn invalidate(shared: &Self::Shared, wakes: &mut Self::WakeBatch);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -337,12 +339,12 @@ impl<Key, Val, We, B, L, Id: PlaceholderId<Val>> CacheShard<Key, Val, We, B, L, 
         self.misses.load(atomic::Ordering::Relaxed)
     }
 
-    pub fn clear(&mut self, invalidate: &mut dyn FnMut(&Id::Shared)) {
+    pub fn clear(&mut self, wakes: &mut Id::WakeBatch) {
         // Mark notifications before dropping keys from the draining entries.
         for entry in self.entries.iter() {
             if let Entry::Placeholder(p) = entry {
                 if let Some(shared) = p.shared.as_ref() {
-                    invalidate(shared);
+                    Id::invalidate(shared, wakes);
                 }
             }
         }
@@ -734,12 +736,7 @@ impl<
         self.peek_token_mut(idx)
     }
 
-    pub fn remove<Q>(
-        &mut self,
-        hash: u64,
-        key: &Q,
-        invalidate: &mut dyn FnMut(&Id::Shared),
-    ) -> Option<(Key, Val)>
+    pub fn remove<Q>(&mut self, hash: u64, key: &Q, wakes: &mut Id::WakeBatch) -> Option<(Key, Val)>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
@@ -748,7 +745,7 @@ impl<
         let idx = self.search(hash, key)?;
         if let Some((Entry::Placeholder(p), _)) = self.entries.get(idx) {
             if let Some(shared) = p.shared.as_ref() {
-                invalidate(shared);
+                Id::invalidate(shared, wakes);
             }
         }
         self.remove_internal(hash, idx)
@@ -957,7 +954,7 @@ impl<
         (key, value): (Key, Val),
         weight: u64,
         strategy: InsertStrategy,
-        invalidate: &mut dyn FnMut(&Id::Shared),
+        wakes: &mut Id::WakeBatch,
     ) -> Result<(), (Key, Val)> {
         // caller already handled overweight items, but it could have been pinned
         let (entry, _) = self.entries.get_mut(idx).unwrap();
@@ -983,7 +980,7 @@ impl<
             }
             Entry::Placeholder(ph) => {
                 if let Some(shared) = ph.shared.as_ref() {
-                    invalidate(shared);
+                    Id::invalidate(shared, wakes);
                 }
                 referenced = 1;
                 enter_state = ph.hot;
@@ -1170,7 +1167,7 @@ impl<
         key: Key,
         mut value: Val,
         strategy: InsertStrategy,
-        invalidate: &mut dyn FnMut(&Id::Shared),
+        wakes: &mut Id::WakeBatch,
     ) -> Result<(), (Key, Val)> {
         let mut weight = self.weighter.weight(&key, &value);
         // don't admit if it won't fit within the budget
@@ -1184,7 +1181,7 @@ impl<
         }
 
         if let Some(idx) = self.search(hash, &key) {
-            return self.insert_existing(lcs, idx, (key, value), weight, strategy, invalidate);
+            return self.insert_existing(lcs, idx, (key, value), weight, strategy, wakes);
         } else if matches!(strategy, InsertStrategy::Replace { .. }) {
             return Err((key, value));
         }

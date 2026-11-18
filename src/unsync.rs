@@ -200,7 +200,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        self.shard.remove(self.shard.hash(key), key, &mut |_| {})
+        self.shard.remove(self.shard.hash(key), key, &mut ())
     }
 
     /// Remove an item from the cache whose key is `key` if `f(&value)` returns `true` for that entry.
@@ -248,7 +248,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             key,
             value,
             InsertStrategy::Replace { soft },
-            &mut |_| {},
+            &mut (),
         )?;
         Ok(())
     }
@@ -376,7 +376,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             key,
             value,
             InsertStrategy::Insert,
-            &mut |_| {},
+            &mut (),
         );
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
@@ -384,7 +384,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
 
     /// Clear all items from the cache
     pub fn clear(&mut self) {
-        self.shard.clear(&mut |_| {});
+        self.shard.clear(&mut ());
     }
 
     /// Iterator for the items in the cache
@@ -527,8 +527,11 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L> std::ops::DerefMut for RefMut<'_, K
 impl<Val> shard::PlaceholderId<Val> for () {
     type Shared = std::convert::Infallible;
     type Context = ();
+    type WakeBatch = ();
 
     fn new(_: &mut ()) {}
+
+    fn invalidate(_: &Self::Shared, _: &mut Self::WakeBatch) {}
 }
 
 #[cfg(test)]

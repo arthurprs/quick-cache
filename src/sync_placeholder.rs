@@ -26,6 +26,7 @@ use crate::{
 impl<Val> PlaceholderId<Val> for NonZeroU64 {
     type Shared = Arc<Placeholder<Val>>;
     type Context = u64;
+    type WakeBatch = WakeBatch;
 
     fn new(context: &mut Self::Context) -> Self {
         *context = context
@@ -33,25 +34,25 @@ impl<Val> PlaceholderId<Val> for NonZeroU64 {
             .expect("placeholder identity exhausted");
         NonZeroU64::new(*context).unwrap()
     }
-}
 
-#[derive(Default)]
-pub(crate) struct WakeBatch(Vec<Waiter>);
-
-impl WakeBatch {
-    pub(crate) fn invalidate<Val>(&mut self, shared: &Arc<Placeholder<Val>>) {
+    fn invalidate(shared: &Self::Shared, wakes: &mut Self::WakeBatch) {
         let mut waiters = shared.waiters.write();
         if shared.value.get().is_none() {
             unsafe { shared.value.set(None).unwrap_unchecked() };
             waiters.iter().for_each(Waiter::mark_notified);
-            if self.0.is_empty() {
-                self.0 = mem::take(&mut *waiters);
+            if wakes.0.is_empty() {
+                wakes.0 = mem::take(&mut *waiters);
             } else {
-                self.0.append(&mut *waiters);
+                wakes.0.append(&mut *waiters);
             }
         }
     }
+}
 
+#[derive(Default)]
+pub struct WakeBatch(Vec<Waiter>);
+
+impl WakeBatch {
     pub(crate) fn wake(self) {
         for waiter in self.0 {
             waiter.wake.wake();
@@ -664,7 +665,7 @@ mod lazy_tests {
 
     fn clear<V>(shard: &TestShard<V>) {
         let mut wakes = WakeBatch::default();
-        shard.write().clear(&mut |shared| wakes.invalidate(shared));
+        shard.write().clear(&mut wakes);
         wakes.wake();
     }
 
@@ -870,7 +871,7 @@ mod lazy_tests {
             let next = {
                 let mut wakes = WakeBatch::default();
                 let mut locked = shard.write();
-                locked.remove(hash(0), &0, &mut |shared| wakes.invalidate(shared));
+                locked.remove(hash(0), &0, &mut wakes);
                 let (location, is_new) = locked.get_or_placeholder(hash(0), &0).unwrap_err();
                 assert!(is_new);
                 let next = PlaceholderGuard::start_loading(&shard, location);

@@ -405,9 +405,7 @@ impl<
     {
         let (shard, hash) = self.shard_for(key).unwrap();
         let mut wakes = WakeBatch::default();
-        let result = shard
-            .write()
-            .remove(hash, key, &mut |shared| wakes.invalidate(shared));
+        let result = shard.write().remove(hash, key, &mut wakes);
         wakes.wake();
         result
     }
@@ -427,7 +425,7 @@ impl<
 
         let mut wakes = WakeBatch::default();
         let result = match shard.try_write() {
-            Some(mut guard) => Ok(guard.remove(hash, key, &mut |shared| wakes.invalidate(shared))),
+            Some(mut guard) => Ok(guard.remove(hash, key, &mut wakes)),
             None => Err(LockContention),
         };
         wakes.wake();
@@ -481,7 +479,7 @@ impl<
             key,
             value,
             InsertStrategy::Replace { soft },
-            &mut |_| {},
+            &mut WakeBatch::default(),
         )?;
         Ok(())
     }
@@ -524,14 +522,10 @@ impl<
     pub fn insert_with_lifecycle(&self, key: Key, value: Val, lcs: &mut L::RequestState) {
         let (shard, hash) = self.shard_for(&key).unwrap();
         let mut wakes = WakeBatch::default();
-        let result = shard.write().insert(
-            lcs,
-            hash,
-            key,
-            value,
-            InsertStrategy::Insert,
-            &mut |shared| wakes.invalidate(shared),
-        );
+        let result =
+            shard
+                .write()
+                .insert(lcs, hash, key, value, InsertStrategy::Insert, &mut wakes);
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
         wakes.wake();
@@ -559,14 +553,8 @@ impl<
         let mut wakes = WakeBatch::default();
         let result = match shard.try_write() {
             Some(mut shard) => {
-                let result = shard.insert(
-                    lcs,
-                    hash,
-                    key,
-                    value,
-                    InsertStrategy::Insert,
-                    &mut |shared| wakes.invalidate(shared),
-                );
+                let result =
+                    shard.insert(lcs, hash, key, value, InsertStrategy::Insert, &mut wakes);
                 // result cannot err with the Insert strategy
                 debug_assert!(result.is_ok());
                 Ok(())
@@ -581,7 +569,7 @@ impl<
     pub fn clear(&self) {
         for s in self.shards.iter() {
             let mut wakes = WakeBatch::default();
-            s.write().clear(&mut |shared| wakes.invalidate(shared));
+            s.write().clear(&mut wakes);
             wakes.wake();
         }
     }
