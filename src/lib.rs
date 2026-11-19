@@ -105,7 +105,7 @@ pub use equivalent::Equivalent;
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests;
 
-pub use options::{Options, OptionsBuilder};
+pub use options::{Error as OptionsError, Options, OptionsBuilder};
 
 #[cfg(feature = "custom-hasher")]
 type DefaultHasherImpl = foldhash::quality::RandomState;
