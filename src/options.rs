@@ -73,11 +73,10 @@ impl OptionsBuilder {
     /// roughly equivalent to `weight_capacity / average item weight`.
     /// An estimation within one or even two orders of magnitude of the real value is often good enough.
     ///
-    /// This sets the ghost history size and helps choose the number of sync cache shards.
-    /// By default, the cache sizes ghost history from resident entries. The sync cache uses the
-    /// weight capacity as its item estimate for shard sizing. A heavy entry can exceed its
-    /// shard's admission limit even when it fits the total weight budget. Supply an item
-    /// estimate or use fewer [`shards`](Self::shards) if this happens.
+    /// The sync cache uses this estimate to choose its shard count. It uses the weight capacity
+    /// by default. A heavy entry can exceed its shard's admission limit even when it fits the
+    /// total weight budget. Supply an item estimate or use fewer [`shards`](Self::shards) if this
+    /// happens.
     #[inline]
     pub fn estimated_items_capacity(&mut self, estimated_items_capacity: usize) -> &mut Self {
         self.estimated_items_capacity = Some(estimated_items_capacity);
@@ -111,9 +110,9 @@ impl OptionsBuilder {
     /// store only the key's hash. When an insertion matches a ghost entry,
     /// the cache admits the item as "hot".
     ///
-    /// The percentage applies to the estimated item capacity, when supplied. Otherwise, the cache
-    /// samples the resident count on the first ghost addition, every 255 ghost additions after
-    /// that, and on capacity changes.
+    /// The percentage applies to the resident count. The cache samples on the first ghost
+    /// addition, every 255 ghost additions after that, and on capacity changes.
+    /// Set to `0.0` to disable ghost history.
     ///
     /// Defaults to: `0.5` (50%).
     #[inline]

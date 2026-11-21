@@ -160,15 +160,11 @@ impl<
             shard_items_cap = estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
         }
         let shard_weight_cap = weight_capacity.saturating_add(num_shards - 1) / num_shards;
-        let shard_items_cap = options
-            .estimated_items_capacity
-            .map(|_| shard_items_cap as usize);
         let shards = (0..num_shards)
             .map(|_| {
                 RwLock::new(CacheShard::new(
                     options.hot_allocation,
                     options.ghost_allocation,
-                    shard_items_cap,
                     shard_weight_cap,
                     weighter.clone(),
                     hash_builder.clone(),
@@ -1062,11 +1058,11 @@ mod tests {
         assert!(options.build().is_err());
         options.shards(64).weight_capacity(1024);
         let inferred = unit_cache(&options);
-        let explicit = unit_cache(options.estimated_items_capacity(1024));
-        for cache in [inferred, explicit] {
-            assert_eq!(cache.shards.len(), 32);
-            assert_eq!(cache.capacity(), 1024);
-        }
+        let explicit = unit_cache(options.estimated_items_capacity(128));
+        assert_eq!(inferred.shards.len(), 32);
+        assert_eq!(explicit.shards.len(), 4);
+        assert_eq!(inferred.capacity(), explicit.capacity());
+        assert_eq!(explicit.capacity(), 1024);
         assert_eq!(
             unit_cache(OptionsBuilder::new().shards(64).weight_capacity(0))
                 .shards

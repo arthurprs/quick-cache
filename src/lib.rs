@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn test_change_get_mut_change_weight() {
-        let mut cache = unsync::Cache::with_weighter(100, 100_000, StringWeighter);
+        let mut cache = unsync::Cache::with_weighter(100_000, StringWeighter);
         cache.insert(1, "1".to_string());
         assert_eq!(cache.get(&1).unwrap(), "1");
         assert_eq!(cache.weight(), 1);

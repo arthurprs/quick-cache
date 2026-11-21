@@ -154,7 +154,7 @@ pub struct CacheShard<Key, Val, We, B, L, Id: PlaceholderId<Val>> {
     num_cold: usize,
     num_non_resident: usize,
     capacity_non_resident: usize,
-    adaptive_ghost_allocation: Option<f64>,
+    ghost_allocation: f64,
     ghosts_until_sample: u8,
     #[cfg(feature = "stats")]
     hits: AtomicU64,
@@ -187,7 +187,7 @@ where
             num_cold: self.num_cold,
             num_non_resident: self.num_non_resident,
             capacity_non_resident: self.capacity_non_resident,
-            adaptive_ghost_allocation: self.adaptive_ghost_allocation,
+            ghost_allocation: self.ghost_allocation,
             ghosts_until_sample: self.ghosts_until_sample,
             #[cfg(feature = "stats")]
             hits: self.hits.load(atomic::Ordering::Relaxed).into(),
@@ -367,10 +367,8 @@ impl<Key, Val, We, B, L, Id: PlaceholderId<Val>> CacheShard<Key, Val, We, B, L, 
         self.num_hot = 0;
         self.num_cold = 0;
         self.num_non_resident = 0;
-        if self.adaptive_ghost_allocation.is_some() {
-            self.capacity_non_resident = 0;
-            self.ghosts_until_sample = 1;
-        }
+        self.capacity_non_resident = 0;
+        self.ghosts_until_sample = u8::from(self.ghost_allocation > 0.0);
         self.weight_hot = 0;
         self.weight_cold = 0;
         self.map.clear();
@@ -412,7 +410,6 @@ impl<
     pub fn new(
         hot_allocation: f64,
         ghost_allocation: f64,
-        estimated_items_capacity: Option<usize>,
         weight_capacity: u64,
         weighter: We,
         hash_builder: B,
@@ -422,11 +419,6 @@ impl<
         // can truncate to 0 for small capacities, which would reject all inserts as overweight.
         let weight_target_hot = ((weight_capacity as f64 * hot_allocation) as u64)
             .clamp(weight_capacity.min(1), weight_capacity);
-        let capacity_non_resident =
-            (estimated_items_capacity.unwrap_or_default() as f64 * ghost_allocation) as usize;
-        let adaptive_ghost_allocation = (estimated_items_capacity.is_none()
-            && ghost_allocation > 0.0)
-            .then_some(ghost_allocation);
         Self {
             hash_builder,
             map: HashTable::with_capacity(0),
@@ -440,9 +432,9 @@ impl<
             cold_head: None,
             hot_head: None,
             ghost_head: None,
-            capacity_non_resident,
-            adaptive_ghost_allocation,
-            ghosts_until_sample: u8::from(adaptive_ghost_allocation.is_some()),
+            capacity_non_resident: 0,
+            ghost_allocation,
+            ghosts_until_sample: u8::from(ghost_allocation > 0.0),
             weight_target_hot,
             num_hot: 0,
             num_cold: 0,
@@ -522,8 +514,14 @@ impl<
     /// Reserver additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&mut self, additional: usize) {
-        // Reserve extra slots for ghost history up to the current ghost limit.
-        let additional = additional.saturating_add(additional.min(self.capacity_non_resident));
+        let additional = if self.weight_capacity == 0 {
+            additional
+        } else {
+            let projected_len = self.len().saturating_add(additional);
+            let projected_ghost_limit = (projected_len as f64 * self.ghost_allocation) as usize;
+            let ghost_limit = self.capacity_non_resident.max(projected_ghost_limit);
+            additional.saturating_add(additional.min(ghost_limit))
+        };
         self.entries.reserve(additional);
         self.map.reserve(additional, |&idx| {
             let (entry, _) = self.entries.get(idx).unwrap();
@@ -883,7 +881,6 @@ impl<
             self.ghost_head = Some(self.entries.link(idx, self.ghost_head));
             self.num_cold -= 1;
             self.num_non_resident += 1;
-            // Fixed sizing leaves the countdown at zero when it reaches the sampler.
             self.ghosts_until_sample = self.ghosts_until_sample.wrapping_sub(1);
             if self.ghosts_until_sample == 0 {
                 self.update_ghost_capacity();
@@ -1461,11 +1458,6 @@ impl<
         let hot_ratio = if self.weight_capacity == 0 {
             DEFAULT_HOT_ALLOCATION
         } else {
-            if self.adaptive_ghost_allocation.is_none() {
-                let old_new_ratio = new_weight_capacity as f64 / self.weight_capacity as f64;
-                self.capacity_non_resident =
-                    (self.capacity_non_resident as f64 * old_new_ratio) as usize;
-            }
             self.weight_target_hot as f64 / self.weight_capacity as f64
         };
         self.weight_capacity = new_weight_capacity;
@@ -1473,27 +1465,25 @@ impl<
             .clamp(new_weight_capacity.min(1), new_weight_capacity);
 
         while self.weight() > self.weight_capacity && self.advance_cold(lcs) {}
-        if self.adaptive_ghost_allocation.is_some() {
+        if self.ghost_allocation > 0.0 {
             self.update_ghost_capacity();
             if self.num_non_resident == 0 {
                 self.ghosts_until_sample = 1;
             }
-        } else {
-            self.trim_ghosts();
         }
     }
 
     #[cold]
     fn update_ghost_capacity(&mut self) {
-        let Some(allocation) = self.adaptive_ghost_allocation else {
+        self.ghosts_until_sample = GHOST_SAMPLE_INTERVAL;
+        if self.ghost_allocation == 0.0 {
             return;
-        };
+        }
         self.capacity_non_resident = if self.weight_capacity == 0 {
             0
         } else {
-            (self.len() as f64 * allocation) as usize
+            (self.len() as f64 * self.ghost_allocation) as usize
         };
-        self.ghosts_until_sample = GHOST_SAMPLE_INTERVAL;
         self.trim_ghosts();
     }
 
@@ -1620,7 +1610,6 @@ mod tests {
         let mut shard = CacheShard::<_, _, _, _, _, ()>::new(
             0.5,
             0.5,
-            None,
             8,
             ValueWeighter,
             crate::DefaultHashBuilder::default(),
@@ -1686,12 +1675,42 @@ mod tests {
         assert_eq!(shard.ghosts_until_sample, GHOST_SAMPLE_INTERVAL);
     }
 
+    #[test]
+    fn reserve_projects_ghost_headroom() {
+        for (residents, weight_capacity, allocation, ghosts) in [
+            (0, 200, 0.5, 64),
+            (40, 200, 0.5, 84),
+            (40, 200, 0.0, 0),
+            (0, 0, 0.5, 0),
+        ] {
+            let mut shard = CacheShard::<_, _, _, _, _, ()>::new(
+                DEFAULT_HOT_ALLOCATION,
+                allocation,
+                weight_capacity,
+                crate::UnitWeighter,
+                crate::DefaultHashBuilder::default(),
+                crate::unsync::DefaultLifecycle::default(),
+            );
+            for key in 0..residents {
+                let hash = shard.hash(&key);
+                shard
+                    .insert(&mut (), hash, key, key, InsertStrategy::Insert, &mut ())
+                    .unwrap();
+            }
+
+            shard.reserve(128);
+            assert!(shard.entries.capacity() >= residents + 128 + ghosts);
+            assert!(shard.map.capacity() >= residents + 128 + ghosts);
+            if ghosts == 0 {
+                assert!(shard.entries.capacity() < residents + 128 + 64);
+            }
+            assert_eq!(shard.capacity_non_resident, 0);
+        }
+    }
+
     #[cfg(not(feature = "stats"))]
     #[test]
     fn reserve_caps_ghost_headroom() {
-        // A small reserve on a shard with a large estimated capacity (hence a
-        // large `capacity_non_resident`) must not over-allocate the slab by the
-        // full ghost cap; the ghost headroom is bounded by `additional`.
         let mut shard = CacheShard::<
             u64,
             u64,
@@ -1701,22 +1720,15 @@ mod tests {
             std::num::NonZeroU64,
         >::new(
             DEFAULT_HOT_ALLOCATION,
-            0.5,             // ghost_allocation -> capacity_non_resident = 500_000
-            Some(1_000_000), // estimated_items_capacity
-            u64::MAX,        // weight_capacity
+            0.5,
+            u64::MAX,
             crate::UnitWeighter,
             crate::DefaultHashBuilder::default(),
             crate::sync::DefaultLifecycle::default(),
         );
-        assert_eq!(shard.capacity_non_resident, 500_000);
+        shard.capacity_non_resident = 500_000;
         shard.reserve(100);
-        // Ghost headroom is min(additional, capacity_non_resident) = 100, so the
-        // slab reserves ~200 entries, not 500_000+.
-        assert!(
-            shard.entries.capacity() < 1_000,
-            "slab over-allocated: {}",
-            shard.entries.capacity()
-        );
+        assert!((200..1_000).contains(&shard.entries.capacity()));
     }
 
     #[test]
