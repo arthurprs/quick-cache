@@ -115,3 +115,68 @@ fn panicking_wake_keeps_other_waiter_safe_to_repoll() {
     ));
     assert_eq!(cache.peek(&0), Some(7));
 }
+
+// parking_lot allows the lock probe after unwind releases the guard.
+#[cfg(feature = "parking_lot")]
+#[test]
+fn publication_panic_drops_shared_value_after_unlock() {
+    use std::{
+        panic::{catch_unwind, AssertUnwindSafe},
+        pin::pin,
+        sync::{OnceLock, Weak},
+    };
+
+    #[derive(Clone)]
+    struct PanicWeight;
+
+    type TestCache = Cache<u64, Arc<DropProbe>, PanicWeight>;
+
+    struct DropProbe {
+        cache: Weak<TestCache>,
+        unlocked: Arc<OnceLock<bool>>,
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            let cache = self.cache.upgrade().unwrap();
+            let _ = self.unlocked.set(cache.try_contains_key(&0).is_ok());
+        }
+    }
+
+    impl quick_cache::Weighter<u64, Arc<DropProbe>> for PanicWeight {
+        fn weight(&self, _: &u64, _: &Arc<DropProbe>) -> u64 {
+            panic!("weigher panic")
+        }
+    }
+
+    let cache = Arc::new(TestCache::with(
+        16,
+        16,
+        PanicWeight,
+        Default::default(),
+        Default::default(),
+    ));
+    let GuardResult::Guard(owner) = cache.get_value_or_guard(&0, None) else {
+        panic!("expected owner");
+    };
+    {
+        let mut waiter = pin!(cache.get_value_or_guard_async(&0));
+        assert!(waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+    }
+
+    let unlocked = Arc::new(OnceLock::new());
+    let value = Arc::new(DropProbe {
+        cache: Arc::downgrade(&cache),
+        unlocked: unlocked.clone(),
+    });
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _ = owner.insert(value);
+    }))
+    .unwrap_err();
+
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"weigher panic"));
+    assert_eq!(unlocked.get(), Some(&true));
+}

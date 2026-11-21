@@ -378,11 +378,14 @@ impl<
         lcs: &mut L::RequestState,
     ) -> Result<(), Val> {
         let location = self.location.unwrap();
+        // On unwind, the shared Arc drops after the shard guard.
+        let _published;
         let mut shard = self.shard.write();
-        let Some(shared) = shard.shared_placeholder(&location).cloned() else {
+        let Some(slot @ Some(_)) = shard.shared_placeholder_slot(&location) else {
             self.location = None;
             return shard.replace_placeholder(lcs, &location, false, value);
         };
+        let shared = slot.as_ref().unwrap();
         // The shard lock serializes cloning and publication with invalidation.
         let shared_value = value.clone();
         let waiters = {
@@ -393,6 +396,7 @@ impl<
             waiters.iter().for_each(Waiter::mark_notified);
             mem::take(&mut *waiters)
         };
+        _published = slot.take();
         let result = shard.replace_placeholder(lcs, &location, !waiters.is_empty(), value);
         drop(shard);
         for waiter in waiters {
