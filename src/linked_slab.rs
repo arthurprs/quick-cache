@@ -149,20 +149,13 @@ impl<T> LinkedSlab<T> {
         let (prev, next) = if let Some(target_head) = target_head {
             let head = &mut self.entries[(target_head.get() - 1) as usize];
             debug_assert!(head.item.is_some());
-            if head.prev == target_head {
-                // existing list has a single item linking to itself
-                head.prev = idx;
-                head.next = idx;
-                (target_head, target_head)
-            } else {
-                let before_head_idx = head.prev;
-                head.prev = idx;
-                let before_head = &mut self.entries[(before_head_idx.get() - 1) as usize];
-                debug_assert!(before_head.item.is_some());
-                debug_assert_eq!(before_head.next, target_head);
-                before_head.next = idx;
-                (before_head_idx, target_head)
-            }
+            let before_head_idx = head.prev;
+            head.prev = idx;
+            let before_head = &mut self.entries[(before_head_idx.get() - 1) as usize];
+            debug_assert!(before_head.item.is_some());
+            debug_assert_eq!(before_head.next, target_head);
+            before_head.next = idx;
+            (before_head_idx, target_head)
         } else {
             (idx, idx)
         };
