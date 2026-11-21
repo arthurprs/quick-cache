@@ -75,8 +75,9 @@ impl OptionsBuilder {
     ///
     /// This sets the ghost history size and helps choose the number of sync cache shards.
     /// By default, the cache sizes ghost history from resident entries. The sync cache uses the
-    /// weight capacity as its item estimate for shard sizing, so heavier items can leave
-    /// fewer entries per shard.
+    /// weight capacity as its item estimate for shard sizing. A heavy entry can exceed its
+    /// shard's admission limit even when it fits the total weight budget. Supply an item
+    /// estimate or use fewer [`shards`](Self::shards) if this happens.
     #[inline]
     pub fn estimated_items_capacity(&mut self, estimated_items_capacity: usize) -> &mut Self {
         self.estimated_items_capacity = Some(estimated_items_capacity);

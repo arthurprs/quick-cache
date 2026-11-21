@@ -1474,9 +1474,8 @@ impl<
 
         while self.weight() > self.weight_capacity && self.advance_cold(lcs) {}
         if self.adaptive_ghost_allocation.is_some() {
-            let sample_next_ghost = self.num_non_resident == 0 || self.len() == 0;
             self.update_ghost_capacity();
-            if sample_next_ghost {
+            if self.num_non_resident == 0 {
                 self.ghosts_until_sample = 1;
             }
         } else {
@@ -1662,6 +1661,20 @@ mod tests {
             insert(&mut shard, key, 1);
         }
         assert_eq!(shard.capacity_non_resident, 4);
+        assert_eq!(shard.num_non_resident, 1);
+
+        for key in [0, 1] {
+            let hash = shard.hash(&key);
+            assert_eq!(shard.remove(hash, &key, &mut ()), Some((key, 0)));
+        }
+        shard.set_capacity(1, &mut ());
+        assert_eq!(shard.len(), 1);
+        assert_eq!(shard.num_non_resident, 0);
+
+        // Weightless entries allow the resident count to grow at the same capacity.
+        for (key, weight) in [(0, 0), (1, 0), (29, 1), (30, 1)] {
+            insert(&mut shard, key, weight);
+        }
         assert_eq!(shard.num_non_resident, 1);
 
         drop(shard.drain());
