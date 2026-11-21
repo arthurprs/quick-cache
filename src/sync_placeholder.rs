@@ -379,7 +379,7 @@ impl<
     ) -> Result<(), Val> {
         let location = self.location.unwrap();
         // On unwind, the shared Arc drops after the shard guard.
-        let published;
+        let _published;
         let mut shard = self.shard.write();
         let Some(slot @ Some(_)) = shard.shared_placeholder_slot(&location) else {
             self.location = None;
@@ -396,13 +396,12 @@ impl<
             waiters.iter().for_each(Waiter::mark_notified);
             mem::take(&mut *waiters)
         };
-        published = slot.take();
+        _published = slot.take();
         let result = shard.replace_placeholder(lcs, &location, !waiters.is_empty(), value);
         drop(shard);
         for waiter in waiters {
             waiter.wake.wake();
         }
-        drop(published);
         result
     }
 }
