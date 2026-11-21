@@ -56,6 +56,8 @@
 //!
 //! The `1.5` value in the formula above results from `1 + G`, where `G` is the configured ghost allocation specified
 //! in [`OptionsBuilder::ghost_allocation`], which is `0.5` by default.
+//! The estimate assumes the ghost limit reflects the current resident count. A cache without
+//! an item capacity estimate samples resident counts periodically as it adds ghosts.
 //!
 //! # Hasher
 //!

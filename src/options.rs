@@ -7,7 +7,7 @@ pub struct Options {
     pub(crate) shards: usize,
     pub(crate) hot_allocation: f64,
     pub(crate) ghost_allocation: f64,
-    pub(crate) estimated_items_capacity: usize,
+    pub(crate) estimated_items_capacity: Option<usize>,
     pub(crate) weight_capacity: u64,
 }
 
@@ -20,7 +20,6 @@ pub struct Options {
 ///
 /// Cache::<String, String>::with_options(
 ///   OptionsBuilder::new()
-///     .estimated_items_capacity(10000)
 ///     .weight_capacity(10000)
 ///     .build()
 ///     .unwrap(),
@@ -74,8 +73,11 @@ impl OptionsBuilder {
     /// roughly equivalent to `weight_capacity / average item weight`.
     /// An estimation within one or even two orders of magnitude of the real value is often good enough.
     ///
-    /// This is used to estimate the maximum number of shards (to avoid shards that are too small)
-    /// and to estimate space required to track items recently evicted from the cache.
+    /// This sets the ghost history size and helps choose the number of sync cache shards.
+    /// By default, the cache sizes ghost history from resident entries. The sync cache uses the
+    /// weight capacity as its item estimate for shard sizing. A heavy entry can exceed its
+    /// shard's admission limit even when it fits the total weight budget. Supply an item
+    /// estimate or use fewer [`shards`](Self::shards) if this happens.
     #[inline]
     pub fn estimated_items_capacity(&mut self, estimated_items_capacity: usize) -> &mut Self {
         self.estimated_items_capacity = Some(estimated_items_capacity);
@@ -105,11 +107,13 @@ impl OptionsBuilder {
         self
     }
 
-    /// The cache optimistically tracks recently seen keys that are not resident
-    /// in the cache. These keys are called ghost keys. If a ghost key is seen
-    /// again items it will be admitted as "hot".
-    /// The ghost allocation percentage defines how much space to allocate for
-    /// the ghost keys considering the `estimated_items_capacity`.
+    /// The cache tracks recently seen non-resident keys as ghost entries, which
+    /// store only the key's hash. When an insertion matches a ghost entry,
+    /// the cache admits the item as "hot".
+    ///
+    /// The percentage applies to the estimated item capacity, when supplied. Otherwise, the cache
+    /// samples the resident count on the first ghost addition, every 255 ghost additions after
+    /// that, and on capacity changes.
     ///
     /// Defaults to: `0.5` (50%).
     #[inline]
@@ -131,14 +135,11 @@ impl OptionsBuilder {
         let weight_capacity = self
             .weight_capacity
             .ok_or(Error("weight_capacity is not set"))?;
-        let estimated_items_capacity = self
-            .estimated_items_capacity
-            .ok_or(Error("estimated_items_capacity is not set"))?;
         Ok(Options {
             shards,
             hot_allocation,
             ghost_allocation,
-            estimated_items_capacity,
+            estimated_items_capacity: self.estimated_items_capacity,
             weight_capacity,
         })
     }

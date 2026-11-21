@@ -124,6 +124,8 @@ enum Entry<Key, Val, Id, Shared = std::convert::Infallible> {
     Ghost(u64),
 }
 
+const GHOST_SAMPLE_INTERVAL: u8 = 255;
+
 /// A bounded cache using a modified CLOCK-PRO eviction policy.
 /// The implementation allows some parallelism as gets don't require exclusive access.
 /// Any evicted items are returned so they can be dropped by the caller, outside the locks.
@@ -152,6 +154,8 @@ pub struct CacheShard<Key, Val, We, B, L, Id: PlaceholderId<Val>> {
     num_cold: usize,
     num_non_resident: usize,
     capacity_non_resident: usize,
+    adaptive_ghost_allocation: Option<f64>,
+    ghosts_until_sample: u8,
     #[cfg(feature = "stats")]
     hits: AtomicU64,
     #[cfg(feature = "stats")]
@@ -183,6 +187,8 @@ where
             num_cold: self.num_cold,
             num_non_resident: self.num_non_resident,
             capacity_non_resident: self.capacity_non_resident,
+            adaptive_ghost_allocation: self.adaptive_ghost_allocation,
+            ghosts_until_sample: self.ghosts_until_sample,
             #[cfg(feature = "stats")]
             hits: self.hits.load(atomic::Ordering::Relaxed).into(),
             #[cfg(feature = "stats")]
@@ -361,6 +367,10 @@ impl<Key, Val, We, B, L, Id: PlaceholderId<Val>> CacheShard<Key, Val, We, B, L, 
         self.num_hot = 0;
         self.num_cold = 0;
         self.num_non_resident = 0;
+        if self.adaptive_ghost_allocation.is_some() {
+            self.capacity_non_resident = 0;
+            self.ghosts_until_sample = 1;
+        }
         self.weight_hot = 0;
         self.weight_cold = 0;
         self.map.clear();
@@ -402,7 +412,7 @@ impl<
     pub fn new(
         hot_allocation: f64,
         ghost_allocation: f64,
-        estimated_items_capacity: usize,
+        estimated_items_capacity: Option<usize>,
         weight_capacity: u64,
         weighter: We,
         hash_builder: B,
@@ -412,7 +422,11 @@ impl<
         // can truncate to 0 for small capacities, which would reject all inserts as overweight.
         let weight_target_hot = ((weight_capacity as f64 * hot_allocation) as u64)
             .clamp(weight_capacity.min(1), weight_capacity);
-        let capacity_non_resident = (estimated_items_capacity as f64 * ghost_allocation) as usize;
+        let capacity_non_resident =
+            (estimated_items_capacity.unwrap_or_default() as f64 * ghost_allocation) as usize;
+        let adaptive_ghost_allocation = (estimated_items_capacity.is_none()
+            && ghost_allocation > 0.0)
+            .then_some(ghost_allocation);
         Self {
             hash_builder,
             map: HashTable::with_capacity(0),
@@ -427,6 +441,8 @@ impl<
             hot_head: None,
             ghost_head: None,
             capacity_non_resident,
+            adaptive_ghost_allocation,
+            ghosts_until_sample: u8::from(adaptive_ghost_allocation.is_some()),
             weight_target_hot,
             num_hot: 0,
             num_cold: 0,
@@ -506,10 +522,7 @@ impl<
     /// Reserver additional space for `additional` entries.
     /// Note that this is counted in entries, and is not weighted.
     pub fn reserve(&mut self, additional: usize) {
-        // Ghost (non-resident) entries also occupy slab/map slots. The number
-        // produced by `additional` insertions is bounded both by `additional`
-        // (each insert evicts at most one resident into a ghost) and by the
-        // shard-wide cap `capacity_non_resident`, so reserve for the smaller.
+        // Reserve extra slots for ghost history up to the current ghost limit.
         let additional = additional.saturating_add(additional.min(self.capacity_non_resident));
         self.entries.reserve(additional);
         self.map.reserve(additional, |&idx| {
@@ -871,7 +884,11 @@ impl<
             self.ghost_head = Some(self.entries.link(idx, self.ghost_head));
             self.num_cold -= 1;
             self.num_non_resident += 1;
-            // evict from ghost if oversized
+            // Fixed sizing leaves the countdown at zero when it reaches the sampler.
+            self.ghosts_until_sample = self.ghosts_until_sample.wrapping_sub(1);
+            if self.ghosts_until_sample == 0 {
+                self.update_ghost_capacity();
+            }
             if self.num_non_resident > self.capacity_non_resident {
                 self.advance_ghost();
             }
@@ -1059,7 +1076,7 @@ impl<
             }
         }
 
-        while self.weight_hot + self.weight_cold > self.weight_capacity && self.advance_cold(lcs) {}
+        while self.weight() > self.weight_capacity && self.advance_cold(lcs) {}
         Ok(())
     }
 
@@ -1143,9 +1160,7 @@ impl<
 
         if weight != 0 {
             *list_head = Some(self.entries.link(placeholder.idx, *list_head));
-            while self.weight_hot + self.weight_cold > self.weight_capacity
-                && self.advance_cold(lcs)
-            {}
+            while self.weight() > self.weight_capacity && self.advance_cold(lcs) {}
         }
 
         Ok(())
@@ -1194,9 +1209,7 @@ impl<
         // cache is filling up, admit as hot if possible
         let enter_hot = self.weight_hot + weight <= self.weight_target_hot;
         // pre-evict instead of post-evict, this gives sightly more priority to the new item
-        while self.weight_hot + self.weight_cold + weight > self.weight_capacity
-            && self.advance_cold(lcs)
-        {}
+        while self.weight() + weight > self.weight_capacity && self.advance_cold(lcs) {}
 
         let (state, list_head) = if enter_hot {
             self.num_hot += 1;
@@ -1446,26 +1459,47 @@ impl<
     }
 
     pub fn set_capacity(&mut self, new_weight_capacity: u64, lcs: &mut L::RequestState) {
-        // Guard against division by zero when old capacity is 0 (produces inf/NaN ratios)
-        if self.weight_capacity == 0 {
-            self.weight_capacity = new_weight_capacity;
-            self.weight_target_hot = ((new_weight_capacity as f64 * DEFAULT_HOT_ALLOCATION) as u64)
-                .clamp(new_weight_capacity.min(1), new_weight_capacity);
-            // capacity_non_resident stays 0 since we have no basis to estimate
+        let hot_ratio = if self.weight_capacity == 0 {
+            DEFAULT_HOT_ALLOCATION
         } else {
-            let old_new_ratio = new_weight_capacity as f64 / self.weight_capacity as f64;
-            let hot_ratio = self.weight_target_hot as f64 / self.weight_capacity as f64;
+            if self.adaptive_ghost_allocation.is_none() {
+                let old_new_ratio = new_weight_capacity as f64 / self.weight_capacity as f64;
+                self.capacity_non_resident =
+                    (self.capacity_non_resident as f64 * old_new_ratio) as usize;
+            }
+            self.weight_target_hot as f64 / self.weight_capacity as f64
+        };
+        self.weight_capacity = new_weight_capacity;
+        self.weight_target_hot = ((new_weight_capacity as f64 * hot_ratio) as u64)
+            .clamp(new_weight_capacity.min(1), new_weight_capacity);
 
-            self.weight_capacity = new_weight_capacity;
-            self.weight_target_hot = ((new_weight_capacity as f64 * hot_ratio) as u64)
-                .clamp(new_weight_capacity.min(1), new_weight_capacity);
-            self.capacity_non_resident =
-                (self.capacity_non_resident as f64 * old_new_ratio) as usize;
+        while self.weight() > self.weight_capacity && self.advance_cold(lcs) {}
+        if self.adaptive_ghost_allocation.is_some() {
+            self.update_ghost_capacity();
+            if self.num_non_resident == 0 {
+                self.ghosts_until_sample = 1;
+            }
+        } else {
+            self.trim_ghosts();
         }
+    }
 
-        // Evict items if we're over the new capacity
-        while self.weight_hot + self.weight_cold > self.weight_capacity && self.advance_cold(lcs) {}
-        // Trim ghost entries if needed
+    #[cold]
+    fn update_ghost_capacity(&mut self) {
+        let Some(allocation) = self.adaptive_ghost_allocation else {
+            return;
+        };
+        self.capacity_non_resident = if self.weight_capacity == 0 {
+            0
+        } else {
+            (self.len() as f64 * allocation) as usize
+        };
+        self.ghosts_until_sample = GHOST_SAMPLE_INTERVAL;
+        self.trim_ghosts();
+    }
+
+    #[inline]
+    fn trim_ghosts(&mut self) {
         while self.num_non_resident > self.capacity_non_resident {
             self.advance_ghost();
         }
@@ -1575,6 +1609,84 @@ mod tests {
         assert_eq!(cache.peek(&0), Some(&0));
     }
 
+    #[test]
+    fn learned_ghost_capacity() {
+        struct ValueWeighter;
+        impl Weighter<u64, u64> for ValueWeighter {
+            fn weight(&self, _key: &u64, value: &u64) -> u64 {
+                *value
+            }
+        }
+
+        let mut shard = CacheShard::<_, _, _, _, _, ()>::new(
+            0.5,
+            0.5,
+            None,
+            8,
+            ValueWeighter,
+            crate::DefaultHashBuilder::default(),
+            crate::unsync::DefaultLifecycle::default(),
+        );
+        let insert = |shard: &mut CacheShard<_, _, _, _, _, ()>, key, value| {
+            let hash = shard.hash(&key);
+            shard
+                .insert(&mut (), hash, key, value, InsertStrategy::Insert, &mut ())
+                .unwrap();
+        };
+
+        for key in 0..=10 {
+            insert(&mut shard, key, u64::from(key >= 2));
+        }
+        assert_eq!(shard.capacity_non_resident, 4);
+        assert_eq!(shard.num_non_resident, 1);
+
+        insert(&mut shard, 11, 4);
+        assert_eq!(shard.num_non_resident, 4);
+
+        // Stop after 254 ghost additions since the first sample.
+        for key in 12..262 {
+            insert(&mut shard, key, 4);
+        }
+        assert_eq!(shard.capacity_non_resident, 4);
+        insert(&mut shard, 262, 4);
+        assert_eq!(shard.capacity_non_resident, 3);
+        assert_eq!(shard.num_non_resident, 3);
+
+        shard.set_capacity(0, &mut ());
+        assert_eq!(shard.len(), 2);
+        assert_eq!(shard.capacity_non_resident, 0);
+        assert_eq!(shard.num_non_resident, 0);
+
+        shard.set_capacity(8, &mut ());
+        for key in 20..=28 {
+            insert(&mut shard, key, 1);
+        }
+        assert_eq!(shard.capacity_non_resident, 4);
+        assert_eq!(shard.num_non_resident, 1);
+
+        for key in [0, 1] {
+            let hash = shard.hash(&key);
+            assert_eq!(shard.remove(hash, &key, &mut ()), Some((key, 0)));
+        }
+        shard.set_capacity(1, &mut ());
+        assert_eq!(shard.len(), 1);
+        assert_eq!(shard.num_non_resident, 0);
+
+        // Weightless entries allow the resident count to grow at the same capacity.
+        for (key, weight) in [(0, 0), (1, 0), (29, 1), (30, 1)] {
+            insert(&mut shard, key, weight);
+        }
+        assert_eq!(shard.num_non_resident, 1);
+
+        drop(shard.drain());
+        assert_eq!(shard.ghosts_until_sample, 1);
+        shard.set_capacity(1, &mut ());
+        for key in 0..3 {
+            insert(&mut shard, key, 1);
+        }
+        assert_eq!(shard.ghosts_until_sample, GHOST_SAMPLE_INTERVAL);
+    }
+
     #[cfg(not(feature = "stats"))]
     #[test]
     fn reserve_caps_ghost_headroom() {
@@ -1590,9 +1702,9 @@ mod tests {
             std::num::NonZeroU64,
         >::new(
             DEFAULT_HOT_ALLOCATION,
-            0.5,       // ghost_allocation -> capacity_non_resident = 500_000
-            1_000_000, // estimated_items_capacity
-            u64::MAX,  // weight_capacity
+            0.5,             // ghost_allocation -> capacity_non_resident = 500_000
+            Some(1_000_000), // estimated_items_capacity
+            u64::MAX,        // weight_capacity
             crate::UnitWeighter,
             crate::DefaultHashBuilder::default(),
             crate::sync::DefaultLifecycle::default(),
