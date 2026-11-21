@@ -581,26 +581,33 @@ impl<
     }
 
     #[inline]
-    fn search<Q>(&self, hash: u64, k: &Q) -> Option<Token>
+    fn search<Q>(&self, hash: u64, key: &Q) -> Option<Token>
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
         let mut ghost = None;
         self.map
-            .find(hash, |&idx| {
-                let (entry, _) = self.entries.get(idx).unwrap();
-                match entry {
-                    Entry::Resident(Resident { key, .. })
-                    | Entry::Placeholder(Placeholder { key, .. }) => k.equivalent(key),
-                    Entry::Ghost(ghost_hash) if *ghost_hash == hash => {
-                        ghost = Some(idx);
-                        false
-                    }
-                    _ => false,
-                }
-            })
+            .find(hash, Self::match_key(&self.entries, hash, key, &mut ghost))
             .copied()
             .or(ghost)
+    }
+
+    #[inline]
+    fn match_key<'a, Q: Equivalent<Key> + ?Sized>(
+        entries: &'a LinkedSlab<Entry<Key, Val, Id, Id::Shared>>,
+        hash: u64,
+        key: &'a Q,
+        ghost: &'a mut Option<Token>,
+    ) -> impl FnMut(&Token) -> bool + 'a {
+        move |&idx| match entries.get(idx).unwrap().0 {
+            Entry::Resident(Resident { key: stored, .. })
+            | Entry::Placeholder(Placeholder { key: stored, .. }) => key.equivalent(stored),
+            Entry::Ghost(ghost_hash) if *ghost_hash == hash => {
+                *ghost = Some(idx);
+                false
+            }
+            _ => false,
+        }
     }
 
     #[inline]
@@ -754,15 +761,21 @@ impl<
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        // This could be search_resident, but calling `remove` is likely a
-        // strong indication that this input isn't important.
-        let idx = self.search(hash, key)?;
+        let mut ghost = None;
+        let Ok(entry) = self
+            .map
+            .find_entry(hash, Self::match_key(&self.entries, hash, key, &mut ghost))
+        else {
+            return self.remove_internal(hash, ghost?);
+        };
+        let idx = *entry.get();
         if let Some((Entry::Placeholder(p), _)) = self.entries.get(idx) {
             if let Some(shared) = p.shared.as_ref() {
                 Id::invalidate(shared, wakes);
             }
         }
-        self.remove_internal(hash, idx)
+        entry.remove();
+        self.remove_slot(idx)
     }
 
     pub fn remove_if<Q, F>(&mut self, hash: u64, key: &Q, f: F) -> Option<(Key, Val)>
@@ -802,6 +815,10 @@ impl<
 
     fn remove_internal(&mut self, hash: u64, idx: Token) -> Option<(Key, Val)> {
         self.map_remove(hash, idx);
+        self.remove_slot(idx)
+    }
+
+    fn remove_slot(&mut self, idx: Token) -> Option<(Key, Val)> {
         let mut result = None;
         let (entry, next) = self.entries.remove(idx).unwrap();
         let list_head = match entry {
