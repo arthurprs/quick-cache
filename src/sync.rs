@@ -107,8 +107,8 @@ impl<
     > Cache<Key, Val, We, B, L>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
-    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
-    /// roughly equivalent to `weight_capacity / average item weight`.
+    ///
+    /// See [`OptionsBuilder::estimated_items_capacity`] for the minimum shard size check.
     pub fn with(
         estimated_items_capacity: usize,
         weight_capacity: u64,
@@ -280,8 +280,7 @@ impl<
         self.shards.get(shard_idx).map(|s| (s, hash))
     }
 
-    /// Reserve additional space for `additional` entries.
-    /// Note that this is counted in entries, and is not weighted.
+    /// Reserves space for `additional` items. The cache may reserve extra slots for ghost history.
     pub fn reserve(&self, additional: usize) {
         let additional_per_shard =
             additional.saturating_add(self.shards.len() - 1) / self.shards.len();

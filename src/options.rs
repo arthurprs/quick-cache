@@ -60,9 +60,8 @@ impl OptionsBuilder {
     ///
     /// Defaults to: `number of detected cores * 4`
     ///
-    /// Note that this number isn't enforced and will be adjusted internally to
-    /// the next power of two. Too small shards (depending on estimated capacity)
-    /// may also cause the actual shard count to decrease.
+    /// The cache rounds this count up to a power of two, then applies the
+    /// [minimum shard size check](Self::estimated_items_capacity).
     #[inline]
     pub fn shards(&mut self, shards: usize) -> &mut Self {
         self.shards = Some(shards);
@@ -73,10 +72,13 @@ impl OptionsBuilder {
     /// roughly equivalent to `weight_capacity / average item weight`.
     /// An estimation within one or even two orders of magnitude of the real value is often good enough.
     ///
-    /// The sync cache uses this estimate to choose its shard count. It uses the weight capacity
-    /// by default. A heavy entry can exceed its shard's admission limit even when it fits the
-    /// total weight budget. Supply an item estimate or use fewer [`shards`](Self::shards) if this
-    /// happens.
+    /// The sync cache uses `estimated_items_capacity` to avoid creating more shards than its
+    /// estimated item count can support. It halves the shard count until it estimates at least
+    /// 32 items per shard or reaches one shard. If you omit the estimate, it uses
+    /// `weight_capacity` as the estimated item count for this calculation.
+    ///
+    /// A heavy entry can exceed its shard's admission limit even when it fits the total weight
+    /// budget. Supply an item estimate or use fewer [`shards`](Self::shards) if this happens.
     #[inline]
     pub fn estimated_items_capacity(&mut self, estimated_items_capacity: usize) -> &mut Self {
         self.estimated_items_capacity = Some(estimated_items_capacity);

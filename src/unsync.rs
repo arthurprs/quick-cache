@@ -117,8 +117,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.hits()
     }
 
-    /// Reserve additional space for `additional` entries.
-    /// Note that this is counted in entries, and is not weighted.
+    /// Reserves space for `additional` items. The cache may reserve extra slots for ghost history.
     pub fn reserve(&mut self, additional: usize) {
         self.shard.reserve(additional);
     }
