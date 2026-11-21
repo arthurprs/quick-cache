@@ -368,7 +368,7 @@ impl<Key, Val, We, B, L, Id: PlaceholderId<Val>> CacheShard<Key, Val, We, B, L, 
         self.num_cold = 0;
         self.num_non_resident = 0;
         self.capacity_non_resident = 0;
-        self.ghosts_until_sample = u8::from(self.ghost_allocation > 0.0);
+        self.ghosts_until_sample = 1;
         self.weight_hot = 0;
         self.weight_cold = 0;
         self.map.clear();
@@ -434,7 +434,7 @@ impl<
             ghost_head: None,
             capacity_non_resident: 0,
             ghost_allocation,
-            ghosts_until_sample: u8::from(ghost_allocation > 0.0),
+            ghosts_until_sample: 1,
             weight_target_hot,
             num_hot: 0,
             num_cold: 0,
@@ -881,7 +881,7 @@ impl<
             self.ghost_head = Some(self.entries.link(idx, self.ghost_head));
             self.num_cold -= 1;
             self.num_non_resident += 1;
-            self.ghosts_until_sample = self.ghosts_until_sample.wrapping_sub(1);
+            self.ghosts_until_sample -= 1;
             if self.ghosts_until_sample == 0 {
                 self.update_ghost_capacity();
             }
@@ -1484,11 +1484,6 @@ impl<
         } else {
             (self.len() as f64 * self.ghost_allocation) as usize
         };
-        self.trim_ghosts();
-    }
-
-    #[inline]
-    fn trim_ghosts(&mut self) {
         while self.num_non_resident > self.capacity_non_resident {
             self.advance_ghost();
         }
