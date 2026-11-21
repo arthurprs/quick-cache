@@ -106,9 +106,10 @@ impl OptionsBuilder {
         self
     }
 
-    /// The cache optimistically tracks recently seen keys that are not resident
-    /// in the cache. These keys are called ghost keys. If a ghost key is seen
-    /// again, the item is admitted as "hot".
+    /// The cache tracks recently seen non-resident keys as ghost entries, which
+    /// store only the key's hash. When an insertion matches a ghost entry,
+    /// the cache admits the item as "hot".
+    ///
     /// The percentage applies to the estimated item capacity, when supplied. Otherwise, the cache
     /// samples the resident count on the first ghost addition, every 255 ghost additions after
     /// that, and on capacity changes.
