@@ -107,8 +107,8 @@ impl<
     > Cache<Key, Val, We, B, L>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
-    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
-    /// roughly equivalent to `weight_capacity / average item weight`.
+    ///
+    /// See [`OptionsBuilder::estimated_items_capacity`] for the minimum shard size check.
     pub fn with(
         estimated_items_capacity: usize,
         weight_capacity: u64,
@@ -148,24 +148,23 @@ impl<
     /// ```
     pub fn with_options(options: Options, weighter: We, hash_builder: B, lifecycle: L) -> Self {
         let mut num_shards = options.shards.next_power_of_two() as u64;
-        let estimated_items_capacity = options.estimated_items_capacity as u64;
         let weight_capacity = options.weight_capacity;
+        let estimated_items_capacity = options
+            .estimated_items_capacity
+            .map_or(weight_capacity, |items| items as u64);
         let mut shard_items_cap =
             estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
-        let mut shard_weight_cap =
-            options.weight_capacity.saturating_add(num_shards - 1) / num_shards;
-        // try to make each shard hold at least 32 items
+        // Try to make each shard hold at least 32 items.
         while shard_items_cap < 32 && num_shards > 1 {
             num_shards /= 2;
             shard_items_cap = estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
-            shard_weight_cap = weight_capacity.saturating_add(num_shards - 1) / num_shards;
         }
+        let shard_weight_cap = weight_capacity.saturating_add(num_shards - 1) / num_shards;
         let shards = (0..num_shards)
             .map(|_| {
                 RwLock::new(CacheShard::new(
                     options.hot_allocation,
                     options.ghost_allocation,
-                    shard_items_cap as usize,
                     shard_weight_cap,
                     weighter.clone(),
                     hash_builder.clone(),
@@ -281,8 +280,7 @@ impl<
         self.shards.get(shard_idx).map(|s| (s, hash))
     }
 
-    /// Reserve additional space for `additional` entries.
-    /// Note that this is counted in entries, and is not weighted.
+    /// Reserves space for `additional` items. The cache may reserve extra slots for ghost history.
     pub fn reserve(&self, additional: usize) {
         let additional_per_shard =
             additional.saturating_add(self.shards.len() - 1) / self.shards.len();
@@ -1045,6 +1043,33 @@ mod tests {
         sync::{Arc, Barrier},
         thread,
     };
+
+    #[test]
+    fn weight_only_shard_sizing() {
+        let unit_cache = |options: &OptionsBuilder| {
+            Cache::<u64, u64>::with_options(
+                options.build().unwrap(),
+                UnitWeighter,
+                Default::default(),
+                Default::default(),
+            )
+        };
+        let mut options = OptionsBuilder::new();
+        assert!(options.build().is_err());
+        options.shards(64).weight_capacity(1024);
+        let inferred = unit_cache(&options);
+        let explicit = unit_cache(options.estimated_items_capacity(128));
+        assert_eq!(inferred.shards.len(), 32);
+        assert_eq!(explicit.shards.len(), 4);
+        assert_eq!(inferred.capacity(), explicit.capacity());
+        assert_eq!(explicit.capacity(), 1024);
+        assert_eq!(
+            unit_cache(OptionsBuilder::new().shards(64).weight_capacity(0))
+                .shards
+                .len(),
+            1
+        );
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)]

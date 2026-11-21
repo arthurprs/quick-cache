@@ -634,7 +634,6 @@ mod lazy_tests {
             0.9,
             0.5,
             1024,
-            1024,
             UnitWeighter,
             TestHasher::default(),
             DefaultLifecycle::default(),

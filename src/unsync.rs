@@ -21,7 +21,6 @@ impl<Key: Eq + Hash, Val> Cache<Key, Val> {
     /// Creates a new cache with holds up to `items_capacity` items (approximately).
     pub fn new(items_capacity: usize) -> Self {
         Self::with(
-            items_capacity,
             items_capacity as u64,
             Default::default(),
             Default::default(),
@@ -31,13 +30,8 @@ impl<Key: Eq + Hash, Val> Cache<Key, Val> {
 }
 
 impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>> Cache<Key, Val, We> {
-    pub fn with_weighter(
-        estimated_items_capacity: usize,
-        weight_capacity: u64,
-        weighter: We,
-    ) -> Self {
+    pub fn with_weighter(weight_capacity: u64, weighter: We) -> Self {
         Self::with(
-            estimated_items_capacity,
             weight_capacity,
             weighter,
             Default::default(),
@@ -50,18 +44,9 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     Cache<Key, Val, We, B, L>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
-    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
-    /// roughly equivalent to `weight_capacity / average item weight`.
-    pub fn with(
-        estimated_items_capacity: usize,
-        weight_capacity: u64,
-        weighter: We,
-        hash_builder: B,
-        lifecycle: L,
-    ) -> Self {
+    pub fn with(weight_capacity: u64, weighter: We, hash_builder: B, lifecycle: L) -> Self {
         Self::with_options(
             OptionsBuilder::new()
-                .estimated_items_capacity(estimated_items_capacity)
                 .weight_capacity(weight_capacity)
                 .build()
                 .unwrap(),
@@ -80,7 +65,6 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     ///
     /// Cache::<(String, u64), String>::with_options(
     ///   OptionsBuilder::new()
-    ///     .estimated_items_capacity(10000)
     ///     .weight_capacity(10000)
     ///     .build()
     ///     .unwrap(),
@@ -93,7 +77,6 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         let shard = CacheShard::new(
             options.hot_allocation,
             options.ghost_allocation,
-            options.estimated_items_capacity,
             options.weight_capacity,
             weighter,
             hash_builder,
@@ -134,8 +117,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.hits()
     }
 
-    /// Reserve additional space for `additional` entries.
-    /// Note that this is counted in entries, and is not weighted.
+    /// Reserves space for `additional` items. The cache may reserve extra slots for ghost history.
     pub fn reserve(&mut self, additional: usize) {
         self.shard.reserve(additional);
     }
@@ -549,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_zero_weights() {
-        let mut cache = Cache::with_weighter(100, 100, Weighter);
+        let mut cache = Cache::with_weighter(100, Weighter);
         cache.insert(0, 0);
         assert_eq!(cache.weight(), 0);
         for i in 1..100 {
@@ -607,6 +589,45 @@ mod tests {
         assert!(cache.len() <= 180);
         assert!(cache.weight() <= 200);
         cache.validate(false);
+    }
+
+    #[test]
+    fn ghost_budget_uses_resident_count() {
+        for (estimate, allocation, survivor) in [(8, 0.5, 0), (0, 1.0, 1), (8, 0.0, 0)] {
+            let options = OptionsBuilder::new()
+                .estimated_items_capacity(estimate)
+                .weight_capacity(2)
+                .ghost_allocation(allocation)
+                .build()
+                .unwrap();
+            let mut cache = Cache::with_options(
+                options,
+                UnitWeighter,
+                DefaultHashBuilder::default(),
+                DefaultLifecycle::default(),
+            );
+            for key in [0, 1, 2, 1, 3] {
+                cache.insert(key, key);
+            }
+            assert_eq!(cache.len(), 2);
+            assert_eq!(cache.peek(&3), Some(&3));
+            assert_eq!(
+                cache.peek(&survivor),
+                Some(&survivor),
+                "estimate={estimate}, allocation={allocation}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserve_counts_existing_ghosts() {
+        let mut cache = Cache::new(12);
+        for key in 0..17 {
+            cache.insert(key, key);
+        }
+        let map_bytes = cache.memory_used().map;
+        cache.reserve(7);
+        assert_eq!(cache.memory_used().map, map_bytes);
     }
 
     #[test]

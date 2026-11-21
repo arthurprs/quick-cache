@@ -56,6 +56,8 @@
 //!
 //! The `1.5` value in the formula above results from `1 + G`, where `G` is the configured ghost allocation specified
 //! in [`OptionsBuilder::ghost_allocation`], which is `0.5` by default.
+//! The estimate assumes the ghost limit reflects the current resident count. A cache without
+//! an item capacity estimate samples resident counts periodically as it adds ghosts.
 //!
 //! # Hasher
 //!
@@ -383,7 +385,7 @@ mod tests {
 
     #[test]
     fn test_change_get_mut_change_weight() {
-        let mut cache = unsync::Cache::with_weighter(100, 100_000, StringWeighter);
+        let mut cache = unsync::Cache::with_weighter(100_000, StringWeighter);
         cache.insert(1, "1".to_string());
         assert_eq!(cache.get(&1).unwrap(), "1");
         assert_eq!(cache.weight(), 1);
