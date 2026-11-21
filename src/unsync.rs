@@ -619,6 +619,17 @@ mod tests {
     }
 
     #[test]
+    fn reserve_counts_existing_ghosts() {
+        let mut cache = Cache::new(12);
+        for key in 0..17 {
+            cache.insert(key, key);
+        }
+        let map_bytes = cache.memory_used().map;
+        cache.reserve(7);
+        assert_eq!(cache.memory_used().map, map_bytes);
+    }
+
+    #[test]
     fn test_set_capacity_with_ghosts() {
         // Create a cache that will generate ghost entries
         let mut cache = Cache::new(50);

@@ -520,7 +520,8 @@ impl<
             let projected_len = self.len().saturating_add(additional);
             let projected_ghost_limit = (projected_len as f64 * self.ghost_allocation) as usize;
             let ghost_limit = self.capacity_non_resident.max(projected_ghost_limit);
-            additional.saturating_add(additional.min(ghost_limit))
+            let ghost_headroom = ghost_limit.saturating_sub(self.num_non_resident);
+            additional.saturating_add(additional.min(ghost_headroom))
         };
         self.entries.reserve(additional);
         self.map.reserve(additional, |&idx| {
