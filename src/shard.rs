@@ -950,17 +950,16 @@ impl<
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn advance_ghost(&mut self) {
         debug_assert_ne!(self.num_non_resident, 0);
         let idx = self.ghost_head.unwrap();
-        let (entry, _) = self.entries.get_mut(idx).unwrap();
-        let Entry::Ghost(hash) = *entry else {
+        let (entry, next) = self.entries.remove(idx).unwrap();
+        let Entry::Ghost(hash) = entry else {
             unsafe { unreachable_unchecked() };
         };
         self.num_non_resident -= 1;
         self.map_remove(hash, idx);
-        let (_, next) = self.entries.remove(idx).unwrap();
         self.ghost_head = next;
     }
 
