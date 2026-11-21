@@ -633,7 +633,7 @@ mod lazy_tests {
         RwLock::new(CacheShard::new(
             0.9,
             0.5,
-            1024,
+            Some(1024),
             1024,
             UnitWeighter,
             TestHasher::default(),

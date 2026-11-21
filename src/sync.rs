@@ -148,24 +148,27 @@ impl<
     /// ```
     pub fn with_options(options: Options, weighter: We, hash_builder: B, lifecycle: L) -> Self {
         let mut num_shards = options.shards.next_power_of_two() as u64;
-        let estimated_items_capacity = options.estimated_items_capacity as u64;
         let weight_capacity = options.weight_capacity;
+        let estimated_items_capacity = options
+            .estimated_items_capacity
+            .map_or(weight_capacity, |items| items as u64);
         let mut shard_items_cap =
             estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
-        let mut shard_weight_cap =
-            options.weight_capacity.saturating_add(num_shards - 1) / num_shards;
-        // try to make each shard hold at least 32 items
+        // Try to make each shard hold at least 32 items.
         while shard_items_cap < 32 && num_shards > 1 {
             num_shards /= 2;
             shard_items_cap = estimated_items_capacity.saturating_add(num_shards - 1) / num_shards;
-            shard_weight_cap = weight_capacity.saturating_add(num_shards - 1) / num_shards;
         }
+        let shard_weight_cap = weight_capacity.saturating_add(num_shards - 1) / num_shards;
+        let shard_items_cap = options
+            .estimated_items_capacity
+            .map(|_| shard_items_cap as usize);
         let shards = (0..num_shards)
             .map(|_| {
                 RwLock::new(CacheShard::new(
                     options.hot_allocation,
                     options.ghost_allocation,
-                    shard_items_cap as usize,
+                    shard_items_cap,
                     shard_weight_cap,
                     weighter.clone(),
                     hash_builder.clone(),
@@ -1044,6 +1047,33 @@ mod tests {
         sync::{Arc, Barrier},
         thread,
     };
+
+    #[test]
+    fn weight_only_shard_sizing() {
+        let unit_cache = |options: &OptionsBuilder| {
+            Cache::<u64, u64>::with_options(
+                options.build().unwrap(),
+                UnitWeighter,
+                Default::default(),
+                Default::default(),
+            )
+        };
+        let mut options = OptionsBuilder::new();
+        assert!(options.build().is_err());
+        options.shards(64).weight_capacity(1024);
+        let inferred = unit_cache(&options);
+        let explicit = unit_cache(options.estimated_items_capacity(1024));
+        for cache in [inferred, explicit] {
+            assert_eq!(cache.shards.len(), 32);
+            assert_eq!(cache.capacity(), 1024);
+        }
+        assert_eq!(
+            unit_cache(OptionsBuilder::new().shards(64).weight_capacity(0))
+                .shards
+                .len(),
+            1
+        );
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)]
