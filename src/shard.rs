@@ -619,8 +619,10 @@ impl<
         record_hit_mut!(self, resident);
 
         let old_weight = self.weighter.weight(&resident.key, &resident.value);
+        let value = &raw mut resident.value;
         Some(RefMut {
-            guard: WeightGuard {
+            value,
+            _guard: WeightGuard {
                 shard: self as *mut _,
                 idx,
                 old_weight,
@@ -642,8 +644,10 @@ impl<
     pub fn peek_token_mut(&mut self, token: Token) -> Option<RefMut<'_, Key, Val, We, B, L, Plh>> {
         if let Some((Entry::Resident(resident), _)) = self.entries.get_mut(token) {
             let old_weight = self.weighter.weight(&resident.key, &resident.value);
+            let value = &raw mut resident.value;
             Some(RefMut {
-                guard: WeightGuard {
+                value,
+                _guard: WeightGuard {
                     shard: self as *mut _,
                     idx: token,
                     old_weight,
@@ -1401,8 +1405,8 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
     for WeightGuard<Key, Val, We, B, L, Plh>
 {
     fn drop(&mut self) {
-        // SAFETY: shard pointer is valid — guard is created and dropped within
-        // entry_or_placeholder which holds &mut CacheShard.
+        // SAFETY: The caller keeps the slot resident and holds exclusive access
+        // to the shard until the weight guard drops.
         unsafe {
             let shard = &mut *self.shard;
             let (entry, _) = shard.entries.get_unchecked(self.idx);
@@ -1420,36 +1424,23 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> Drop
 /// Structure wrapping a mutable reference to a cached item.
 /// On drop, recomputes weight via the inner [`WeightGuard`].
 pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder> {
-    guard: WeightGuard<Key, Val, We, B, L, Plh>,
+    value: *mut Val,
+    _guard: WeightGuard<Key, Val, We, B, L, Plh>,
     _phantom: std::marker::PhantomData<&'cache mut CacheShard<Key, Val, We, B, L, Plh>>,
 }
 
 impl<Key, Val, We: Weighter<Key, Val>, B, L, Plh: SharedPlaceholder>
     RefMut<'_, Key, Val, We, B, L, Plh>
 {
-    pub(crate) fn pair(&self) -> (&Key, &Val) {
-        // SAFETY: RefMut is only constructed from a valid &mut CacheShard with a
-        // Resident entry at idx, and we hold exclusive access via the lifetime.
-        unsafe {
-            let shard = &*self.guard.shard;
-            let (entry, _) = shard.entries.get_unchecked(self.guard.idx);
-            let Entry::Resident(Resident { key, value, .. }) = entry else {
-                core::hint::unreachable_unchecked()
-            };
-            (key, value)
-        }
+    pub(crate) fn value(&self) -> &Val {
+        // SAFETY: The shard borrow keeps the resident in place until the guard drops.
+        unsafe { &*self.value }
     }
 
     pub(crate) fn value_mut(&mut self) -> &mut Val {
-        // SAFETY: same as pair(), plus we have &mut self so exclusive access is guaranteed.
-        unsafe {
-            let shard = &mut *self.guard.shard;
-            let (entry, _) = shard.entries.get_mut_unchecked(self.guard.idx);
-            let Entry::Resident(Resident { value, .. }) = entry else {
-                core::hint::unreachable_unchecked()
-            };
-            value
-        }
+        // SAFETY: The slot stays live as in value(), and the mutable guard borrow
+        // gives exclusive access to the value.
+        unsafe { &mut *self.value }
     }
 }
 

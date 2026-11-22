@@ -526,7 +526,7 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L> std::ops::Deref for RefMut<'_, Key,
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        self.0.pair().1
+        self.0.value()
     }
 }
 
