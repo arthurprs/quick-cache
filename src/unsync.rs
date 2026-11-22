@@ -263,29 +263,6 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.retain(f);
     }
 
-    fn get_or_insert_token<Q, E>(
-        &mut self,
-        key: &Q,
-        with: impl FnOnce() -> Result<Val, E>,
-    ) -> Result<Token, E>
-    where
-        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
-    {
-        match self.shard.get_or_placeholder(self.shard.hash(key), key) {
-            Ok((idx, _)) => Ok(idx),
-            Err((placeholder, _)) => {
-                let idx = placeholder.idx;
-                let guard = Guard {
-                    cache: self,
-                    placeholder,
-                    inserted: false,
-                };
-                guard.insert(with()?);
-                Ok(idx)
-            }
-        }
-    }
-
     /// Gets or inserts an item in the cache with key `key`.
     /// Returns a reference to the inserted `value` if it was admitted to the cache.
     ///
@@ -298,7 +275,23 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
-        let idx = self.get_or_insert_token(key, with)?;
+        let idx = match self.shard.get_or_placeholder(self.shard.hash(key), key) {
+            Ok((_, value)) => {
+                let value: *const Val = value;
+                // Safety: the returned reference is valid while the mutable cache borrow is held.
+                return Ok(Some(unsafe { &*value }));
+            }
+            Err((placeholder, _)) => {
+                let idx = placeholder.idx;
+                let guard = Guard {
+                    cache: self,
+                    placeholder,
+                    inserted: false,
+                };
+                guard.insert(with()?);
+                idx
+            }
+        };
         Ok(self.shard.peek_token(idx))
     }
 
@@ -314,7 +307,19 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
-        let idx = self.get_or_insert_token(key, with)?;
+        let idx = match self.shard.get_or_placeholder(self.shard.hash(key), key) {
+            Ok((idx, _)) => idx,
+            Err((placeholder, _)) => {
+                let idx = placeholder.idx;
+                let guard = Guard {
+                    cache: self,
+                    placeholder,
+                    inserted: false,
+                };
+                guard.insert(with()?);
+                idx
+            }
+        };
         Ok(self.shard.peek_token_mut(idx).map(RefMut))
     }
 
