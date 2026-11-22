@@ -123,6 +123,24 @@ impl OptionsBuilder {
     }
 
     /// Builds an `Options` struct which can be used in the `Cache::with_options` constructor.
+    ///
+    /// Returns [OptionsError](crate::OptionsError) if required capacities are missing.
+    ///
+    /// ```
+    /// use quick_cache::{Options, OptionsBuilder, OptionsError};
+    ///
+    /// fn options(capacity: u64) -> Result<Options, OptionsError> {
+    ///     OptionsBuilder::new()
+    ///         .estimated_items_capacity(10)
+    ///         .weight_capacity(capacity)
+    ///         .build()
+    /// }
+    ///
+    /// assert!(options(10).is_ok());
+    /// let error: OptionsError = OptionsBuilder::new().build().unwrap_err();
+    /// assert_eq!(error.to_string(), "weight_capacity is not set");
+    /// let _: &dyn std::error::Error = &error;
+    /// ```
     #[inline]
     pub fn build(&self) -> Result<Options, Error> {
         let shards = self.shards.unwrap_or_else(|| available_parallelism() * 4);
