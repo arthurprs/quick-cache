@@ -141,7 +141,8 @@ fn remove_waiter(waiters: &mut Vec<Waiter>, notified: *const AtomicBool) -> Wait
 /// which returns `Result<Val, PlaceholderGuard>` instead.
 #[derive(Debug)]
 pub enum GuardResult<'a, Key, Val, We, B, L> {
-    /// The value was found in the cache.
+    /// A resident value or the computed result of a load this lookup joined.
+    /// Waiters can receive the result even when the cache declines to admit it.
     Value(Val),
     /// The key was absent; use the guard to insert a value.
     Guard(PlaceholderGuard<'a, Key, Val, We, B, L>),
