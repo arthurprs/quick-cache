@@ -68,6 +68,39 @@ fn remove_wakes_waiters_to_retry_without_old_value() {
 }
 
 #[test]
+fn overweight_insert_invalidates_pending_load() {
+    #[derive(Clone)]
+    struct ValueWeight;
+
+    impl quick_cache::Weighter<u64, u64> for ValueWeight {
+        fn weight(&self, _: &u64, value: &u64) -> u64 {
+            *value
+        }
+    }
+
+    let cache = Cache::with_weighter(64, 64, ValueWeight);
+    let GuardResult::Guard(old) = cache.get_value_or_guard(&0, None) else {
+        panic!("expected the first load guard");
+    };
+    let wakes = Arc::new(Wakes::default());
+    let waker = Waker::from(wakes.clone());
+    let mut cx = Context::from_waker(&waker);
+    let mut waiter = pin!(cache.get_value_or_guard_async(&0));
+    assert!(waiter.as_mut().poll(&mut cx).is_pending());
+
+    cache.insert(0, 1000);
+
+    assert_eq!(old.insert(7), Err(7));
+    assert_eq!(cache.get(&0), None);
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    let Poll::Ready(Err(new)) = waiter.as_mut().poll(&mut cx) else {
+        panic!("expected the waiter to retry and get a new guard");
+    };
+    new.insert(9).unwrap();
+    assert_eq!(cache.get(&0), Some(9));
+}
+
+#[test]
 fn clear_multiple_pending_loads_wakes_every_waiter() {
     let cache = cache();
     let keys = [0, 1, 2, 3, 4, 5];

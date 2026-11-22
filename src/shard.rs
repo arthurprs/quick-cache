@@ -1224,7 +1224,7 @@ impl<
             weight = self.weighter.weight(&key, &value);
             // check again, it could have changed weight
             if weight > self.weight_target_hot {
-                return self.handle_insert_overweight(lcs, hash, key, value, strategy);
+                return self.handle_insert_overweight(lcs, hash, key, value, strategy, wakes);
             }
         }
 
@@ -1271,15 +1271,25 @@ impl<
         key: Key,
         value: Val,
         strategy: InsertStrategy,
+        wakes: &mut Id::WakeBatch,
     ) -> Result<(), (Key, Val)> {
-        // Make sure to remove any existing entry
-        if let Some((idx, resident)) = self.search_resident(hash, &key) {
-            let prev_state = resident.state;
-            if let Some((ek, ev)) = self.remove_internal(hash, idx) {
-                match prev_state {
-                    ResidentState::Hot => self.lifecycle.on_evict_hot(lcs, ek, ev),
-                    ResidentState::Cold => self.lifecycle.on_evict_cold(lcs, ek, ev),
+        if let Some(idx) = self.search(hash, &key) {
+            match self.entries.get(idx).unwrap().0 {
+                Entry::Resident(resident) => {
+                    let prev_state = resident.state;
+                    let (ek, ev) = self.remove_internal(hash, idx).unwrap();
+                    match prev_state {
+                        ResidentState::Hot => self.lifecycle.on_evict_hot(lcs, ek, ev),
+                        ResidentState::Cold => self.lifecycle.on_evict_cold(lcs, ek, ev),
+                    }
                 }
+                Entry::Placeholder(p) if matches!(strategy, InsertStrategy::Insert) => {
+                    if let Some(shared) = p.shared.as_ref() {
+                        Id::invalidate(shared, wakes);
+                    }
+                    self.remove_internal(hash, idx);
+                }
+                _ => {}
             }
         }
         if matches!(strategy, InsertStrategy::Replace { .. }) {

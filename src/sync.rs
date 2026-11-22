@@ -505,9 +505,8 @@ impl<
 
     /// Inserts an item in the cache with key `key`.
     ///
-    /// An admitted value invalidates any pending load for `key` and wakes its
-    /// waiters to retry the lookup. A value rejected at admission leaves the
-    /// pending load in place.
+    /// Invalidates any pending load for `key` and wakes its waiters to retry
+    /// the lookup, even when the value is rejected at admission.
     pub fn insert(&self, key: Key, value: Val) {
         let mut lcs = Default::default();
         self.insert_with_lifecycle(key, value, &mut lcs);
@@ -644,7 +643,7 @@ impl<
     /// If a load is pending, this call waits. If the guard is dropped without
     /// inserting, a waiter can take over the load.
     ///
-    /// [`remove`](Self::remove), [`clear`](Self::clear), and an admitted
+    /// [`remove`](Self::remove), [`clear`](Self::clear), and
     /// [`insert`](Self::insert) invalidate pending loads for affected keys.
     /// The loader can finish computing, but its guard returns `Err(value)`
     /// if it tries to insert after invalidation. Waiters wake and retry the lookup.
