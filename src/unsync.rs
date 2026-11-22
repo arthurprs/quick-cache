@@ -1,7 +1,6 @@
 use crate::{
-    linked_slab::Token,
     options::*,
-    shard::{self, CacheShard, InsertStrategy},
+    shard::{self, CacheShard, InsertStrategy, PlaceholderLocation},
     DefaultHashBuilder, Equivalent, Lifecycle, MemoryUsed, UnitWeighter, Weighter,
 };
 use std::hash::{BuildHasher, Hash};
@@ -15,14 +14,13 @@ pub struct Cache<
     B = DefaultHashBuilder,
     L = DefaultLifecycle<Key, Val>,
 > {
-    shard: CacheShard<Key, Val, We, B, L, SharedPlaceholder>,
+    shard: CacheShard<Key, Val, We, B, L, ()>,
 }
 
 impl<Key: Eq + Hash, Val> Cache<Key, Val> {
     /// Creates a new cache with holds up to `items_capacity` items (approximately).
     pub fn new(items_capacity: usize) -> Self {
         Self::with(
-            items_capacity,
             items_capacity as u64,
             Default::default(),
             Default::default(),
@@ -32,13 +30,8 @@ impl<Key: Eq + Hash, Val> Cache<Key, Val> {
 }
 
 impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>> Cache<Key, Val, We> {
-    pub fn with_weighter(
-        estimated_items_capacity: usize,
-        weight_capacity: u64,
-        weighter: We,
-    ) -> Self {
+    pub fn with_weighter(weight_capacity: u64, weighter: We) -> Self {
         Self::with(
-            estimated_items_capacity,
             weight_capacity,
             weighter,
             Default::default(),
@@ -51,18 +44,9 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     Cache<Key, Val, We, B, L>
 {
     /// Creates a new cache that can hold up to `weight_capacity` in weight.
-    /// `estimated_items_capacity` is the estimated number of items the cache is expected to hold,
-    /// roughly equivalent to `weight_capacity / average item weight`.
-    pub fn with(
-        estimated_items_capacity: usize,
-        weight_capacity: u64,
-        weighter: We,
-        hash_builder: B,
-        lifecycle: L,
-    ) -> Self {
+    pub fn with(weight_capacity: u64, weighter: We, hash_builder: B, lifecycle: L) -> Self {
         Self::with_options(
             OptionsBuilder::new()
-                .estimated_items_capacity(estimated_items_capacity)
                 .weight_capacity(weight_capacity)
                 .build()
                 .unwrap(),
@@ -81,7 +65,6 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     ///
     /// Cache::<(String, u64), String>::with_options(
     ///   OptionsBuilder::new()
-    ///     .estimated_items_capacity(10000)
     ///     .weight_capacity(10000)
     ///     .build()
     ///     .unwrap(),
@@ -94,7 +77,6 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         let shard = CacheShard::new(
             options.hot_allocation,
             options.ghost_allocation,
-            options.estimated_items_capacity,
             options.weight_capacity,
             weighter,
             hash_builder,
@@ -123,20 +105,19 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.capacity()
     }
 
-    /// Returns the number of misses
+    /// Returns the number of tracked misses. See [Statistics](crate#statistics).
     #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.shard.misses()
     }
 
-    /// Returns the number of hits
+    /// Returns the number of tracked hits. See [Statistics](crate#statistics).
     #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.shard.hits()
     }
 
-    /// Reserve additional space for `additional` entries.
-    /// Note that this is counted in entries, and is not weighted.
+    /// Reserves space for `additional` items. The cache may reserve extra slots for ghost history.
     pub fn reserve(&mut self, additional: usize) {
         self.shard.reserve(additional);
     }
@@ -201,7 +182,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     where
         Q: Hash + Equivalent<Key> + ?Sized,
     {
-        self.shard.remove(self.shard.hash(key), key)
+        self.shard.remove(self.shard.hash(key), key, &mut ())
     }
 
     /// Remove an item from the cache whose key is `key` if `f(&value)` returns `true` for that entry.
@@ -249,13 +230,15 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             key,
             value,
             InsertStrategy::Replace { soft },
+            &mut (),
         )?;
         Ok(())
     }
 
     /// Retains only the items specified by the predicate.
     /// In other words, remove all items for which `f(&key, &value)` returns `false`. The
-    /// elements are visited in arbitrary order.
+    /// elements are visited in arbitrary order. Items may be removed before all
+    /// predicate calls finish, including when a later call panics.
     pub fn retain<F>(&mut self, f: F)
     where
         F: Fn(&Key, &Val) -> bool,
@@ -285,8 +268,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
                 let idx = placeholder.idx;
                 let guard = Guard {
                     cache: self,
-                    placeholder,
-                    inserted: false,
+                    placeholder: Some(placeholder),
                 };
                 guard.insert(with()?);
                 idx
@@ -313,8 +295,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
                 let idx = placeholder.idx;
                 let guard = Guard {
                     cache: self,
-                    placeholder,
-                    inserted: false,
+                    placeholder: Some(placeholder),
                 };
                 guard.insert(with()?);
                 idx
@@ -340,8 +321,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             },
             Err((placeholder, _)) => Err(Guard {
                 cache: self,
-                placeholder,
-                inserted: false,
+                placeholder: Some(placeholder),
             }),
         }
     }
@@ -363,8 +343,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             Ok((idx, _)) => Ok(self.shard.peek_token_mut(idx).map(RefMut)),
             Err((placeholder, _)) => Err(Guard {
                 cache: self,
-                placeholder,
-                inserted: false,
+                placeholder: Some(placeholder),
             }),
         }
     }
@@ -388,6 +367,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
             key,
             value,
             InsertStrategy::Insert,
+            &mut (),
         );
         // result cannot err with the Insert strategy
         debug_assert!(result.is_ok());
@@ -395,7 +375,7 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
 
     /// Clear all items from the cache
     pub fn clear(&mut self) {
-        self.shard.clear();
+        self.shard.clear(&mut ());
     }
 
     /// Iterator for the items in the cache
@@ -468,16 +448,9 @@ impl<Key, Val> Lifecycle<Key, Val> for DefaultLifecycle<Key, Val> {
     type RequestState = ();
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct SharedPlaceholder {
-    hash: u64,
-    idx: Token,
-}
-
 pub struct Guard<'a, Key, Val, We, B, L> {
     cache: &'a mut Cache<Key, Val, We, B, L>,
-    placeholder: SharedPlaceholder,
-    inserted: bool,
+    placeholder: Option<PlaceholderLocation<()>>,
 }
 
 impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<Key, Val>>
@@ -495,12 +468,14 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     /// `lcs` is a [`Lifecycle::RequestState`]; construct one with `Default::default()`.
     /// Evicted items are released when `lcs` is dropped.
     pub fn insert_with_lifecycle(mut self, value: Val, lcs: &mut L::RequestState) {
-        let replaced = self
-            .cache
-            .shard
-            .replace_placeholder(lcs, &self.placeholder, false, value);
+        let replaced = self.cache.shard.replace_placeholder(
+            lcs,
+            self.placeholder.as_ref().unwrap(),
+            false,
+            value,
+        );
         debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
-        self.inserted = true;
+        self.placeholder = None;
     }
 }
 
@@ -508,17 +483,20 @@ impl<Key, Val, We, B, L> Drop for Guard<'_, Key, Val, We, B, L> {
     #[inline]
     fn drop(&mut self) {
         #[cold]
-        fn drop_slow<Key, Val, We, B, L>(this: &mut Guard<'_, Key, Val, We, B, L>) {
-            this.cache.shard.remove_placeholder(&this.placeholder);
+        fn drop_slow<Key, Val, We, B, L>(
+            this: &mut Guard<'_, Key, Val, We, B, L>,
+            location: PlaceholderLocation<()>,
+        ) {
+            this.cache.shard.remove_placeholder(&location);
         }
-        if !self.inserted {
-            drop_slow(self);
+        if let Some(location) = self.placeholder {
+            drop_slow(self, location);
         }
     }
 }
 
 pub struct RefMut<'cache, Key, Val, We: Weighter<Key, Val>, B, L>(
-    crate::shard::RefMut<'cache, Key, Val, We, B, L, SharedPlaceholder>,
+    crate::shard::RefMut<'cache, Key, Val, We, B, L, ()>,
 );
 
 impl<Key, Val, We: Weighter<Key, Val>, B, L> std::ops::Deref for RefMut<'_, Key, Val, We, B, L> {
@@ -537,26 +515,14 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L> std::ops::DerefMut for RefMut<'_, K
     }
 }
 
-impl shard::SharedPlaceholder for SharedPlaceholder {
-    #[inline]
-    fn new(hash: u64, idx: Token) -> Self {
-        Self { hash, idx }
-    }
+impl<Val> shard::PlaceholderId<Val> for () {
+    type Shared = std::convert::Infallible;
+    type Context = ();
+    type WakeBatch = ();
 
-    #[inline]
-    fn same_as(&self, _other: &Self) -> bool {
-        true
-    }
+    fn new(_: &mut ()) {}
 
-    #[inline]
-    fn hash(&self) -> u64 {
-        self.hash
-    }
-
-    #[inline]
-    fn idx(&self) -> Token {
-        self.idx
-    }
+    fn invalidate(_: &Self::Shared, _: &mut Self::WakeBatch) {}
 }
 
 #[cfg(test)]
@@ -573,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_zero_weights() {
-        let mut cache = Cache::with_weighter(100, 100, Weighter);
+        let mut cache = Cache::with_weighter(100, Weighter);
         cache.insert(0, 0);
         assert_eq!(cache.weight(), 0);
         for i in 1..100 {
@@ -631,6 +597,45 @@ mod tests {
         assert!(cache.len() <= 180);
         assert!(cache.weight() <= 200);
         cache.validate(false);
+    }
+
+    #[test]
+    fn ghost_budget_uses_resident_count() {
+        for (estimate, allocation, survivor) in [(8, 0.5, 0), (0, 1.0, 1), (8, 0.0, 0)] {
+            let options = OptionsBuilder::new()
+                .estimated_items_capacity(estimate)
+                .weight_capacity(2)
+                .ghost_allocation(allocation)
+                .build()
+                .unwrap();
+            let mut cache = Cache::with_options(
+                options,
+                UnitWeighter,
+                DefaultHashBuilder::default(),
+                DefaultLifecycle::default(),
+            );
+            for key in [0, 1, 2, 1, 3] {
+                cache.insert(key, key);
+            }
+            assert_eq!(cache.len(), 2);
+            assert_eq!(cache.peek(&3), Some(&3));
+            assert_eq!(
+                cache.peek(&survivor),
+                Some(&survivor),
+                "estimate={estimate}, allocation={allocation}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserve_counts_existing_ghosts() {
+        let mut cache = Cache::new(12);
+        for key in 0..17 {
+            cache.insert(key, key);
+        }
+        let map_bytes = cache.memory_used().map;
+        cache.reserve(7);
+        assert_eq!(cache.memory_used().map, map_bytes);
     }
 
     #[test]

@@ -7,7 +7,7 @@ pub struct Options {
     pub(crate) shards: usize,
     pub(crate) hot_allocation: f64,
     pub(crate) ghost_allocation: f64,
-    pub(crate) estimated_items_capacity: usize,
+    pub(crate) estimated_items_capacity: Option<usize>,
     pub(crate) weight_capacity: u64,
 }
 
@@ -20,7 +20,6 @@ pub struct Options {
 ///
 /// Cache::<String, String>::with_options(
 ///   OptionsBuilder::new()
-///     .estimated_items_capacity(10000)
 ///     .weight_capacity(10000)
 ///     .build()
 ///     .unwrap(),
@@ -61,9 +60,8 @@ impl OptionsBuilder {
     ///
     /// Defaults to: `number of detected cores * 4`
     ///
-    /// Note that this number isn't enforced and will be adjusted internally to
-    /// the next power of two. Too small shards (depending on estimated capacity)
-    /// may also cause the actual shard count to decrease.
+    /// The cache rounds this count up to a power of two, then applies the
+    /// [minimum shard size check](Self::estimated_items_capacity).
     #[inline]
     pub fn shards(&mut self, shards: usize) -> &mut Self {
         self.shards = Some(shards);
@@ -74,8 +72,13 @@ impl OptionsBuilder {
     /// roughly equivalent to `weight_capacity / average item weight`.
     /// An estimation within one or even two orders of magnitude of the real value is often good enough.
     ///
-    /// This is used to estimate the maximum number of shards (to avoid shards that are too small)
-    /// and to estimate space required to track items recently evicted from the cache.
+    /// The sync cache uses `estimated_items_capacity` to avoid creating more shards than its
+    /// estimated item count can support. It halves the shard count until it estimates at least
+    /// 32 items per shard or reaches one shard. If you omit the estimate, it uses
+    /// `weight_capacity` as the estimated item count for this calculation.
+    ///
+    /// A heavy entry can exceed its shard's admission limit even when it fits the total weight
+    /// budget. Supply an item estimate or use fewer [`shards`](Self::shards) if this happens.
     #[inline]
     pub fn estimated_items_capacity(&mut self, estimated_items_capacity: usize) -> &mut Self {
         self.estimated_items_capacity = Some(estimated_items_capacity);
@@ -105,11 +108,13 @@ impl OptionsBuilder {
         self
     }
 
-    /// The cache optimistically tracks recently seen keys that are not resident
-    /// in the cache. These keys are called ghost keys. If a ghost key is seen
-    /// again items it will be admitted as "hot".
-    /// The ghost allocation percentage defines how much space to allocate for
-    /// the ghost keys considering the `estimated_items_capacity`.
+    /// The cache tracks recently seen non-resident keys as ghost entries, which
+    /// store only the key's hash. When an insertion matches a ghost entry,
+    /// the cache admits the item as "hot".
+    ///
+    /// The percentage applies to the resident count. The cache samples on the first ghost
+    /// addition, every 255 ghost additions after that, and on capacity changes.
+    /// Set to `0.0` to disable ghost history.
     ///
     /// Defaults to: `0.5` (50%).
     #[inline]
@@ -131,14 +136,11 @@ impl OptionsBuilder {
         let weight_capacity = self
             .weight_capacity
             .ok_or(Error("weight_capacity is not set"))?;
-        let estimated_items_capacity = self
-            .estimated_items_capacity
-            .ok_or(Error("estimated_items_capacity is not set"))?;
         Ok(Options {
             shards,
             hot_allocation,
             ghost_allocation,
-            estimated_items_capacity,
+            estimated_items_capacity: self.estimated_items_capacity,
             weight_capacity,
         })
     }

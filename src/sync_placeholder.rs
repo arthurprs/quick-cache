@@ -3,142 +3,136 @@ use std::{
     hash::{BuildHasher, Hash},
     hint::unreachable_unchecked,
     marker::PhantomPinned,
-    mem, pin,
+    mem,
+    num::NonZeroU64,
+    pin,
     task::{self, Poll},
     time::{Duration, Instant},
 };
 
 use crate::{
-    linked_slab::Token,
-    shard::CacheShard,
+    shard::{CacheShard, PlaceholderId, PlaceholderLocation},
     shim::{
-        rw_lock::{RwLock, RwLockWriteGuard},
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
         },
-        thread, OnceLock,
+        thread, Mutex, OnceLock, RwLock, RwLockWriteGuard,
     },
     Equivalent, Lifecycle, Weighter,
 };
 
-pub type SharedPlaceholder<Val> = Arc<Placeholder<Val>>;
+impl<Val> PlaceholderId<Val> for NonZeroU64 {
+    type Shared = Arc<Placeholder<Val>>;
+    type Context = u64;
+    type WakeBatch = WakeBatch;
 
-impl<Val> crate::shard::SharedPlaceholder for SharedPlaceholder<Val> {
-    fn new(hash: u64, idx: Token) -> Self {
-        Arc::new(Placeholder {
-            hash,
-            idx,
-            value: OnceLock::new(),
-            state: RwLock::new(State {
-                waiters: Default::default(),
-                loading: LoadingState::Loading,
-            }),
-        })
+    fn new(context: &mut Self::Context) -> Self {
+        *context = context
+            .checked_add(1)
+            .expect("placeholder identity exhausted");
+        NonZeroU64::new(*context).unwrap()
     }
 
-    #[inline]
-    fn same_as(&self, other: &Self) -> bool {
-        Arc::ptr_eq(self, other)
+    fn invalidate(shared: &Self::Shared, wakes: &mut Self::WakeBatch) {
+        let mut waiters = shared.waiters.lock();
+        if shared.value.get().is_none() {
+            unsafe { shared.value.set(None).unwrap_unchecked() };
+            waiters.iter().for_each(Waiter::mark_notified);
+            if wakes.0.is_empty() {
+                wakes.0 = mem::take(&mut *waiters);
+            } else {
+                wakes.0.append(&mut *waiters);
+            }
+        }
     }
+}
 
-    #[inline]
-    fn hash(&self) -> u64 {
-        self.hash
-    }
+#[derive(Default)]
+pub struct WakeBatch(Vec<Waiter>);
 
-    #[inline]
-    fn idx(&self) -> Token {
-        self.idx
+impl WakeBatch {
+    pub(crate) fn wake(self) {
+        if self.0.is_empty() {
+            return;
+        }
+        for waiter in self.0 {
+            waiter.wake.wake();
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct Placeholder<Val> {
-    hash: u64,
-    idx: Token,
-    state: RwLock<State>,
-    value: OnceLock<Val>,
+    location: PlaceholderLocation<NonZeroU64>,
+    // Registration holds the shard lock. Terminal writers set the outcome and
+    // mark and detach waiters while holding this lock.
+    waiters: Mutex<Vec<Waiter>>,
+    // Unset: loading or handoff. None: retry. Some(value): published.
+    value: OnceLock<Option<Val>>,
 }
 
 impl<Val> Placeholder<Val> {
     /// Returns the filled value, if any.
     #[inline]
     pub(crate) fn value(&self) -> Option<&Val> {
-        self.value.get()
+        self.value.get().and_then(Option::as_ref)
     }
 }
 
-#[derive(Debug)]
-pub struct State {
-    /// The waiters list
-    /// Adding to the list requires holding the outer shard lock to avoid races between
-    /// removing the orphan placeholder from the cache and adding a new waiter to it.
-    waiters: Vec<Waiter>,
-    loading: LoadingState,
-}
-
-#[derive(Debug)]
-enum LoadingState {
-    /// A guard was/will be created and the value might get filled
-    Loading,
-    /// A value was filled, no more waiters can be added
-    Inserted,
-}
-
 pub struct PlaceholderGuard<'a, Key, Val, We, B, L> {
-    shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
-    shared: SharedPlaceholder<Val>,
-    inserted: bool,
+    shard: &'a RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>,
+    location: Option<PlaceholderLocation<NonZeroU64>>,
 }
 
 #[cfg(test)]
 impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
-    pub fn shared(&self) -> &SharedPlaceholder<Val> {
-        &self.shared
+    pub fn location(&self) -> &PlaceholderLocation<NonZeroU64> {
+        self.location.as_ref().unwrap()
     }
 }
 
 #[derive(Debug)]
-enum Waiter {
-    Thread {
-        notified: *const AtomicBool,
-        thread: thread::Thread,
-    },
-    Task {
-        notified: *const AtomicBool,
-        waker: task::Waker,
-    },
+struct Waiter {
+    notified: *const AtomicBool,
+    wake: Wake,
 }
 
-// SAFETY: The AtomicBool is on the waiting thread's stack or pinned future
-// and the thread/task will remove itself from waiters before returning
+// SAFETY: Cancellation unregisters under the waiter lock. Detached records
+// access only their owned wake handles after notification flags are marked.
 unsafe impl Send for Waiter {}
-unsafe impl Sync for Waiter {}
 
-impl Waiter {
-    #[inline]
-    fn notify(self) {
+#[derive(Debug)]
+enum Wake {
+    Thread(thread::Thread),
+    Task(task::Waker),
+}
+
+impl Wake {
+    fn wake(self) {
         match self {
-            Waiter::Thread {
-                thread, notified, ..
-            } => {
-                // SAFETY: The AtomicBool is on the waiting thread's stack or pinned future
-                // and the thread/task will remove itself from waiters before returning
-                unsafe { notified.as_ref().unwrap().store(true, Ordering::Release) };
-                thread.unpark();
-            }
-            Waiter::Task { waker: t, notified } => {
-                unsafe { notified.as_ref().unwrap().store(true, Ordering::Release) };
-                t.wake();
-            }
+            Self::Thread(thread) => thread.unpark(),
+            Self::Task(waker) => waker.wake(),
         }
     }
+}
 
-    #[inline]
-    fn is_waiter(&self, other: *const AtomicBool) -> bool {
-        matches!(self, Waiter::Task { notified, .. } | Waiter::Thread { notified, .. } if std::ptr::eq(*notified, other))
+impl Waiter {
+    fn mark_notified(&self) {
+        // SAFETY: Cancellation removes unnotified waiters under the waiter lock.
+        unsafe { (*self.notified).store(true, Ordering::Release) };
     }
+}
+
+fn remove_waiter(waiters: &mut Vec<Waiter>, notified: *const AtomicBool) -> Waiter {
+    // An unnotified waiter stays registered until it removes itself under this lock.
+    let idx = unsafe {
+        waiters
+            .iter()
+            .position(|w| std::ptr::eq(w.notified, notified))
+            .unwrap_unchecked()
+    };
+    waiters.swap_remove(idx)
 }
 
 /// Result of [`Cache::get_value_or_guard`](crate::sync::Cache::get_value_or_guard).
@@ -160,9 +154,8 @@ pub use crate::shard::EntryAction;
 
 /// Result of waiting for a placeholder or [`JoinFuture`].
 pub(crate) enum JoinResult<'a, Key, Val, We, B, L> {
-    /// Value is available — either found directly in the cache (`None`) or
-    /// inside the shared placeholder (`Some`).
-    Filled(Option<SharedPlaceholder<Val>>),
+    /// Retry cache lookup (`None`) or use a published shared value (`Some`).
+    Filled(Option<Arc<Placeholder<Val>>>),
     /// Got the guard — caller should load the value.
     Guard(PlaceholderGuard<'a, Key, Val, We, B, L>),
     /// Timed out waiting (sync paths only).
@@ -195,17 +188,12 @@ pub enum EntryResult<'a, Key, Val, We, B, L, T> {
 impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
     #[inline]
     pub fn start_loading(
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
-        shared: SharedPlaceholder<Val>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>,
+        shared: PlaceholderLocation<NonZeroU64>,
     ) -> Self {
-        debug_assert!(matches!(
-            shared.state.write().loading,
-            LoadingState::Loading
-        ));
         PlaceholderGuard {
             shard,
-            shared,
-            inserted: false,
+            location: Some(shared),
         }
     }
 
@@ -213,41 +201,35 @@ impl<'a, Key, Val, We, B, L> PlaceholderGuard<'a, Key, Val, We, B, L> {
     // or a guard if the caller got the guard.
     #[inline]
     fn handle_notification(
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
-        shared: SharedPlaceholder<Val>,
-    ) -> Result<SharedPlaceholder<Val>, PlaceholderGuard<'a, Key, Val, We, B, L>> {
-        // Check if the value was loaded, and if it wasn't it means we got the
-        // guard and need to start loading the value.
-        if shared.value().is_some() {
-            Ok(shared)
-        } else {
-            Err(PlaceholderGuard::start_loading(shard, shared))
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>,
+        shared: Arc<Placeholder<Val>>,
+    ) -> JoinResult<'a, Key, Val, We, B, L> {
+        match shared.value.get() {
+            None => JoinResult::Guard(Self::start_loading(shard, shared.location)),
+            Some(Some(_)) => JoinResult::Filled(Some(shared)),
+            Some(None) => JoinResult::Filled(None),
         }
     }
 
-    // Join the waiters list or return the value if it was already loaded
+    // The shard lock keeps the placeholder live while the waiter registers.
     #[inline]
     fn join_waiters(
-        // we require the shard lock to be held to add a new waiter
-        _locked_shard: RwLockWriteGuard<'a, CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
-        shared: &SharedPlaceholder<Val>,
-        // a function that returns a waiter if it should be added
-        waiter_new: impl FnOnce() -> Option<Waiter>,
-    ) -> bool {
-        let mut state = shared.state.write();
-        // _locked_shard could be released here, it would be sufficient to synchronize with the holder
-        // of the guard trying to remove the placeholder from the cache. But if this placeholder is hot,
-        // anyone waiting on the shard will immediately hit the state lock. Since the cache is sharded
-        // we consider the latter more likely. So we keep the shard lock until we are done with the state.
-        match state.loading {
-            LoadingState::Loading => {
-                if let Some(waiter) = waiter_new() {
-                    state.waiters.push(waiter);
-                }
-                false
-            }
-            LoadingState::Inserted => true,
-        }
+        mut locked_shard: RwLockWriteGuard<'a, CacheShard<Key, Val, We, B, L, NonZeroU64>>,
+        shared: &PlaceholderLocation<NonZeroU64>,
+        waiter: Waiter,
+    ) -> Arc<Placeholder<Val>> {
+        let shared = locked_shard
+            .share_placeholder(shared, || {
+                Arc::new(Placeholder {
+                    location: *shared,
+                    value: OnceLock::new(),
+                    waiters: Mutex::new(Vec::new()),
+                })
+            })
+            .clone();
+        debug_assert!(shared.value.get().is_none());
+        shared.waiters.lock().push(waiter);
+        shared
     }
 }
 
@@ -261,7 +243,7 @@ impl<
     > PlaceholderGuard<'a, Key, Val, We, B, L>
 {
     pub fn join<Q>(
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>,
         hash: u64,
         key: &Q,
         timeout: Option<Duration>,
@@ -269,22 +251,24 @@ impl<
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
-        let mut shard_guard = shard.write();
-        let shared = match shard_guard.get_or_placeholder(hash, key) {
-            Ok((_, v)) => return GuardResult::Value(v.clone()),
-            Err((shared, true)) => {
-                return GuardResult::Guard(Self::start_loading(shard, shared));
-            }
-            Err((shared, false)) => shared,
-        };
         let mut deadline = timeout.map(Ok);
-        match Self::wait_for_placeholder(shard, shard_guard, shared, deadline.as_mut()) {
-            JoinResult::Filled(shared) => unsafe {
-                // SAFETY: Filled means the value was set by the loader.
-                GuardResult::Value(shared.unwrap_unchecked().value().unwrap_unchecked().clone())
-            },
-            JoinResult::Guard(g) => GuardResult::Guard(g),
-            JoinResult::Timeout => GuardResult::Timeout,
+        loop {
+            let mut shard_guard = shard.write();
+            let location = match shard_guard.get_or_placeholder(hash, key) {
+                Ok((_, value)) => return GuardResult::Value(value.clone()),
+                Err((location, true)) => {
+                    return GuardResult::Guard(Self::start_loading(shard, location))
+                }
+                Err((location, false)) => location,
+            };
+            match Self::wait_for_placeholder(shard, shard_guard, location, deadline.as_mut()) {
+                JoinResult::Filled(Some(shared)) => {
+                    return GuardResult::Value(shared.value().unwrap().clone())
+                }
+                JoinResult::Filled(None) => continue,
+                JoinResult::Guard(guard) => return GuardResult::Guard(guard),
+                JoinResult::Timeout => return GuardResult::Timeout,
+            }
         }
     }
 
@@ -297,32 +281,24 @@ impl<
     /// call. On first use the duration is converted in-place to `Err(instant)` so that
     /// callers that retry (e.g. `entry`) preserve the original deadline across calls.
     pub(crate) fn wait_for_placeholder(
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
-        shard_guard: RwLockWriteGuard<'a, CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
-        shared: SharedPlaceholder<Val>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>,
+        shard_guard: RwLockWriteGuard<'a, CacheShard<Key, Val, We, B, L, NonZeroU64>>,
+        shared: PlaceholderLocation<NonZeroU64>,
         deadline: Option<&mut Result<Duration, Instant>>,
     ) -> JoinResult<'a, Key, Val, We, B, L> {
-        let notified = pin::pin!(AtomicBool::new(false));
-        let mut parked_thread = None;
-        let already_filled = Self::join_waiters(shard_guard, &shared, || {
-            // Skip registering a waiter if the timeout is zero.
-            // An already-elapsed Err(instant) deadline is not checked here;
-            // the loop below handles it and join_timeout cleans up the waiter.
-            if matches!(deadline.as_deref(), Some(Ok(d)) if d.is_zero()) {
-                None
-            } else {
-                let thread = thread::current();
-                parked_thread = Some(thread.id());
-                Some(Waiter::Thread {
-                    thread,
-                    notified: &*notified as *const AtomicBool,
-                })
-            }
-        });
-        if already_filled {
-            return JoinResult::Filled(Some(shared));
+        if matches!(deadline.as_deref(), Some(Ok(d)) if d.is_zero()) {
+            return JoinResult::Timeout;
         }
-
+        let notified = pin::pin!(AtomicBool::new(false));
+        let thread = thread::current();
+        let shared = Self::join_waiters(
+            shard_guard,
+            &shared,
+            Waiter {
+                notified: &*notified as *const AtomicBool,
+                wake: Wake::Thread(thread),
+            },
+        );
         // Lazily convert the duration to a deadline on first call;
         // subsequent retries from entry() reuse the same deadline.
         let deadline = deadline.and_then(|d| match *d {
@@ -339,7 +315,7 @@ impl<
             if let Some(instant) = deadline {
                 let remaining = instant.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Self::join_timeout(shard, shared, parked_thread, &notified);
+                    return Self::join_timeout(shard, shared, &notified);
                 }
                 #[cfg(not(fuzzing))]
                 thread::park_timeout(remaining);
@@ -348,48 +324,24 @@ impl<
                 thread::park();
             }
             if notified.load(Ordering::Acquire) {
-                return match Self::handle_notification(shard, shared) {
-                    Ok(shared) => JoinResult::Filled(Some(shared)),
-                    Err(g) => JoinResult::Guard(g),
-                };
+                return Self::handle_notification(shard, shared);
             }
         }
     }
 
     #[cold]
     fn join_timeout(
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, Arc<Placeholder<Val>>>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>,
         shared: Arc<Placeholder<Val>>,
-        // when timeout is zero, the thread may have not been added to the waiters list
-        parked_thread: Option<thread::ThreadId>,
         notified: &AtomicBool,
     ) -> JoinResult<'a, Key, Val, We, B, L> {
-        let mut state = shared.state.write();
-        match state.loading {
-            LoadingState::Loading if notified.load(Ordering::Acquire) => {
-                drop(state); // Drop state guard to avoid a deadlock with start_loading
-                JoinResult::Guard(PlaceholderGuard::start_loading(shard, shared))
-            }
-            LoadingState::Loading => {
-                if parked_thread.is_some() {
-                    // Remove ourselves from the waiters list
-                    let waiter_idx = state
-                        .waiters
-                        .iter()
-                        .position(|w| w.is_waiter(notified as _));
-                    if let Some(idx) = waiter_idx {
-                        state.waiters.swap_remove(idx);
-                    } else {
-                        unsafe { unreachable_unchecked() };
-                    }
-                }
-                JoinResult::Timeout
-            }
-            LoadingState::Inserted => {
-                drop(state);
-                JoinResult::Filled(Some(shared))
-            }
+        let mut waiters = shared.waiters.lock();
+        if !notified.load(Ordering::Acquire) {
+            remove_waiter(&mut waiters, notified);
+            return JoinResult::Timeout;
         }
+        drop(waiters);
+        Self::handle_notification(shard, shared)
     }
 }
 
@@ -425,59 +377,54 @@ impl<
         value: Val,
         lcs: &mut L::RequestState,
     ) -> Result<(), Val> {
-        unsafe { self.shared.value.set(value.clone()).unwrap_unchecked() };
-        let referenced;
-        {
-            // Whoever is already waiting will get notified and hit the fast-path
-            // as they will see the value set. Anyone that races trying to add themselves
-            // to the waiters list will wait on the state lock.
-            let mut state = self.shared.state.write();
-            state.loading = LoadingState::Inserted;
-            referenced = !state.waiters.is_empty();
-            for w in state.waiters.drain(..) {
-                w.notify();
-            }
+        let location = self.location.unwrap();
+        // On unwind, the shared Arc drops after the shard guard.
+        let _published;
+        let mut shard = self.shard.write();
+        let Some(slot @ Some(_)) = shard.shared_placeholder_slot(&location) else {
+            self.location = None;
+            return shard.replace_placeholder(lcs, &location, false, value);
+        };
+        let shared = slot.as_ref().unwrap();
+        // The shard lock serializes cloning and publication with invalidation.
+        let shared_value = value.clone();
+        let waiters = {
+            let mut waiters = shared.waiters.lock();
+            assert!(shared.value.set(Some(shared_value)).is_ok());
+            self.location = None;
+            // A wake can panic or cancel another waiter after this lock is released.
+            waiters.iter().for_each(Waiter::mark_notified);
+            mem::take(&mut *waiters)
+        };
+        _published = slot.take();
+        let result = shard.replace_placeholder(lcs, &location, !waiters.is_empty(), value);
+        drop(shard);
+        for waiter in waiters {
+            waiter.wake.wake();
         }
-
-        // Set flag to disable drop_uninserted_slow, it has no work to do:
-        //   - waiters have already been drained
-        //   - no waiters can be added because we set LoadingState::Inserted
-        //   - the placeholder will be removed here, if it still exists
-        self.inserted = true;
-
-        self.shard
-            .write()
-            .replace_placeholder(lcs, &self.shared, referenced, value)?;
-        Ok(())
+        result
     }
 }
 
 impl<Key, Val, We, B, L> PlaceholderGuard<'_, Key, Val, We, B, L> {
     #[cold]
-    fn drop_uninserted_slow(&mut self) {
-        // Fast path: check if there are other waiters without the shard lock
-        // This may or may not be common, but the assumption is that the shard lock is hot
-        // and should be avoided if possible.
-        {
-            let mut state = self.shared.state.write();
-            debug_assert!(matches!(state.loading, LoadingState::Loading));
-            if let Some(waiter) = state.waiters.pop() {
-                waiter.notify();
-                return;
-            }
-        }
-
-        // Slow path: acquire shard lock and re-check
-        // By acquiring the shard lock we synchronize with any other threads that might be
-        // trying to add themselves to the waiters list.
+    fn drop_uninserted_slow(&mut self, location: PlaceholderLocation<NonZeroU64>) {
         let mut shard_guard = self.shard.write();
-        let mut state = self.shared.state.write();
-        debug_assert!(matches!(state.loading, LoadingState::Loading));
-        if let Some(waiter) = state.waiters.pop() {
+        let wake = shard_guard
+            .shared_placeholder(&location)
+            .and_then(|shared| {
+                let mut waiters = shared.waiters.lock();
+                debug_assert!(shared.value.get().is_none());
+                waiters.pop().map(|waiter| {
+                    waiter.mark_notified();
+                    waiter.wake
+                })
+            });
+        if let Some(wake) = wake {
             drop(shard_guard);
-            waiter.notify();
+            wake.wake();
         } else {
-            shard_guard.remove_placeholder(&self.shared);
+            shard_guard.remove_placeholder(&location);
         }
     }
 }
@@ -485,11 +432,12 @@ impl<Key, Val, We, B, L> PlaceholderGuard<'_, Key, Val, We, B, L> {
 impl<Key, Val, We, B, L> Drop for PlaceholderGuard<'_, Key, Val, We, B, L> {
     #[inline]
     fn drop(&mut self) {
-        if !self.inserted {
-            self.drop_uninserted_slow();
+        if let Some(location) = self.location {
+            self.drop_uninserted_slow(location);
         }
     }
 }
+
 impl<Key, Val, We, B, L> std::fmt::Debug for PlaceholderGuard<'_, Key, Val, We, B, L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlaceholderGuard").finish_non_exhaustive()
@@ -508,7 +456,7 @@ impl<Key, Val, We, B, L> std::fmt::Debug for PlaceholderGuard<'_, Key, Val, We, 
 /// be moved after the first poll, keeping that pointer valid. The pointer is
 /// cleaned up in `drop_pending_waiter` before the struct is destroyed.
 pub(crate) struct JoinFuture<'a, 'b, Q: ?Sized, Key, Val, We, B, L> {
-    shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
+    shard: &'a RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>,
     hash: u64,
     key: &'b Q,
     state: JoinFutureState<Val>,
@@ -519,7 +467,7 @@ pub(crate) struct JoinFuture<'a, 'b, Q: ?Sized, Key, Val, We, B, L> {
 enum JoinFutureState<Val> {
     Created,
     Pending {
-        shared: SharedPlaceholder<Val>,
+        shared: Arc<Placeholder<Val>>,
         waker: task::Waker,
     },
     Done,
@@ -527,7 +475,7 @@ enum JoinFutureState<Val> {
 
 impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, B, L> {
     pub(crate) fn new(
-        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, SharedPlaceholder<Val>>>,
+        shard: &'a RwLock<CacheShard<Key, Val, We, B, L, NonZeroU64>>,
         hash: u64,
         key: &'b Q,
     ) -> Self {
@@ -545,33 +493,25 @@ impl<'a, 'b, Q: ?Sized, Key, Val, We, B, L> JoinFuture<'a, 'b, Q, Key, Val, We, 
 impl<Q: ?Sized, Key, Val, We, B, L> JoinFuture<'_, '_, Q, Key, Val, We, B, L> {
     #[cold]
     fn drop_pending_waiter(&mut self) {
-        let JoinFutureState::Pending { shared, .. } =
-            mem::replace(&mut self.state, JoinFutureState::Done)
+        // Keep the cached waker alive until the notification pointer is unregistered.
+        let JoinFutureState::Pending {
+            shared,
+            waker: _waker,
+        } = mem::replace(&mut self.state, JoinFutureState::Done)
         else {
             unsafe { unreachable_unchecked() }
         };
-        let mut state = shared.state.write();
-        match state.loading {
-            LoadingState::Loading if self.notified.load(Ordering::Acquire) => {
-                // The write guard was abandoned elsewhere, this future was notified but didn't get polled.
-                // So we get and drop the guard here to handle the side effects.
-                drop(state); // Drop state guard to avoid a deadlock with start_loading
-                let _ = PlaceholderGuard::start_loading(self.shard, shared);
+        let mut waiters = shared.waiters.lock();
+        if shared.value.get().is_none() {
+            if self.notified.load(Ordering::Acquire) {
+                // The selected waiter passes abandoned ownership onward when cancelled.
+                drop(waiters);
+                let _ = PlaceholderGuard::start_loading(self.shard, shared.location);
+            } else {
+                let waiter = remove_waiter(&mut waiters, &self.notified);
+                drop(waiters);
+                drop(waiter);
             }
-            LoadingState::Loading => {
-                // Remove ourselves from the waiters list
-                let waiter_idx = state
-                    .waiters
-                    .iter()
-                    .position(|w| w.is_waiter(&self.notified as _));
-                if let Some(idx) = waiter_idx {
-                    state.waiters.swap_remove(idx);
-                } else {
-                    // We didn't find ourselves in the waiters list!?
-                    unsafe { unreachable_unchecked() }
-                }
-            }
-            LoadingState::Inserted => (), // Notified but didn't get polled - nothing to do
         }
     }
 }
@@ -621,26 +561,17 @@ impl<
                     Err((shared, false)) => {
                         // Register as waiter while holding shard lock — prevents
                         // race with drop_uninserted_slow removing the placeholder.
-                        let mut waker = None;
-                        let already_filled =
-                            PlaceholderGuard::join_waiters(shard_guard, &shared, || {
-                                let waker_ = cx.waker().clone();
-                                waker = Some(waker_.clone());
-                                Some(Waiter::Task {
-                                    waker: waker_,
-                                    notified: &this.notified as *const AtomicBool,
-                                })
-                            });
-                        if already_filled {
-                            this.state = JoinFutureState::Done;
-                            Poll::Ready(JoinResult::Filled(Some(shared)))
-                        } else {
-                            this.state = JoinFutureState::Pending {
-                                shared,
-                                waker: waker.unwrap(),
-                            };
-                            Poll::Pending
-                        }
+                        let waker = cx.waker().clone();
+                        let shared = PlaceholderGuard::join_waiters(
+                            shard_guard,
+                            &shared,
+                            Waiter {
+                                notified: &this.notified as *const AtomicBool,
+                                wake: Wake::Task(waker.clone()),
+                            },
+                        );
+                        this.state = JoinFutureState::Pending { shared, waker };
+                        Poll::Pending
                     }
                 }
             }
@@ -650,22 +581,23 @@ impl<
                     if waker.will_wake(new_waker) {
                         return Poll::Pending;
                     }
-                    let mut state = shared.state.write();
+                    // Waker clones and drops can call user code.
+                    let next_waker = new_waker.clone();
+                    let next_wake = Wake::Task(next_waker.clone());
+                    let mut waiters = shared.waiters.lock();
                     // Re-check after acquiring the lock — a concurrent insert
                     // may have drained the waiters list in the meantime.
                     if !this.notified.load(Ordering::Acquire) {
                         let w = unsafe {
-                            state
-                                .waiters
+                            waiters
                                 .iter_mut()
-                                .find(|w| w.is_waiter(&this.notified as _))
+                                .find(|w| std::ptr::eq(w.notified, &this.notified))
                                 .unwrap_unchecked()
                         };
-                        *waker = new_waker.clone();
-                        *w = Waiter::Task {
-                            waker: new_waker.clone(),
-                            notified: &this.notified as *const AtomicBool,
-                        };
+                        let previous_wake = mem::replace(&mut w.wake, next_wake);
+                        drop(waiters);
+                        *waker = next_waker;
+                        drop(previous_wake);
                         return Poll::Pending;
                     }
                 }
@@ -674,12 +606,324 @@ impl<
                 else {
                     unsafe { unreachable_unchecked() }
                 };
-                Poll::Ready(match PlaceholderGuard::handle_notification(shard, shared) {
-                    Ok(shared) => JoinResult::Filled(Some(shared)),
-                    Err(g) => JoinResult::Guard(g),
-                })
+                Poll::Ready(PlaceholderGuard::handle_notification(shard, shared))
             }
             JoinFutureState::Done => panic!("Polled after ready"),
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "shuttle")))]
+mod lazy_tests {
+    use super::*;
+    use crate::{sync::DefaultLifecycle, UnitWeighter};
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::BuildHasherDefault,
+        panic::{catch_unwind, AssertUnwindSafe},
+        sync::atomic::AtomicUsize,
+        task::{Context, Wake, Waker},
+    };
+
+    type TestHasher = BuildHasherDefault<DefaultHasher>;
+    type TestShard<V> =
+        RwLock<CacheShard<u64, V, UnitWeighter, TestHasher, DefaultLifecycle<u64, V>, NonZeroU64>>;
+
+    fn hash(key: u64) -> u64 {
+        TestHasher::default().hash_one(key)
+    }
+
+    fn shard<V>() -> TestShard<V> {
+        RwLock::new(CacheShard::new(
+            0.9,
+            0.5,
+            1024,
+            UnitWeighter,
+            TestHasher::default(),
+            DefaultLifecycle::default(),
+        ))
+    }
+
+    struct Noop;
+
+    impl Wake for Noop {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn clear<V>(shard: &TestShard<V>) {
+        let mut wakes = WakeBatch::default();
+        shard.write().clear(&mut wakes);
+        wakes.wake();
+    }
+
+    #[test]
+    fn promotion_survives_cancel_rejoin_and_handoff() {
+        let shard = shard::<u64>();
+        let GuardResult::Guard(owner) = PlaceholderGuard::join(&shard, hash(0), &0, None) else {
+            panic!()
+        };
+        let location = owner.location.unwrap();
+        assert!(shard.read().shared_placeholder(&location).is_none());
+        drop(JoinFuture::new(&shard, hash(0), &0));
+        assert!(matches!(
+            PlaceholderGuard::join(&shard, hash(0), &0, Some(Duration::ZERO)),
+            GuardResult::Timeout
+        ));
+        assert!(shard.read().shared_placeholder(&location).is_none());
+        let waker = Waker::from(Arc::new(Noop));
+        let mut cx = Context::from_waker(&waker);
+        let mut first = Box::pin(JoinFuture::new(&shard, hash(0), &0));
+        assert!(first.as_mut().poll(&mut cx).is_pending());
+        let shared = shard.read().shared_placeholder(&location).unwrap().clone();
+        drop(first);
+        let mut second = pin::pin!(JoinFuture::new(&shard, hash(0), &0));
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        assert!(Arc::ptr_eq(
+            &shared,
+            shard.read().shared_placeholder(&location).unwrap()
+        ));
+        let mut third = Box::pin(JoinFuture::new(&shard, hash(0), &0));
+        assert!(third.as_mut().poll(&mut cx).is_pending());
+        drop(owner);
+        drop(third);
+        let Poll::Ready(JoinResult::Guard(successor)) = second.as_mut().poll(&mut cx) else {
+            panic!()
+        };
+        successor.insert(8).unwrap();
+        assert!(shard.read().shared_placeholder(&location).is_none());
+    }
+
+    struct CheckWakerDrop {
+        shared: Arc<Placeholder<u64>>,
+        lock_available: Arc<AtomicBool>,
+    }
+
+    impl Wake for CheckWakerDrop {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for CheckWakerDrop {
+        fn drop(&mut self) {
+            self.lock_available
+                .store(self.shared.waiters.try_lock().is_some(), Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn cancellation_and_repoll_drop_wakers_after_unlocking() {
+        let lock_available = [true, false].map(|cancel| {
+            let shard = shard::<u64>();
+            let GuardResult::Guard(owner) = PlaceholderGuard::join(&shard, hash(0), &0, None)
+            else {
+                panic!()
+            };
+            let mut waiter = Box::pin(JoinFuture::new(&shard, hash(0), &0));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(waiter.as_mut().poll(&mut cx).is_pending());
+            let shared = shard
+                .read()
+                .shared_placeholder(owner.location())
+                .unwrap()
+                .clone();
+            let lock_available = Arc::new(AtomicBool::new(false));
+            let waker = Waker::from(Arc::new(CheckWakerDrop {
+                shared,
+                lock_available: lock_available.clone(),
+            }));
+            assert!(waiter
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending());
+            drop(waker);
+            if cancel {
+                drop(waiter);
+            } else {
+                assert!(waiter.as_mut().poll(&mut cx).is_pending());
+            }
+            assert!(owner.insert(8).is_ok());
+            lock_available.load(Ordering::Relaxed)
+        });
+        assert_eq!(lock_available, [true, true], "cancellation and repoll");
+    }
+
+    #[derive(Debug)]
+    struct PublicationProbe {
+        shard: std::sync::Weak<TestShard<PublicationProbe>>,
+        clones: Arc<AtomicUsize>,
+        wakes: Arc<AtomicUsize>,
+    }
+
+    impl Clone for PublicationProbe {
+        fn clone(&self) -> Self {
+            let shard = self.shard.upgrade().unwrap();
+            assert!(
+                shard.try_write().is_none(),
+                "publication clone must serialize with invalidation"
+            );
+            self.clones.fetch_add(1, Ordering::SeqCst);
+            Self {
+                shard: self.shard.clone(),
+                clones: self.clones.clone(),
+                wakes: self.wakes.clone(),
+            }
+        }
+    }
+
+    impl Wake for PublicationProbe {
+        fn wake(self: Arc<Self>) {
+            let shard = self.shard.upgrade().unwrap();
+            assert!(
+                shard.try_write().is_some(),
+                "publication wake holds the shard lock"
+            );
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn publication_serializes_clone_then_wakes_after_unlock() {
+        let shard = Arc::new(shard::<PublicationProbe>());
+        let clones = Arc::new(AtomicUsize::new(0));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let probe = || PublicationProbe {
+            shard: Arc::downgrade(&shard),
+            clones: clones.clone(),
+            wakes: wakes.clone(),
+        };
+        let GuardResult::Guard(owner) = PlaceholderGuard::join(&shard, hash(0), &0, None) else {
+            panic!()
+        };
+        let waker = Waker::from(Arc::new(probe()));
+        let mut cx = Context::from_waker(&waker);
+        let mut waiter = pin::pin!(JoinFuture::new(&shard, hash(0), &0));
+        assert!(waiter.as_mut().poll(&mut cx).is_pending());
+        owner.insert(probe()).unwrap();
+        assert_eq!(clones.load(Ordering::SeqCst), 1);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        clear(&shard);
+        assert!(matches!(
+            waiter.as_mut().poll(&mut cx),
+            Poll::Ready(JoinResult::Filled(Some(_)))
+        ));
+    }
+
+    struct CheckWake {
+        shard: Arc<TestShard<u64>>,
+        shared: Arc<Placeholder<u64>>,
+        calls: Arc<AtomicUsize>,
+        panic: bool,
+    }
+
+    impl Wake for CheckWake {
+        fn wake(self: Arc<Self>) {
+            assert!(
+                self.shard.try_write().is_some(),
+                "invalidation holds shard lock"
+            );
+            assert!(
+                self.shared.waiters.try_lock().is_some(),
+                "invalidation holds waiter lock"
+            );
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.panic, "invalidation wake");
+        }
+    }
+
+    #[test]
+    fn invalidation_marks_waiters_before_panicking_wake() {
+        let shard = Arc::new(shard::<u64>());
+        let GuardResult::Guard(owner) = PlaceholderGuard::join(&shard, hash(0), &0, None) else {
+            panic!()
+        };
+        let location = owner.location.unwrap();
+        let noop = Waker::from(Arc::new(Noop));
+        let mut cx = Context::from_waker(&noop);
+        let mut first = pin::pin!(JoinFuture::new(&shard, hash(0), &0));
+        assert!(first.as_mut().poll(&mut cx).is_pending());
+        let shared = shard.read().shared_placeholder(&location).unwrap().clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let bad = Waker::from(Arc::new(CheckWake {
+            shard: shard.clone(),
+            shared: shared.clone(),
+            calls: calls.clone(),
+            panic: true,
+        }));
+        assert!(first
+            .as_mut()
+            .poll(&mut Context::from_waker(&bad))
+            .is_pending());
+        let good = Waker::from(Arc::new(CheckWake {
+            shard: shard.clone(),
+            shared: shared.clone(),
+            calls: calls.clone(),
+            panic: false,
+        }));
+        let mut second = pin::pin!(JoinFuture::new(&shard, hash(0), &0));
+        assert!(second
+            .as_mut()
+            .poll(&mut Context::from_waker(&good))
+            .is_pending());
+        let error = catch_unwind(AssertUnwindSafe(|| clear(&shard))).unwrap_err();
+        assert_eq!(error.downcast_ref::<&str>(), Some(&"invalidation wake"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            first.as_mut().poll(&mut cx),
+            Poll::Ready(JoinResult::Filled(None))
+        ));
+        assert!(matches!(
+            second.as_mut().poll(&mut cx),
+            Poll::Ready(JoinResult::Filled(None))
+        ));
+        assert_eq!(owner.insert(7), Err(7));
+    }
+
+    fn wait_for_registration(shard: &TestShard<u64>, location: PlaceholderLocation<NonZeroU64>) {
+        for _ in 0..10_000 {
+            if shard
+                .read()
+                .shared_placeholder(&location)
+                .is_some_and(|shared| !shared.waiters.lock().is_empty())
+            {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("waiter did not register");
+    }
+
+    #[test]
+    fn synchronous_waiter_retries_then_accepts_handoff() {
+        let shard = shard::<u64>();
+        let GuardResult::Guard(old) = PlaceholderGuard::join(&shard, hash(0), &0, None) else {
+            panic!()
+        };
+        let old_location = old.location.unwrap();
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let GuardResult::Guard(owner) =
+                    PlaceholderGuard::join(&shard, hash(0), &0, Some(Duration::from_secs(10)))
+                else {
+                    panic!("waiter receives retry handoff")
+                };
+                owner.insert(9).unwrap();
+            });
+            wait_for_registration(&shard, old_location);
+            let next = {
+                let mut wakes = WakeBatch::default();
+                let mut locked = shard.write();
+                locked.remove(hash(0), &0, &mut wakes);
+                let (location, is_new) = locked.get_or_placeholder(hash(0), &0).unwrap_err();
+                assert!(is_new);
+                let next = PlaceholderGuard::start_loading(&shard, location);
+                drop(locked);
+                wakes.wake();
+                next
+            };
+            wait_for_registration(&shard, next.location.unwrap());
+            assert_eq!(old.insert(7), Err(7));
+            drop(next);
+            waiter.join().unwrap();
+        });
+        assert_eq!(shard.read().peek(hash(0), &0), Some(&9));
     }
 }

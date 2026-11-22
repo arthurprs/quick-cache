@@ -56,6 +56,8 @@
 //!
 //! The `1.5` value in the formula above results from `1 + G`, where `G` is the configured ghost allocation specified
 //! in [`OptionsBuilder::ghost_allocation`], which is `0.5` by default.
+//! The estimate assumes the ghost limit reflects the current resident count. A cache without
+//! an item capacity estimate samples resident counts periodically as it adds ghosts.
 //!
 //! # Hasher
 //!
@@ -81,7 +83,30 @@
 //! | `parking_lot` | ✓ | Use [parking_lot](https://crates.io/crates/parking_lot) for synchronization primitives. Mutually exclusive with `sharded-lock`. |
 //! | `sharded-lock` | | Use [`crossbeam_utils::sync::ShardedLock`](https://docs.rs/crossbeam-utils/latest/crossbeam_utils/sync/struct.ShardedLock.html) for synchronization primitives. Mutually exclusive with `parking_lot`. |
 //! | `shuttle` | | Enable [shuttle](https://crates.io/crates/shuttle) testing support for concurrency testing. |
-//! | `stats` | | Enable cache statistics tracking via the `hits()`, `misses()`, and per-item `item_stats()` methods. Overhead: adds an 8-byte per-item access counter (`AtomicU64`) to each resident item — raising per-entry memory by up to 8 bytes, depending on layout — and performs two atomic increments per cache hit and one per miss. |
+//! | `stats` | | Enable cache statistics tracking via the `hits()`, `misses()`, and per-item `item_stats()` methods. Overhead: adds an 8-byte per-item access counter (`AtomicU64`) to each resident item — raising per-entry memory by up to 8 bytes, depending on layout — and updates the cache and item counters on tracked accesses. See [Statistics](#statistics). |
+//!
+//! # Statistics
+//!
+//! With `stats`, `hits()` and `misses()` count internal tracked lookups, rather than
+//! public method calls. `get` and `get_mut` count a resident hit or an absent miss;
+//! peeks, membership tests, and mutations such as `insert` do not count lookups.
+//! A sync loader first probes under a read lock, then probes for a value or
+//! placeholder under a write lock. A cold load therefore counts two misses.
+//! Joining an existing placeholder counts a hit, even if the caller times out;
+//! the preceding sync read probe also counts a miss. An unsync cold load counts
+//! one miss. Loader retries can add lookups.
+//!
+//! `entry` counts a hit when its callback returns `Retain` or it joins a placeholder,
+//! and a miss when it creates a placeholder. `Remove` and `ReplaceWithGuard` do not
+//! count resident hits. `entry_async` can probe an existing placeholder twice
+//! before waiting, recording a hit for each probe.
+//! A waiting loader that receives its value directly does not increment that
+//! item's access count. Cache totals survive `clear`; replacing a resident value
+//! resets its per-item count. Concurrent totals are observations rather than a
+//! single snapshot.
+//!
+//! Shared read paths use atomic increments. Exclusive paths update counters through
+//! mutable references. The `stats` feature requires target support for 64-bit atomics.
 #![allow(clippy::type_complexity)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -93,8 +118,6 @@ mod linked_slab;
 #[cfg(fuzzing)]
 pub mod linked_slab;
 mod options;
-#[cfg(not(feature = "shuttle"))]
-mod rw_lock;
 mod shard;
 mod shim;
 /// Concurrent cache variants that can be used from multiple threads.
@@ -169,8 +192,10 @@ pub trait Weighter<Key, Val> {
     /// Zero (0) weight items are allowed and will be ignored when looking for eviction
     /// candidates. Such items can only be manually removed or overwritten.
     ///
-    /// Note that it's undefined behavior for a cache item to change its weight.
-    /// The only exception to this is when Lifecycle::before_evict is called.
+    /// An item's weight must stay stable between cache operations. Values may change
+    /// weight through unsync mutable-reference guards, sync entry callbacks, and
+    /// [`Lifecycle::before_evict`]. The cache recalculates weight after these mutations.
+    /// Leaking a mutable-reference guard can leave weight accounting inaccurate.
     ///
     /// It's also undefined behavior in release mode if the summing of weights overflows,
     /// although this is unlikely to be a problem in practice.
@@ -234,7 +259,7 @@ pub trait Lifecycle<Key, Val> {
     /// Called when a cache item is about to be evicted.
     /// Note that value replacement (e.g. insertions for the same key) won't call this method.
     ///
-    /// This is the only time the item can change its weight. If the item weight becomes zero (0) it
+    /// If the item weight becomes zero (0) it
     /// will be left in the cache, otherwise it'll still be removed. Zero (0) weight items aren't evictable
     /// and are kept separated from the other items so it's possible to have a large number of them without
     /// negatively affecting eviction performance.
@@ -302,18 +327,20 @@ impl MemoryUsed {
 ///
 /// Only available with the `stats` feature enabled. Enabling that feature adds an
 /// 8-byte per-item access counter to each resident item (raising per-entry memory
-/// by up to 8 bytes, depending on layout) and performs two atomic increments per
-/// cache hit and one per miss.
+/// by up to 8 bytes, depending on layout). See the crate's [statistics documentation](crate#statistics)
+/// for counter semantics and update costs.
 #[cfg(feature = "stats")]
 #[non_exhaustive]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ItemStats {
     /// Number of times the item has been accessed (read) since it became resident.
     ///
-    /// Incremented on every cache hit (`get`/`get_mut`/`get_value_or_guard`/`entry`).
+    /// Incremented on resident lookups, including `get`, `get_mut`, loader resident
+    /// lookups, and `entry` callbacks that return `Retain`. Placeholder joins and
+    /// values delivered directly to waiting loaders do not increment this count.
     /// Unlike the internal eviction counter, this is monotonic per residency and is
     /// not bounded by the eviction policy. It resets to zero if the slot is reused for
-    /// a new value (e.g. after eviction and re-insertion).
+    /// a new value, including replacement of an existing resident value.
     pub access_count: u64,
 }
 
@@ -386,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_change_get_mut_change_weight() {
-        let mut cache = unsync::Cache::with_weighter(100, 100_000, StringWeighter);
+        let mut cache = unsync::Cache::with_weighter(100_000, StringWeighter);
         cache.insert(1, "1".to_string());
         assert_eq!(cache.get(&1).unwrap(), "1");
         assert_eq!(cache.weight(), 1);

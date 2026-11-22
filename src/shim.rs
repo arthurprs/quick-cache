@@ -1,76 +1,88 @@
-#![allow(dead_code)]
-
-#[cfg(not(feature = "shuttle"))]
-pub(crate) use crate::rw_lock;
 #[cfg(not(feature = "shuttle"))]
 pub use std::{sync, thread};
 
 #[cfg(feature = "shuttle")]
-pub use shuttle::*;
+pub use shuttle::{sync, thread};
 
-// TODO: OnceLock isn't current present in shuttle.
-// Using the std version like this only works in shuttle
-// because we're not relying on any OnceLock blocking behavior.
+// Shuttle does not model OnceLock. The cache uses it without blocking.
 pub use std::sync::OnceLock;
 
-#[cfg(feature = "shuttle")]
-pub mod rw_lock {
-    use std::ops::{Deref, DerefMut};
+#[cfg(all(feature = "parking_lot", not(feature = "shuttle")))]
+pub(crate) use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 
-    #[derive(Default, Debug)]
-    pub struct RwLock<T>(::shuttle::sync::RwLock<T>);
+#[cfg(any(not(feature = "parking_lot"), feature = "shuttle"))]
+pub(crate) use locks::{Mutex, RwLock, RwLockWriteGuard};
+
+#[cfg(any(not(feature = "parking_lot"), feature = "shuttle"))]
+mod locks {
+    use super::sync;
+    use std::sync::{TryLockError, TryLockResult};
+
+    #[cfg(all(feature = "sharded-lock", not(feature = "shuttle")))]
+    pub(crate) use crossbeam_utils::sync::{
+        ShardedLock as InnerRwLock, ShardedLockReadGuard as RwLockReadGuard,
+        ShardedLockWriteGuard as RwLockWriteGuard,
+    };
+    #[cfg(any(not(feature = "sharded-lock"), feature = "shuttle"))]
+    pub(crate) use sync::{RwLock as InnerRwLock, RwLockReadGuard, RwLockWriteGuard};
+
+    fn try_guard<G>(result: TryLockResult<G>) -> Option<G> {
+        match result {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(_)) if cfg!(feature = "shuttle") => None,
+            Err(TryLockError::Poisoned(err)) => panic!("{err}"),
+        }
+    }
 
     #[derive(Debug)]
-    pub struct RwLockReadGuard<'rwlock, T>(::shuttle::sync::RwLockReadGuard<'rwlock, T>);
+    pub(crate) struct Mutex<T>(sync::Mutex<T>);
 
-    #[derive(Debug)]
-    pub struct RwLockWriteGuard<'rwlock, T>(::shuttle::sync::RwLockWriteGuard<'rwlock, T>);
+    impl<T> Mutex<T> {
+        pub(crate) const fn new(value: T) -> Self {
+            Self(sync::Mutex::new(value))
+        }
+
+        #[inline]
+        pub(crate) fn lock(&self) -> sync::MutexGuard<'_, T> {
+            self.0.lock().unwrap()
+        }
+
+        #[cfg(all(test, not(feature = "shuttle")))]
+        pub(crate) fn try_lock(&self) -> Option<sync::MutexGuard<'_, T>> {
+            try_guard(self.0.try_lock())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    #[repr(transparent)]
+    pub struct RwLock<T: ?Sized>(InnerRwLock<T>);
 
     impl<T> RwLock<T> {
-        pub const fn new(t: T) -> Self {
-            Self(::shuttle::sync::RwLock::new(t))
-        }
-
-        pub fn into_inner(self) -> T {
-            self.0.into_inner().unwrap()
-        }
-
-        pub fn read(&self) -> RwLockReadGuard<'_, T> {
-            RwLockReadGuard(self.0.read().unwrap())
-        }
-
-        pub fn write(&self) -> RwLockWriteGuard<'_, T> {
-            RwLockWriteGuard(self.0.write().unwrap())
-        }
-
-        pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
-            self.0.try_write().map(RwLockWriteGuard).ok()
-        }
-
-        pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
-            self.0.try_read().map(RwLockReadGuard).ok()
+        pub(crate) fn new(value: T) -> Self {
+            Self(InnerRwLock::new(value))
         }
     }
 
-    impl<T> Deref for RwLockReadGuard<'_, T> {
-        type Target = T;
-
-        fn deref(&self) -> &Self::Target {
-            &self.0
+    impl<T: ?Sized> RwLock<T> {
+        #[inline]
+        pub(crate) fn read(&self) -> RwLockReadGuard<'_, T> {
+            self.0.read().unwrap()
         }
-    }
 
-    impl<T> Deref for RwLockWriteGuard<'_, T> {
-        type Target = T;
-
-        fn deref(&self) -> &Self::Target {
-            &self.0
+        #[inline]
+        pub(crate) fn write(&self) -> RwLockWriteGuard<'_, T> {
+            self.0.write().unwrap()
         }
-    }
 
-    impl<T> DerefMut for RwLockWriteGuard<'_, T> {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.0
+        #[inline]
+        pub(crate) fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
+            try_guard(self.0.try_read())
+        }
+
+        #[inline]
+        pub(crate) fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
+            try_guard(self.0.try_write())
         }
     }
 }
