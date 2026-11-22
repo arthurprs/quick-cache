@@ -1,10 +1,12 @@
 use quick_cache::{Options, OptionsBuilder, OptionsError};
+
 fn options(capacity: u64) -> Result<Options, OptionsError> {
     OptionsBuilder::new()
         .estimated_items_capacity(10)
         .weight_capacity(capacity)
         .build()
 }
+
 #[test]
 fn named_builder_error_supports_downstream_result() {
     assert!(options(10).is_ok());
