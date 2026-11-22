@@ -268,6 +268,16 @@ impl<Key, Val, We, B, L, Id: PlaceholderId<Val>> CacheShard<Key, Val, We, B, L, 
         (p.id == location.id).then_some(shared)
     }
 
+    pub fn shared_placeholder_slot(
+        &mut self,
+        location: &PlaceholderLocation<Id>,
+    ) -> Option<&mut Option<Id::Shared>> {
+        let (Entry::Placeholder(p), _) = self.entries.get_mut(location.idx)? else {
+            return None;
+        };
+        (p.id == location.id).then_some(&mut p.shared)
+    }
+
     pub fn share_placeholder(
         &mut self,
         location: &PlaceholderLocation<Id>,
