@@ -105,13 +105,13 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         self.shard.capacity()
     }
 
-    /// Returns the number of misses
+    /// Returns the number of tracked misses. See [Statistics](crate#statistics).
     #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.shard.misses()
     }
 
-    /// Returns the number of hits
+    /// Returns the number of tracked hits. See [Statistics](crate#statistics).
     #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.shard.hits()

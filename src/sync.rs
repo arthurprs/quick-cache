@@ -218,13 +218,13 @@ impl<
         self.shards.len()
     }
 
-    /// Returns the number of misses
+    /// Returns the number of tracked misses. See [Statistics](crate#statistics).
     #[cfg(feature = "stats")]
     pub fn misses(&self) -> u64 {
         self.shards.iter().map(|s| s.read().misses()).sum()
     }
 
-    /// Returns the number of hits
+    /// Returns the number of tracked hits. See [Statistics](crate#statistics).
     #[cfg(feature = "stats")]
     pub fn hits(&self) -> u64 {
         self.shards.iter().map(|s| s.read().hits()).sum()
@@ -744,7 +744,7 @@ impl<
     /// Atomically accesses an existing entry, or gets a guard for insertion.
     ///
     /// If a value exists for `key`, `on_occupied` is called with a mutable reference
-    /// to the key and value. The callback returns an [`EntryAction`] to decide what to do:
+    /// to the value and a shared reference to the key. The callback returns an [`EntryAction`] to decide what to do:
     /// - [`EntryAction::Retain`]`(T)` — keep the entry, return `T`.
     ///   Weight is recalculated after the callback returns.
     /// - [`EntryAction::Remove`] — remove the entry from the cache.
