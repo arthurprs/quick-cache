@@ -15,9 +15,8 @@ fn counts(cache: &sync::Cache<u64, u64>) -> (u64, u64) {
 #[test]
 fn loader_counts_internal_probes_and_placeholder_joins() {
     let cache = sync::Cache::new(10);
-    let guard = match cache.get_value_or_guard(&1, None) {
-        sync::GuardResult::Guard(g) => g,
-        _ => panic!(),
+    let sync::GuardResult::Guard(guard) = cache.get_value_or_guard(&1, None) else {
+        panic!()
     };
     assert_eq!(counts(&cache), (0, 2));
     assert!(matches!(
@@ -50,6 +49,11 @@ fn failed_load_retries_and_unsync_loads_have_different_units() {
         Some(&9)
     );
     assert_eq!((other.hits(), other.misses()), (0, 1));
+    *other.get_mut(&1).unwrap() = 10;
+    assert_eq!((other.hits(), other.misses()), (1, 1));
+    assert_eq!(other.item_stats(&1).unwrap().access_count, 1);
+    assert!(other.get_mut(&2).is_none());
+    assert_eq!((other.hits(), other.misses()), (1, 2));
 }
 
 #[test]
@@ -57,9 +61,8 @@ fn async_waiter_counts_join_without_counting_filled_value_as_access() {
     let cache = sync::Cache::<u64, u64>::new(10);
     let mut context = Context::from_waker(Waker::noop());
     let mut owner = pin!(cache.get_value_or_guard_async(&1));
-    let guard = match owner.as_mut().poll(&mut context) {
-        Poll::Ready(Err(g)) => g,
-        _ => panic!(),
+    let Poll::Ready(Err(guard)) = owner.as_mut().poll(&mut context) else {
+        panic!()
     };
     assert_eq!(counts(&cache), (0, 2));
     let mut waiter = pin!(cache.get_value_or_guard_async(&1));
@@ -116,12 +119,12 @@ fn entry_actions_and_residency_reset() {
     cache.clear();
     assert_eq!(counts(&cache), (3, 1));
 }
+
 #[test]
 fn async_entry_counts_both_placeholder_probes() {
     let cache = sync::Cache::<u64, u64>::new(10);
-    let guard = match cache.get_value_or_guard(&1, None) {
-        sync::GuardResult::Guard(g) => g,
-        _ => panic!(),
+    let sync::GuardResult::Guard(guard) = cache.get_value_or_guard(&1, None) else {
+        panic!()
     };
     let mut context = Context::from_waker(Waker::noop());
     let calls = std::cell::Cell::new(0);
