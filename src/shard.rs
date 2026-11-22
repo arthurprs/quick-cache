@@ -1334,6 +1334,7 @@ impl<
     ///
     /// `on_occupied` is taken by mutable reference so the caller retains ownership.
     /// It is called at most once per invocation.
+    #[inline]
     pub fn entry_or_placeholder<Q, T, F>(
         &mut self,
         hash: u64,
