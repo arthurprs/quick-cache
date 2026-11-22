@@ -27,9 +27,9 @@
 //!
 //! # Atomic operations
 //!
-//! By using the `get_or_insert` or `get_value_or_guard` family of functions (both sync and async variants
-//! are available, they can be mix and matched) the user can coordinate the insertion of entries, so only
-//! one value is "computed" and inserted after a cache miss.
+//! The loading helpers in [`sync::Cache`] coordinate concurrent loads for the same key.
+//! Resident lookup, load reservation, invalidation, and admission take effect under
+//! the key's shard lock. See [`sync::Cache::get_or_insert_with`] for what a load can return.
 //!
 //! The `entry` family of functions provide a closure-based API for atomically
 //! inspecting and acting on existing entries (keep, remove, or replace) while also coordinating
