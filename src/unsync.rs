@@ -259,13 +259,19 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         let idx = match self.shard.get_or_placeholder(self.shard.hash(key), key) {
-            Ok((idx, _)) => idx,
-            Err((plh, _)) => {
-                let v = with()?;
-                let mut lcs = Default::default();
-                let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
-                debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
-                plh.idx
+            Ok((_, value)) => {
+                let value: *const Val = value;
+                // Safety: the returned reference is valid while the mutable cache borrow is held.
+                return Ok(Some(unsafe { &*value }));
+            }
+            Err((placeholder, _)) => {
+                let idx = placeholder.idx;
+                let guard = Guard {
+                    cache: self,
+                    placeholder: Some(placeholder),
+                };
+                guard.insert(with()?);
+                idx
             }
         };
         Ok(self.shard.peek_token(idx))
@@ -285,12 +291,14 @@ impl<Key: Eq + Hash, Val, We: Weighter<Key, Val>, B: BuildHasher, L: Lifecycle<K
     {
         let idx = match self.shard.get_or_placeholder(self.shard.hash(key), key) {
             Ok((idx, _)) => idx,
-            Err((plh, _)) => {
-                let v = with()?;
-                let mut lcs = Default::default();
-                let replaced = self.shard.replace_placeholder(&mut lcs, &plh, false, v);
-                debug_assert!(replaced.is_ok(), "unsync replace_placeholder can't fail");
-                plh.idx
+            Err((placeholder, _)) => {
+                let idx = placeholder.idx;
+                let guard = Guard {
+                    cache: self,
+                    placeholder: Some(placeholder),
+                };
+                guard.insert(with()?);
+                idx
             }
         };
         Ok(self.shard.peek_token_mut(idx).map(RefMut))
@@ -496,7 +504,7 @@ impl<Key, Val, We: Weighter<Key, Val>, B, L> std::ops::Deref for RefMut<'_, Key,
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        self.0.pair().1
+        self.0.value()
     }
 }
 

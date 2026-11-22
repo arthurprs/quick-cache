@@ -348,6 +348,7 @@ pub struct ItemStats {
 mod tests {
     use std::{
         hash::Hash,
+        panic::{catch_unwind, AssertUnwindSafe},
         sync::{atomic::AtomicUsize, Arc},
         time::Duration,
     };
@@ -416,18 +417,33 @@ mod tests {
         cache.insert(1, "1".to_string());
         assert_eq!(cache.get(&1).unwrap(), "1");
         assert_eq!(cache.weight(), 1);
+        let _old = cache.get_mut(&1).map(|mut v| {
+            assert_eq!(&*v, "1");
+            let old = std::mem::replace(&mut *v, "11".to_string());
+            assert_eq!(&*v, "11");
+            old
+        });
+        assert_eq!(cache.weight(), 2);
         let _old = {
             cache
-                .get_mut(&1)
-                .map(|mut v| std::mem::replace(&mut *v, "11".to_string()))
-        };
-        let _old = {
-            cache
-                .get_mut(&1)
+                .peek_mut(&1)
                 .map(|mut v| std::mem::replace(&mut *v, "".to_string()))
         };
         assert_eq!(cache.get(&1).unwrap(), "");
         assert_eq!(cache.weight(), 0);
+        cache.validate(false);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut value = cache
+                .get_mut_or_insert_with::<_, ()>(&1, || panic!("resident hit"))
+                .unwrap()
+                .unwrap();
+            value.push('1');
+            panic!("after mutating the resident value");
+        }));
+        assert!(result.is_err());
+        assert_eq!(cache.get(&1).unwrap(), "1");
+        assert_eq!(cache.weight(), 1);
         cache.validate(false);
     }
 
