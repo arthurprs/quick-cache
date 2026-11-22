@@ -639,15 +639,17 @@ impl<
         }
     }
 
-    /// Gets an item from the cache with key `key` .
+    /// Returns the value for `key` or a guard to load it.
     ///
-    /// If the corresponding value isn't present in the cache, this function returns a guard
-    /// that can be used to insert the value once it's computed.
-    /// While the returned guard is alive, other calls with the same key using the
-    /// `get_value_or_guard` or `get_or_insert` family of functions will wait until the guard
-    /// is dropped or the value is inserted.
-    /// Removing, overwriting or clearing an in-flight entry wakes its waiters to retry lookup.
-    /// A value published before invalidation can still reach registered waiters.
+    /// If a load is pending, this call waits. If the guard is dropped without
+    /// inserting, a waiter can take over the load.
+    ///
+    /// [`remove`](Self::remove), [`clear`](Self::clear), and an admitted
+    /// [`insert`](Self::insert) invalidate pending loads for affected keys.
+    /// The loader can finish computing, but its guard returns `Err(value)`
+    /// if it tries to insert after invalidation. Waiters wake and retry the lookup.
+    /// Once a guard publishes a value, its waiters can still receive it
+    /// after the cache entry is removed or replaced.
     ///
     /// A `None` `timeout` means waiting forever.
     /// A `Some(<zero>)` timeout will return a Timeout error immediately if the value is not present
@@ -667,9 +669,13 @@ impl<
         PlaceholderGuard::join(shard, hash, key, timeout)
     }
 
-    /// Gets or inserts an item in the cache with key `key`.
+    /// Returns a resident value or the computed result of a load for `key`.
     ///
-    /// See also `get_value_or_guard` and `get_value_or_guard_async`.
+    /// The loader runs outside the shard lock. The caller that runs it can
+    /// receive the computed result even after its load is invalidated.
+    /// Admission and eviction can leave the result uncached.
+    ///
+    /// See [`Self::get_value_or_guard`] for the effects of invalidation.
     pub fn get_or_insert_with<Q, E>(
         &self,
         key: &Q,
@@ -689,15 +695,7 @@ impl<
         }
     }
 
-    /// Gets an item from the cache with key `key`.
-    ///
-    /// If the corresponding value isn't present in the cache, this function returns a guard
-    /// that can be used to insert the value once it's computed.
-    /// While the returned guard is alive, other calls with the same key using the
-    /// `get_value_or_guard` or `get_or_insert` family of functions will wait until the guard
-    /// is dropped or the value is inserted.
-    /// Removing, overwriting or clearing an in-flight entry wakes its waiters to retry lookup.
-    /// A value published before invalidation can still reach registered waiters.
+    /// Async version of [`Self::get_value_or_guard`].
     pub async fn get_value_or_guard_async<'a, Q>(
         &'a self,
         key: &Q,
@@ -722,7 +720,7 @@ impl<
         }
     }
 
-    /// Gets or inserts an item in the cache with key `key`.
+    /// Async version of [`Self::get_or_insert_with`].
     pub async fn get_or_insert_async<Q, E>(
         &self,
         key: &Q,

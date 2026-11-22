@@ -10,8 +10,7 @@ Lightweight and high performance concurrent cache optimized for low cache overhe
 * Scan resistant and high hit rate caching policy (S3-FIFO)
 * User defined weight per item
 * Scales well with the number of threads
-* Atomic operations with `get_or_insert` and `get_value_or_guard` functions
-* Atomic async operations with `get_or_insert_async` and `get_value_or_guard_async` functions
+* Coordinate loads for the same key with `get_or_insert_with`, `get_value_or_guard`, and their async variants
 * Try methods avoid waiting for shard locks.
 * Closure-based `entry` API for atomic inspect-and-act patterns (keep, remove, replace)
 * Supports item pinning
