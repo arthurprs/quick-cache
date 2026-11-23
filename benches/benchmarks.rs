@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use quick_cache::sync::Cache;
-use rand::prelude::*;
+use rand::{prelude::*, rngs::Xoshiro256PlusPlus};
 use rand_distr::Zipf;
 
 pub fn r_benchmark(c: &mut Criterion) {
@@ -12,7 +12,7 @@ pub fn r_benchmark(c: &mut Criterion) {
             g.bench_function(format!("qc {}", population), |b| {
                 let cache = Cache::new(population);
                 let mut samples = (0usize..population).collect::<Vec<_>>();
-                let mut rng = SmallRng::seed_from_u64(1);
+                let mut rng = Xoshiro256PlusPlus::seed_from_u64(1);
                 samples.shuffle(&mut rng);
                 samples.truncate((population as f64 * s) as usize);
                 for p in samples {
@@ -43,7 +43,7 @@ pub fn rw_benchmark(c: &mut Criterion) {
                     let mut misses = 0u64;
                     b.iter_batched_ref(
                         || {
-                            let mut rng = SmallRng::seed_from_u64(1);
+                            let mut rng = Xoshiro256PlusPlus::seed_from_u64(1);
                             let dist = Zipf::new(population, s).unwrap();
                             let cache = Cache::new(capacity);
                             for _ in 0..population as usize * 3 {
