@@ -27,12 +27,12 @@ equivalent = "1.0"
 foldhash = { optional = true, version = "0.2" }
 hashbrown = { version = "0.17", default-features = false, features = ["inline-more"] }
 parking_lot = { optional = true, version = "0.13" }
-shuttle = { version = "0.8", optional = true }
+shuttle = { version = "0.9", optional = true }
 
 [dev-dependencies]
-criterion = "0.7"
-rand = { version = "0.9", features = ["small_rng"] }
-rand_distr = "0.5"
+criterion = "0.8"
+rand = "0.10"
+rand_distr = "0.6"
 tokio = { version = "1", features = ["full"] }
 
 [[bench]]
